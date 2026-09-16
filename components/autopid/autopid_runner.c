@@ -77,8 +77,86 @@ void ap_runner_reset(void)
     s_rxheader_set = false;
 }
 
+/* ---- test-a-PID transcript: one line per exchange, "> cmd" / "< reply"
+   (2026-09-16: the UI shows what went out and what came back) ---------- */
+typedef struct
+{
+    char  *buf;                 /* NULL = no transcript wanted           */
+    size_t cap;
+    size_t len;
+} ap_tr_t;
+
+static void tr_add(ap_tr_t *t, char dir, const char *s)
+{
+    if (t == NULL || t->buf == NULL || t->cap == 0)
+    {
+        return;
+    }
+
+    /* replies are flattened to one line (a multi-frame answer arrives as
+       several lines) and capped so a long ISO-TP reply cannot eat the
+       whole buffer; the full raw reply travels separately */
+    char line[200];
+    size_t n = 0;
+
+    line[n++] = dir;
+    line[n++] = ' ';
+
+    const char *p = s;
+
+    for (; *p != '\0' && n < sizeof(line) - 5; p++)
+    {
+        if (*p == '\r' || *p == '\n')
+        {
+            if (line[n - 1] != ' ')
+            {
+                line[n++] = ' ';
+            }
+        }
+        else
+        {
+            line[n++] = *p;
+        }
+    }
+
+    while (n > 2 && line[n - 1] == ' ')
+    {
+        n--;
+    }
+
+    if (*p != '\0')
+    {
+        line[n++] = '.';
+        line[n++] = '.';
+        line[n++] = '.';
+    }
+
+    line[n++] = '\n';
+    line[n] = '\0';
+
+    if (t->len + n < t->cap)
+    {
+        memcpy(t->buf + t->len, line, n + 1);
+        t->len += n;
+    }
+}
+
+/** One chip exchange, logged into the transcript when one is wanted. */
+static esp_err_t request_tr(const char *cmd, char *resp, size_t resp_len,
+                            TickType_t timeout, ap_tr_t *tr)
+{
+    resp[0] = '\0';
+    tr_add(tr, '>', cmd);
+
+    esp_err_t err = ap_be()->request(cmd, resp, resp_len, timeout);
+
+    tr_add(tr, '<', (err != ESP_OK) ? "(no reply)"
+                    : (resp[0] == '\0') ? "(empty)" : resp);
+    return err;
+}
+
 /** Send a ';'-separated init string, one command at a time. */
-static void send_init(const char *init)
+static void send_init_tr(const char *init, ap_tr_t *tr)
 {
     char cmd[AP_INIT_LEN];
     size_t n = 0;
@@ -94,8 +172,8 @@ static void send_init(const char *init)
 
                 char resp[64];
 
-                (void)ap_be()->request(cmd, resp, sizeof(resp),
-                                       AP_INIT_TIMEOUT);
+                (void)request_tr(cmd, resp, sizeof(resp), AP_INIT_TIMEOUT,
+                                 tr);
                 n = 0;
             }
 
@@ -111,6 +189,11 @@ static void send_init(const char *init)
     }
 }
 
+static void send_init(const char *init)
+{
+    send_init_tr(init, NULL);
+}
+
 void ap_runner_restore_baseline(void)
 {
     /* the app's ATZ/ATS0/ATH1/ATSH/ATCRA are all still in effect: put
@@ -121,20 +204,34 @@ void ap_runner_restore_baseline(void)
     ap_runner_reset();
 }
 
-esp_err_t ap_runner_test(const char *init, const char *rxheader,
-                         const char *cmd, char *raw, size_t raw_len,
-                         int64_t *elapsed_us)
+esp_err_t ap_runner_test(const char *type_init, const char *init,
+                         const char *rxheader, const char *cmd, char *raw,
+                         size_t raw_len, int64_t *elapsed_us,
+                         char *transcript, size_t transcript_len)
 {
     /* ONE-SHOT through the same chip choreography as a real poll
-       (test-a-PID, §11). Caller must hold the poller paused
+       (test-a-PID, §11): the type init chain (what the poller sends when
+       it switches to this PID's type), the per-PID init, ATCRA, the
+       request, ATCRA off. Caller must hold the poller paused
        (ap_core_scan_pause) and this leaves the chip state dirty on
        purpose — unpausing runs ap_runner_reset(). httpd-task context
        (internal stack). */
     char resp[64];
+    ap_tr_t tr = { transcript, transcript_len, 0 };
+
+    if (transcript != NULL && transcript_len > 0)
+    {
+        transcript[0] = '\0';
+    }
+
+    if (type_init != NULL && type_init[0] != '\0')
+    {
+        send_init_tr(type_init, &tr);
+    }
 
     if (init != NULL && init[0] != '\0')
     {
-        send_init(init);
+        send_init_tr(init, &tr);
     }
 
     bool cra_set = false;
@@ -144,7 +241,7 @@ esp_err_t ap_runner_test(const char *init, const char *rxheader,
         char cra[AP_HDR_LEN + 8];
 
         snprintf(cra, sizeof(cra), "ATCRA%s", rxheader);
-        (void)ap_be()->request(cra, resp, sizeof(resp), AP_INIT_TIMEOUT);
+        (void)request_tr(cra, resp, sizeof(resp), AP_INIT_TIMEOUT, &tr);
         cra_set = true;
     }
 
@@ -154,7 +251,7 @@ esp_err_t ap_runner_test(const char *init, const char *rxheader,
     ap_init_sanitize(cmd_s); /* the tested cmd can be an AT command */
 
     int64_t t0 = esp_timer_get_time();
-    esp_err_t err = ap_be()->request(cmd_s, raw, raw_len, AP_REQ_TIMEOUT);
+    esp_err_t err = request_tr(cmd_s, raw, raw_len, AP_REQ_TIMEOUT, &tr);
 
     if (elapsed_us != NULL)
     {
@@ -163,11 +260,16 @@ esp_err_t ap_runner_test(const char *init, const char *rxheader,
 
     if (cra_set)
     {
-        (void)ap_be()->request("ATCRA", resp, sizeof(resp),
-                               AP_INIT_TIMEOUT);
+        (void)request_tr("ATCRA", resp, sizeof(resp), AP_INIT_TIMEOUT,
+                         &tr);
     }
 
     return err;
+}
+
+const char *ap_runner_type_init(int type)
+{
+    return (type >= 0 && type < 3) ? s_type_init[type] : "";
 }
 
 bool ap_runner_run(const ap_pid_t *pid, int pid_index,

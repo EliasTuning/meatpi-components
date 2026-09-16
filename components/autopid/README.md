@@ -263,6 +263,13 @@ MUST apply** (bench-verified against the published MEB profile):
 
 `POST /api/autopid/test` = try a profile PID before saving (same
 runner path: init chain, rxheader, expression — see HTTP_API §6e4).
+Since 2026-09-16 it takes `type` (prepend the std/custom/specific init
+chain, so the shot IS a poll of that PID) and `expressions[]` (decode
+the one reply with every parameter, answered as `values[]`), and returns
+a `transcript`: one `> cmd` / `< reply` line per exchange in the order
+sent (type init, PID init, ATCRA, request, ATCRA off), capped per line.
+The UI's Test modal shows it, so an init that parks the chip elsewhere
+or a negative response (`7F 22 31`) is visible instead of a bare NO DATA.
 `tools/testbench/obd/autopid_profile_bench.py <base>` PUTs every
 published profile through this conversion (→ `AUTOPID PROFILE PASS`)
 and polls a 24-parameter PID on the simulator — the regression for the

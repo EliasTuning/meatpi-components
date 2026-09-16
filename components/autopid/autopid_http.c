@@ -304,23 +304,33 @@ static esp_err_t std_table_handler(httpd_req_t *req)
    console can't reproduce init/rxheader/expression handling */
 static esp_err_t test_post_handler(httpd_req_t *req)
 {
-    char body[512];
-    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    /* PSRAM buffers: an "expressions" list for a 32-parameter DID does
+       not fit a 512 B stack body, and the transcript is ~1 KB. Handlers
+       run on the one httpd task, so plain statics are safe; the chip
+       itself is guarded by the job lock below. */
+    static char s_body[2048] EXT_RAM_BSS_ATTR;
+    static char s_raw[AP_RESP_MAX] EXT_RAM_BSS_ATTR;
+    static char s_tr[1536] EXT_RAM_BSS_ATTR;
+
+    int len = httpd_req_recv(req, s_body, sizeof(s_body) - 1);
 
     if (len <= 0)
     {
         return send_error(req, "400 Bad Request", "missing body");
     }
 
-    body[len] = '\0';
+    s_body[len] = '\0';
 
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = cJSON_Parse(s_body);
     const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(root, "cmd");
     const cJSON *init = cJSON_GetObjectItemCaseSensitive(root, "init");
     const cJSON *rxh = cJSON_GetObjectItemCaseSensitive(root,
                                                         "rxheader");
     const cJSON *expr = cJSON_GetObjectItemCaseSensitive(root,
                                                          "expression");
+    const cJSON *exprs = cJSON_GetObjectItemCaseSensitive(root,
+                                                          "expressions");
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
 
     if (!cJSON_IsString(cmd) || cmd->valuestring[0] == '\0' ||
         strlen(cmd->valuestring) >= AP_CMD_LEN ||
@@ -343,6 +353,46 @@ static esp_err_t test_post_handler(httpd_req_t *req)
         return send_error(req, "400 Bad Request", "bad expression");
     }
 
+    /* "expressions": decode the ONE reply with every parameter of the
+       PID (the UI used to fire one request per parameter) */
+    if (cJSON_IsArray(exprs))
+    {
+        if (cJSON_GetArraySize(exprs) > AP_PARAMS_PER)
+        {
+            cJSON_Delete(root);
+            return send_error(req, "400 Bad Request",
+                              "too many expressions");
+        }
+
+        const cJSON *e = NULL;
+
+        cJSON_ArrayForEach(e, exprs)
+        {
+            if (!cJSON_IsString(e) || e->valuestring[0] == '\0' ||
+                expression_parser_check(e->valuestring, NULL, eerr,
+                                        sizeof(eerr)) != ESP_OK)
+            {
+                cJSON_Delete(root);
+                return send_error(req, "400 Bad Request",
+                                  "bad expression in expressions[]");
+            }
+        }
+    }
+
+    /* "type": prepend the type init chain the poller sends when it
+       switches to this PID's type — the shot then IS a poll of that PID */
+    int tidx = -1;
+
+    if (cJSON_IsString(type))
+    {
+        const char *t = type->valuestring;
+
+        tidx = (strcmp(t, "std") == 0)      ? AP_PID_STD
+             : (strcmp(t, "custom") == 0)   ? AP_PID_CUSTOM
+             : (strcmp(t, "specific") == 0) ? AP_PID_SPECIFIC
+                                            : -1;
+    }
+
     if (!ap_core_job_acquire())  /* vs std scan / dtc jobs / other tests */
     {
         cJSON_Delete(root);
@@ -351,12 +401,12 @@ static esp_err_t test_post_handler(httpd_req_t *req)
 
     ap_core_scan_pause(true);   /* park the poller around the one-shot */
 
-    static char s_raw[AP_RESP_MAX] EXT_RAM_BSS_ATTR; /* busy-guarded   */
     int64_t elapsed_us = 0;
     esp_err_t err = ap_runner_test(
+        (tidx >= 0) ? ap_runner_type_init(tidx) : NULL,
         cJSON_IsString(init) ? init->valuestring : NULL,
         cJSON_IsString(rxh) ? rxh->valuestring : NULL, cmd->valuestring,
-        s_raw, sizeof(s_raw), &elapsed_us);
+        s_raw, sizeof(s_raw), &elapsed_us, s_tr, sizeof(s_tr));
 
     ap_core_scan_pause(false);
 
@@ -376,12 +426,15 @@ static esp_err_t test_post_handler(httpd_req_t *req)
     }
 
     cJSON_AddStringToObject(o, "raw", s_raw);
+    cJSON_AddStringToObject(o, "transcript", s_tr);
 
     uint8_t payload[AP_PAYLOAD_MAX];
     size_t n = 0;
+    bool have_payload =
+        err == ESP_OK &&
+        ap_resp_to_payload(s_raw, payload, sizeof(payload), &n) == ESP_OK;
 
-    if (err == ESP_OK &&
-        ap_resp_to_payload(s_raw, payload, sizeof(payload), &n) == ESP_OK)
+    if (have_payload)
     {
         char hex[AP_PAYLOAD_MAX * 3 + 1];
         size_t w = 0;
@@ -393,29 +446,53 @@ static esp_err_t test_post_handler(httpd_req_t *req)
         }
 
         cJSON_AddStringToObject(o, "payload", hex);
-
-        if (cJSON_IsString(expr) && expr->valuestring[0] != '\0')
-        {
-            float volts = 0;
-            double value = 0;
-
-            (void)battery_monitor_voltage(&volts);
-
-            if (expression_parser_eval(expr->valuestring, payload, n,
-                                       (double)volts, &value) == ESP_OK)
-            {
-                cJSON_AddNumberToObject(o, "value", value);
-            }
-            else
-            {
-                cJSON_AddStringToObject(o, "error",
-                                        "expression failed on payload");
-            }
-        }
     }
     else if (err == ESP_OK)
     {
         cJSON_AddStringToObject(o, "error", "no payload in response");
+    }
+
+    float volts = 0;
+
+    (void)battery_monitor_voltage(&volts);
+
+    if (have_payload && cJSON_IsString(expr) && expr->valuestring[0] != '\0')
+    {
+        double value = 0;
+
+        if (expression_parser_eval(expr->valuestring, payload, n,
+                                   (double)volts, &value) == ESP_OK)
+        {
+            cJSON_AddNumberToObject(o, "value", value);
+        }
+        else
+        {
+            cJSON_AddStringToObject(o, "error",
+                                    "expression failed on payload");
+        }
+    }
+
+    if (cJSON_IsArray(exprs))
+    {
+        /* one entry per expression, null where the reply gave nothing */
+        cJSON *vals = cJSON_AddArrayToObject(o, "values");
+        const cJSON *e = NULL;
+
+        cJSON_ArrayForEach(e, exprs)
+        {
+            double value = 0;
+
+            if (have_payload &&
+                expression_parser_eval(e->valuestring, payload, n,
+                                       (double)volts, &value) == ESP_OK)
+            {
+                cJSON_AddItemToArray(vals, cJSON_CreateNumber(value));
+            }
+            else
+            {
+                cJSON_AddItemToArray(vals, cJSON_CreateNull());
+            }
+        }
     }
 
     ap_core_job_release();

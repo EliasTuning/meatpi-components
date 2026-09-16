@@ -262,11 +262,19 @@ void ap_runner_restore_baseline(void);
 /* ATMA filter window (autopid_filter.c — poller-task context) */
 bool ap_runner_run_filter(const ap_filter_t *f, const ap_param_t *params);
 
-/** One-shot test-a-PID through the real runner choreography (§11).
- *  Caller pauses the poller around it (ap_core_scan_pause). */
-esp_err_t ap_runner_test(const char *init, const char *rxheader,
-                         const char *cmd, char *raw, size_t raw_len,
-                         int64_t *elapsed_us);
+/** One-shot test-a-PID through the real runner choreography (§11):
+ *  type init chain, per-PID init, ATCRA, request, ATCRA off — exactly
+ *  what a poll of that PID sends. Caller pauses the poller around it
+ *  (ap_core_scan_pause). `transcript` (may be NULL) receives one line
+ *  per exchange, "> cmd" then "< reply", so the UI can show what went
+ *  out and what came back (2026-09-16). */
+esp_err_t ap_runner_test(const char *type_init, const char *init,
+                         const char *rxheader, const char *cmd, char *raw,
+                         size_t raw_len, int64_t *elapsed_us,
+                         char *transcript, size_t transcript_len);
+/** The init chain the poller sends when it switches to this PID type
+ *  (what autopid_settings composed from the protocol + *_init). */
+const char *ap_runner_type_init(int type);
 
 /* standard-PID scan (autopid_std.c, target half) */
 esp_err_t autopid_std_scan_start(void);     /* INVALID_STATE if running  */
