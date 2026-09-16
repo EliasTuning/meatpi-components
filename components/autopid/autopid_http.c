@@ -100,6 +100,7 @@ static esp_err_t autopid_get_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(stats, "running", st.running);
     cJSON_AddBoolToObject(stats, "paused_voltage", st.paused_voltage);
     cJSON_AddBoolToObject(stats, "paused_client", st.paused_client);
+    cJSON_AddBoolToObject(stats, "paused_diag", st.paused_diag);
     cJSON_AddNumberToObject(stats, "polls_ok", st.polls_ok);
     cJSON_AddNumberToObject(stats, "polls_failed", st.polls_failed);
     cJSON_AddNumberToObject(stats, "pids", st.pids_loaded);

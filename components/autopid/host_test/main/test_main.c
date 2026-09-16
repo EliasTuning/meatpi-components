@@ -875,6 +875,25 @@ void test_init_sanitize(void)
     ap_init_sanitize(buf);
     TEST_ASSERT_EQUAL_STRING("ATZ;ATTP6;ATM0;ATSH7DF;ATTP7", buf);
 
+    /* 2026-09-16: commands with no RAM twin are refused at config parse
+       (ATPP re-baud = a bricked link), the rewrite still applies */
+    static ap_config_t cfg;
+    char err[96] = "";
+    const char *bad =
+        "{\"pids\":[{\"name\":\"x\",\"cmd\":\"0105\",\"init\":\"ATPP 0C SV 23\","
+        "\"parameters\":[{\"name\":\"t\",\"expression\":\"B2\"}]}]}";
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                      ap_config_parse(bad, &cfg, err, sizeof(err)));
+    TEST_ASSERT_TRUE(strstr(err, "EEPROM") != NULL);
+
+    const char *ok =
+        "{\"pids\":[{\"name\":\"x\",\"cmd\":\"0105\",\"init\":\"ATSP6;ATM1\","
+        "\"parameters\":[{\"name\":\"t\",\"expression\":\"B2\"}]}]}";
+
+    TEST_ASSERT_EQUAL(ESP_OK, ap_config_parse(ok, &cfg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("ATTP6;ATM0", cfg.pids[0].init);
+
     /* the Renault Zoe profile init, verbatim */
     strcpy(buf, "ATE0;ATH1;ATSP7;ATS0;ATM0;ATAT1;ATFCSM1;ATCP18;");
     ap_init_sanitize(buf);

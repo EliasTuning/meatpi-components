@@ -308,7 +308,9 @@ esp_err_t ap_config_parse(const char *json, ap_config_t *cfg, char *err,
  *  (memory-on would make the chip store every subsequent protocol
  *  change). Init strings replay on every type/PID transition, so
  *  letting either through would wear the chip's EEPROM out (legacy
- *  semantics). PURE. */
+ *  semantics). PURE. Since 2026-09-16 a thin wrapper over the chip
+ *  driver's guard (obd_chip_guard.h), which also names the commands
+ *  with no RAM twin (ATPP/ATSD/ATCV/STWBR): config parse refuses those. */
 void ap_init_sanitize(char *str);
 
 /* ---- pure: ELM response text -> payload bytes (autopid_resp.c) ------------

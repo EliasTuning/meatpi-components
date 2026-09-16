@@ -122,6 +122,8 @@ typedef struct
     bool     running;        /* poller up and polling (not paused)     */
     bool     paused_voltage; /* pause_below_v engaged                  */
     bool     paused_client;  /* yielding to an external ELM app        */
+    bool     paused_diag;    /* a diagnostic tool holds the bus (the   */
+                             /* UDS Tool / J2534 "exclusive" option)   */
 } autopid_stats_t;
 
 esp_err_t autopid_stats(autopid_stats_t *out);

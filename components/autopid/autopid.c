@@ -53,6 +53,7 @@
 
 #include "expression_parser.h"
 
+#include "obd_gate.h"
 #include "autopid_private.h"
 #include "autopid_transport.h"
 
@@ -95,6 +96,7 @@ static bool s_enabled;
 static volatile bool s_paused_voltage;
 static volatile bool s_paused_client;     /* an app is driving the chip */
 static volatile bool s_scan_pause;        /* std scan owns the chip     */
+static volatile bool s_paused_diag;       /* a diagnostic tool holds the bus (obd_gate) */
 static QueueHandle_t s_batt_q;
 static int           s_batt_watch = -1;
 static autopid_stats_t s_stats;
@@ -178,17 +180,50 @@ static void poller_task(void *arg)
             }
         }
 
+        /* an ESP-side diagnostic tool (the UDS Tool, the J2534 PassThru
+         * server) with its "exclusive" option on holds the bus for itself
+         * (obd_gate's diagnostics hold): stay off the chip — polls AND DTC
+         * scans — and acknowledge every loop so the tool can wait for us
+         * to be off the bus before its first request. */
+        bool diag = obd_gate_diag_held();
+
+        if (diag != s_paused_diag)
+        {
+            s_paused_diag = diag;
+
+            if (diag)
+            {
+                ESP_LOGI(TAG, "paused: a diagnostic tool holds the bus "
+                              "(UDS Tool / J2534 exclusive)");
+            }
+            else
+            {
+                ESP_LOGI(TAG, "resumed: the diagnostic tool released the bus");
+
+                /* the UDS chip transport re-addressed the chip (ATSH/
+                   ATCRA/ATST): back to our baseline before polling */
+                if (s_enabled && !s_paused_voltage && !s_scan_pause &&
+                    !s_paused_client)
+                {
+                    ap_runner_restore_baseline();
+                }
+            }
+        }
+
+        obd_gate_diag_ack(diag);
+
         /* periodic DTC scan due-check — runs every iteration, incl. the
          * idle branch, so DTC works with polling disabled (dtc_enabled
          * without enabled; TASK_dtc.md §5). Voltage pause gates it: a
          * weak battery is no time for bus traffic; the client pause too. */
-        if (!s_paused_voltage && !s_scan_pause && !s_paused_client)
+        if (!s_paused_voltage && !s_scan_pause && !s_paused_client &&
+            !s_paused_diag)
         {
             ap_dtc_periodic_check();
         }
 
         if (!s_enabled || s_paused_voltage || s_scan_pause ||
-            s_paused_client)
+            s_paused_client || s_paused_diag)
         {
             s_stats.running = false;
             dev_status_manager_set(DEV_STATUS_BIT_AUTOPID_IDLE);
@@ -666,6 +701,7 @@ esp_err_t autopid_stats(autopid_stats_t *out)
     *out = s_stats;
     out->paused_voltage = s_paused_voltage;
     out->paused_client = s_paused_client;
+    out->paused_diag = s_paused_diag;
     return ESP_OK;
 }
 

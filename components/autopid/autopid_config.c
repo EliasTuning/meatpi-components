@@ -40,6 +40,7 @@
 #include "cJSON.h"
 
 #include "expression_parser.h"
+#include "obd_chip_guard.h" /* pure: shared with the host test build */
 
 #ifndef AUTOPID_HOST_TEST
 #include "esp_heap_caps.h"
@@ -168,69 +169,13 @@ static bool get_bool(const cJSON *obj, const char *key, bool dflt)
 
 void ap_init_sanitize(char *str)
 {
-    if (str == NULL)
+    /* the chip driver's pure EEPROM guard (obd_chip_guard.h, 2026-09-16)
+       does the ATSP->ATTP / ATM1->ATM0 rewrite for every requester; the
+       refused set (ATPP/ATSD/ATCV/STWBR) is rejected at config parse
+       (below) and by the driver at send time */
+    if (str != NULL)
     {
-        return;
-    }
-
-    for (size_t i = 0; str[i] != '\0'; i++)
-    {
-        if (tolower((unsigned char)str[i]) != 'a' ||
-            tolower((unsigned char)str[i + 1]) != 't')
-        {
-            continue;
-        }
-
-        size_t j = i + 2;
-
-        while (str[j] != '\0' && isspace((unsigned char)str[j]))
-        {
-            j++;
-        }
-
-        size_t k = j + 1;
-
-        if (tolower((unsigned char)str[j]) == 's')
-        {
-            while (str[k] != '\0' && isspace((unsigned char)str[k]))
-            {
-                k++;
-            }
-
-            if (tolower((unsigned char)str[k]) != 'p')
-            {
-                continue;
-            }
-
-            /* ATSP -> ATTP, canonical (any spacing in-between preserved) */
-            str[i] = 'A';
-            str[i + 1] = 'T';
-            str[j] = 'T';
-            str[k] = 'P';
-
-            i = k;
-        }
-        else if (tolower((unsigned char)str[j]) == 'm')
-        {
-            while (str[k] != '\0' && isspace((unsigned char)str[k]))
-            {
-                k++;
-            }
-
-            /* bare digit only: ATMA/ATMR/ATMT are monitors, not memory */
-            if (str[k] != '1')
-            {
-                continue;
-            }
-
-            /* ATM1 (memory on) -> ATM0, canonical */
-            str[i] = 'A';
-            str[i + 1] = 'T';
-            str[j] = 'M';
-            str[k] = '0';
-
-            i = k;
-        }
+        (void)obd_chip_guard_cmd(str, strlen(str));
     }
 }
 
@@ -402,6 +347,16 @@ esp_err_t ap_config_parse(const char *json, ap_config_t *cfg, char *err,
                                        commands — spare the EEPROM here
                                        too, not just in init strings */
         ap_init_sanitize(pid->init);
+
+        if (obd_chip_guard_check(pid->cmd, strlen(pid->cmd)) ==
+                OBD_GUARD_BLOCKED ||
+            obd_chip_guard_check(pid->init, strlen(pid->init)) ==
+                OBD_GUARD_BLOCKED)
+        {
+            cfg_err(err, err_len, "pid %s%d: cmd/init would write the "
+                    "chip's EEPROM (ATPP/ATSD/ATCV/STWBR)", "", cfg->n_pids);
+            goto out;
+        }
         copy_str(pid->rxheader, sizeof(pid->rxheader), item, "rxheader");
         copy_str(group, sizeof(group), item, "group");
         copy_str(type, sizeof(type), item, "type");

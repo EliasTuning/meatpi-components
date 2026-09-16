@@ -132,10 +132,11 @@ static int cmd_autopid(int argc, char **argv)
     autopid_stats_t st;
 
     autopid_stats(&st);
-    cmdline_printf("AutoPID: %s%s%s\n",
+    cmdline_printf("AutoPID: %s%s%s%s\n",
                    st.running ? "running" : "idle",
                    st.paused_voltage ? " (voltage pause)" : "",
-                   st.paused_client ? " (yielding to an OBD app)" : "");
+                   st.paused_client ? " (yielding to an OBD app)" : "",
+                   st.paused_diag ? " (paused for a diagnostic tool)" : "");
     cmdline_printf("Tables: %lu pids, %lu filters, %lu params, %lu groups\n",
                    (unsigned long)st.pids_loaded,
                    (unsigned long)st.filters_loaded,

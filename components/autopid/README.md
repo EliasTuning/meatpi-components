@@ -29,7 +29,11 @@ Decisions log there is authoritative; the big ones:
   Source of truth is `obd_chip_client_idle_ms()` via the transport's
   `client_idle_ms` hook (the bridge glue touches it on every app write);
   the pure predicate `ap_sched_client_hold()` is host-tested. Visible
-  as `stats.paused_client` in `/api/autopid`, `(yielding to an OBD app)`
+  as `stats.paused_client` in `/api/autopid`, `(yielding to an OBD app)`;
+  likewise `stats.paused_diag` / `(paused for a diagnostic tool)` while the
+  UDS Tool or J2534 holds the bus through their Exclusive bus option
+  (obd_gate's diagnostics hold, 2026-09-16: polls AND DTC scans pause, the
+  chip baseline is restored on resume)
   in the `autopid` console command and INFO lines `paused: external OBD
   client active` / `resumed: external OBD client idle`. On resume the
   poller first re-sends the protocol prelude (`ap_std_prelude()`:
@@ -95,7 +99,7 @@ alert-on-new-code, clear-when-detected, scheduled clear) and the Berry
 `dtc_scan()`/`dtc_clear()` bindings: [TASK_dtc.md](TASK_dtc.md) §7-9.
 DTC works with polling `enabled=false` (scans only need the OBD chip).
 
-**EEPROM guard (ATSP → ATTP, ATM1 → ATM0)**: every user-supplied chip
+**EEPROM guard (ATSP → ATTP, ATM1 → ATM0; since 2026-09-16 the chip driver's own guard, `obd_chip_guard.h`, which also REFUSES ATPP/ATSD/ATCV/STWBR: config parse rejects a PID whose `cmd`/`init` carries one)**: every user-supplied chip
 command — init strings (type inits, per-PID `init`, `dtc_init`) at
 send time, PID `cmd`/`init` fields at config parse, and the test-a-PID
 one-shot — is sanitized (case-insensitive, whitespace-tolerant —
