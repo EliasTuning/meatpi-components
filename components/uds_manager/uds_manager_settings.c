@@ -41,8 +41,10 @@ static const settings_field_t FIELDS[] =
     /* Exclusive bus (boot default; runtime switch on the UDS page / POST
      * /api/uds): while the tool is in use (a request, then 10 s of idle,
      * or an open session) the background pollers (autopid: PID polling +
-     * DTC scans) stay off the bus — obd_gate's diagnostics hold. */
-    SETTINGS_BOOL("exclusive", false),
+     * DTC scans) stay off the bus — obd_gate's diagnostics hold. ON by
+     * default (Ali 2026-09-16): a diagnostic session wants the bus to
+     * itself; turn off to keep AutoPID telemetry flowing meanwhile. */
+    SETTINGS_BOOL("exclusive", true),
     SETTINGS_BOOL("cli", true),
 };
 
@@ -52,6 +54,7 @@ static uds_config_t s_cfg =
     .p2_ms             = 250,
     .p2star_ms         = 5000,
     .tester_present_ms = 2000,
+    .exclusive         = true,
 };
 static bool s_configured;
 
@@ -83,8 +86,8 @@ static esp_err_t on_apply(const cJSON *settings)
     s_cfg.tester_present_ms = cJSON_IsNumber(v) ? (uint32_t)v->valueint
                                                 : 2000;
 
-    s_cfg.exclusive = cJSON_IsTrue(
-        cJSON_GetObjectItemCaseSensitive(settings, "exclusive"));
+    s_cfg.exclusive = !cJSON_IsFalse(
+        cJSON_GetObjectItemCaseSensitive(settings, "exclusive")); /* default on */
 
     if (!cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(settings, "cli")))
     {
