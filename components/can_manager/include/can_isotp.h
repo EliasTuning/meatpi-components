@@ -24,9 +24,13 @@
  * @file can_isotp.h
  * @brief ISO-TP (ISO 15765-2) session provider slot on the shared bus.
  *
- * can_manager owns the native-CAN bus but not an ISO-TP stack; an
- * add-on component pack registers one here (ext init phase, see
- * ext_manager.h). Consumers — uds_manager's "isotp" transport, the
+ * can_manager owns the native-CAN bus but not an ISO-TP stack; a provider
+ * registers one here: an add-on component pack at ext init (see
+ * ext_manager.h), else the public build's own can_isotp_esp (esp_isotp
+ * over this bus; main calls it right after ext_manager_init and it
+ * registers only when the slot is still empty — single writer). The
+ * provider decides how many sessions per rx id (can_isotp_esp: one).
+ * Consumers — uds_manager's "isotp" transport, the
  * J2534 ISO15765 channel — fetch the ops with can_isotp() and treat a
  * NULL return as "not available in this build" (they degrade with a
  * log line; UDS falls back to the obd_chip transport).
