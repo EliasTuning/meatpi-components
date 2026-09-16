@@ -77,6 +77,7 @@ typedef struct
     const char *language;        /**< "Berry 1.1.0"                         */
     bool        enabled;
     bool        allow_reflash;
+    bool        exclusive;     /* scripts hold the bus (autopid off) while at an ECU */
     uint32_t    max_runtime_ms;
 } se_doc_ctx_t;
 

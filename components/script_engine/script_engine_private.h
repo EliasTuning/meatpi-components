@@ -65,6 +65,12 @@ esp_err_t se_settings_register(void);
 bool     se_settings_enabled(void);        /* scripts may run at all         */
 uint32_t se_settings_max_runtime_ms(void); /* per-run budget (0 = unlimited) */
 bool     se_settings_allow_reflash(void);  /* UDS 0x34-37 + transfer_file     */
+bool     se_settings_exclusive(void);      /* scripts hold the bus (autopid off) */
+
+/* the exclusive-bus hold (script_engine_bind.c): taken at a script's first
+ * ECU access when the setting is on; the runner releases it after EVERY run
+ * next to se_obd_autorelease(). */
+void se_bus_hold_release(void);
 bool     se_settings_is_configured(void);  /* boot apply ran (standard §4.3) */
 
 /* Provided by the berry component's ESP port. */

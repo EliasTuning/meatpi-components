@@ -178,6 +178,7 @@ static void do_run(void)
     /* A script can never leak the OBD claim: normal end, error, and
      * kill all land here (tester-present disarmed, transport freed). */
     se_obd_autorelease();
+    se_bus_hold_release(); /* and the exclusive-bus hold, if it took one */
 
     berry_port_set_capture(NULL, 0);
 }

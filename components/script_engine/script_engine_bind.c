@@ -56,6 +56,7 @@
 #include "autopid.h"
 #include "can_manager.h"
 #include "event_manager.h"
+#include "obd_gate.h"
 #include "uds_manager.h"
 #include "uds_proto.h"
 
@@ -120,6 +121,39 @@ static int b_millis(bvm *vm)
     be_return(vm);
 }
 
+/* ---- the exclusive-bus hold ------------------------------------------------- */
+/* `exclusive` setting: a script's first ECU access asks the background
+ * pollers (autopid: PID polling + DTC scans) off the bus — obd_gate's
+ * diagnostics hold, refcounted against the UDS Tool's and J2534's own
+ * holds — and waits for their ack (autopid loops within 500 ms) so the
+ * first request lands on a quiet bus. Released by the runner after the
+ * run (se_bus_hold_release). Runs are serialized, plain statics suffice. */
+static const int s_bus_token;
+static bool s_bus_held;
+
+static void se_bus_hold(void)
+{
+    if (s_bus_held || !se_settings_exclusive())
+    {
+        return;
+    }
+
+    s_bus_held = true;
+    obd_gate_diag_hold(&s_bus_token, true);
+    (void)obd_gate_diag_wait_ack(700);
+}
+
+void se_bus_hold_release(void)
+{
+    if (!s_bus_held)
+    {
+        return;
+    }
+
+    s_bus_held = false;
+    obd_gate_diag_hold(&s_bus_token, false);
+}
+
 static int uds_common(bvm *vm, bool ext)
 {
     se_check_budget(vm);
@@ -148,6 +182,8 @@ static int uds_common(bvm *vm, bool ext)
     static EXT_RAM_BSS_ATTR uint8_t respb[512]; /* serialized; PSRAM */
     size_t respn = 0;
     uds_result_t res;
+
+    se_bus_hold(); /* exclusive setting: autopid off the bus, now */
 
     esp_err_t err = uds_request(&addr, reqb, reqn, respb, sizeof(respb),
                                 &respn, NULL, &res);
@@ -315,6 +351,7 @@ static int port_session_begin(const se_obd_addr_t *a)
     uds_addr_t addr = { .tx_id = a->tx_id, .rx_id = a->rx_id,
                         .ext_id = a->ext_id };
 
+    se_bus_hold();
     return (uds_session_begin(&addr) == ESP_OK) ? 0 : -1;
 }
 
@@ -332,6 +369,8 @@ static int port_request(const se_obd_addr_t *a,
     uds_addr_t addr = { .tx_id = a->tx_id, .rx_id = a->rx_id,
                         .ext_id = a->ext_id };
     uds_opts_t opts = { .p2_ms = timeout_ms };
+
+    se_bus_hold();
     uds_result_t res;
 
     esp_err_t err = uds_request(&addr, req, req_len, resp, resp_cap,
@@ -354,6 +393,7 @@ static int port_isotp_tx(const se_obd_addr_t *a,
     uds_addr_t addr = { .tx_id = a->tx_id, .rx_id = a->rx_id,
                         .ext_id = a->ext_id };
 
+    se_bus_hold();
     return (uds_isotp_tx(&addr, data, len, timeout_ms) == ESP_OK) ? 0 : -1;
 }
 
@@ -364,6 +404,7 @@ static int port_isotp_rx(const se_obd_addr_t *a,
     uds_addr_t addr = { .tx_id = a->tx_id, .rx_id = a->rx_id,
                         .ext_id = a->ext_id };
 
+    se_bus_hold();
     return (uds_isotp_rx(&addr, out, cap, out_len, timeout_ms) == ESP_OK)
                ? 0 : -1;
 }

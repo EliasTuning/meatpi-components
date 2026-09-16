@@ -12,7 +12,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     # Feature: the Berry VM (berry) with device bindings (uds/can/event/dtc).
-    PRIV_REQUIRES berry uds_manager can_manager event_manager filesystem
+    PRIV_REQUIRES berry uds_manager can_manager event_manager filesystem obd_gate
                   autopid
                   settings_manager log_manager esp_timer esp_mm
                   http_server_manager esp_http_server espressif__cjson

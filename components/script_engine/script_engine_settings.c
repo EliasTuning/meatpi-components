@@ -40,6 +40,12 @@ static const settings_field_t FIELDS[] =
      * default OFF: a script can diagnose freely but cannot reprogram an
      * ECU unless this is explicitly enabled. */
     SETTINGS_BOOL("allow_reflash", false),
+    /* Exclusive bus for scripts (Ali 2026-09-16, ON by default): from a
+     * script's first ECU access (uds/uds_ext, obd_claim, obd_request,
+     * obd_isotp_tx/rx) to the end of the run, the background pollers
+     * (autopid: PID polling + DTC scans) stay off the bus — obd_gate's
+     * diagnostics hold, independent of the UDS Tool page's switch. */
+    SETTINGS_BOOL("exclusive", true),
     SETTINGS_BOOL("cli", true),
 };
 
@@ -47,6 +53,7 @@ static const settings_field_t FIELDS[] =
 static bool s_configured;
 static bool s_enabled;
 static bool s_allow_reflash;
+static bool s_exclusive = true;
 static uint32_t s_max_runtime_ms = 10000;
 
 bool se_settings_enabled(void)
@@ -57,6 +64,11 @@ bool se_settings_enabled(void)
 bool se_settings_allow_reflash(void)
 {
     return s_allow_reflash;
+}
+
+bool se_settings_exclusive(void)
+{
+    return s_exclusive;
 }
 
 uint32_t se_settings_max_runtime_ms(void)
@@ -88,6 +100,8 @@ static esp_err_t on_apply(const cJSON *settings)
 
     s_allow_reflash = cJSON_IsTrue(
         cJSON_GetObjectItemCaseSensitive(settings, "allow_reflash"));
+    s_exclusive = !cJSON_IsFalse(
+        cJSON_GetObjectItemCaseSensitive(settings, "exclusive")); /* default on */
 
     if (!cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(settings, "cli")))
     {

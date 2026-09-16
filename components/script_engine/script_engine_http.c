@@ -300,6 +300,7 @@ static esp_err_t reference_handler(httpd_req_t *req)
         .language       = "Berry " BERRY_VERSION,
         .enabled        = se_settings_enabled(),
         .allow_reflash  = se_settings_allow_reflash(),
+        .exclusive      = se_settings_exclusive(),
         .max_runtime_ms = se_settings_max_runtime_ms(),
     };
 

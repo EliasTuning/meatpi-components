@@ -9,7 +9,10 @@ The bindings ARE the scripting API; there is no privileged path (design:
 
 Settings (`script_engine`, reboot-to-apply): `enabled` (default **off**),
 `max_runtime_ms` (100–120000, default 10 s), `allow_reflash` (default
-off — gates UDS 0x34–0x37 and `obd_transfer_file`), `cli`.
+off — gates UDS 0x34–0x37 and `obd_transfer_file`), `exclusive` (default
+**on**, 2026-09-16 — from a script's first ECU access to the end of the run
+AutoPID polling and DTC scans stay off the bus: obd_gate's diagnostics
+hold, independent of the UDS Tool's switch), `cli`.
 
 ## The engine describes itself (2026-09-07)
 

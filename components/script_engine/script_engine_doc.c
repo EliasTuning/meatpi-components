@@ -265,6 +265,7 @@ cJSON *se_doc_reference(const se_doc_ctx_t *ctx)
                             (ctx && ctx->language) ? ctx->language : "Berry");
     cJSON_AddBoolToObject(o, "enabled", ctx && ctx->enabled);
     cJSON_AddBoolToObject(o, "allow_reflash", ctx && ctx->allow_reflash);
+    cJSON_AddBoolToObject(o, "exclusive", ctx && ctx->exclusive);
 
     cJSON *lim = cJSON_AddObjectToObject(o, "limits");
 
