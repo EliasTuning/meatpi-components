@@ -43,7 +43,14 @@ extern "C" {
 #define AP_MAX_PIDS     512
 #define AP_MAX_FILTERS  128
 #define AP_MAX_PARAMS   2048   /* pooled across all PIDs + filters          */
-#define AP_PARAMS_PER   16     /* per PID/filter                            */
+#define AP_PARAMS_PER   256    /* per PID/filter — published vehicle
+                                  profiles decode up to 192 values from ONE
+                                  DID (Xpeng cell voltages; Hyundai/Kia BMS
+                                  DIDs carry 20–32), so 16 rejected every
+                                  Hyundai/Kia/Genesis/Xpeng profile
+                                  (2026-09-16). Sizes the poller's PSRAM
+                                  copy + the filter frame slots, never a
+                                  stack frame.                              */
 
 #define AP_NAME_LEN     32
 #define AP_CMD_LEN      24

@@ -370,6 +370,11 @@ green afterwards). What changed, and what to keep doing:
   labels `.corrupt` files; the flush-interval help explains the trade-off.
   Mock: `__mockState.loggerCorrupt` / `loggerSalvaged`.
 
+
+### PID lists on Automate > Parameters (2026-09-16)
+
+The three PID tables (Standard / Vehicle Specific / Custom) were a fixed-width spreadsheet of inline inputs: a hard 890-960 px grid that clipped the delete button even at 1440 px and hid half the columns behind an unsignposted scroll at the 1024 px phone layout, parameter sub-rows with no headers that did not line up with the PID columns, every single-value PID shown twice, group/init/cycle repeated on every row, thirteen primary Test buttons, and no live values. `pidTable()` now renders a list: one row per PID = enable switch (the firmware's `enabled`, default true), name + request (+ RX ID on std/custom), the live value(s) the poller holds, a ghost Test and delete (the Vehicle Specific list has the Your car picker right under its enable switch, ahead of the name + init it fills). Expanding a row (the `▸ n parameters` caret, `Expand all` / `Collapse all` in the toolbar) shows the details panel: group / cycle / PID init, then the parameter table WITH headers: per-parameter switch, name, expression (red border while empty), unit, live value, delete, `Add parameter`. Live values: `GET /api/autopid` every 2.5 s while the page is open, written into the cells in place (`liveCell()`), so typing is never interrupted; the toolbar counts `N PIDs · M parameters`, filters by name / request / parameter name, and shows an `Unsaved edits` chip until Apply; a rejected Apply prints the firmware's reason under the list as well as in the toast. Layout is CSS grid with `--pidcols` per list (no min-width), flex-wrapping under 860 px; phones at 1024 CSS px fit without horizontal scroll (verified with Playwright against the bench DUT at 1440 and 1024). Kept on purpose: std names/commands read-only, the live-apply model (Apply Configuration + the Submit-staged vehicle name/init), the `▸` caret text the probes key on. `probe_automate.mjs` covers the rows; the profile import is bench-proven by `tools/testbench/obd/autopid_profile_bench.py`.
+
 ## On-demand page chunks (2026-09-07)
 
 The main page must not grow (meatpi: "we cannot increase the size of the

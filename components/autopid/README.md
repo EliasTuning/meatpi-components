@@ -137,6 +137,16 @@ profile expressions work unchanged. **Filter expressions index the
 frame DATA (B0 = first data byte, no id echo)** — also the legacy
 frame-of-reference.
 
+Table bounds (`autopid_private.h`): 32 groups, 512 PIDs, 128 filters,
+2048 parameters pooled across the table and **256 parameters per PID
+or filter** (`AP_PARAMS_PER`, raised from 16 on 2026-09-16: the
+published Hyundai/Kia BMS DIDs decode 20–32 values from one reply and
+Xpeng's cell-voltage DID 192, so every such profile was rejected on
+import). A config over any bound is refused whole, naming the entry
+(`220105: more than 256 parameters`); nothing is clipped silently.
+The per-entry slice the poller copies per request lives in PSRAM
+(~60 KB), not on the task stack.
+
 ## Filters (ATMA windows)
 
 A scheduled filter entry opens a bounded monitor window: `ATH1` +
@@ -243,9 +253,20 @@ MUST apply** (bench-verified against the published MEB profile):
    chip there — if standard PIDs are polled too, give `std_init` a
    restoring prelude (`ATSP6;ATCRA;ATH0`) so each type transition
    re-establishes its world.
+3. **Parameter names must be unique across the whole table** (the
+   value cache and every API key on them; the firmware refuses the
+   table with `duplicate parameter name 'X'`). Profiles are community
+   data: three published Hyundai/Kia profiles label cell 158
+   `HV_C_V_168` twice (2026-09-16), so the importer renames a repeat
+   (`_2`, `_3` …, against the std/custom parameters already loaded)
+   and tells the user instead of failing the import.
 
 `POST /api/autopid/test` = try a profile PID before saving (same
 runner path: init chain, rxheader, expression — see HTTP_API §6e4).
+`tools/testbench/obd/autopid_profile_bench.py <base>` PUTs every
+published profile through this conversion (→ `AUTOPID PROFILE PASS`)
+and polls a 24-parameter PID on the simulator — the regression for the
+16-parameter cap and the duplicate-name typo.
 
 ## Tests
 

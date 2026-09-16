@@ -1854,6 +1854,55 @@ void test_config_parse_mux_param(void)
     TEST_ASSERT_TRUE(strstr(err, "mux") != NULL);
 }
 
+/* one PID whose reply decodes into n parameters (c0..c<n-1>) */
+static void build_wide_pid_json(char *out, size_t cap, int n)
+{
+    size_t off = (size_t)snprintf(out, cap,
+                                  "{\"pids\":[{\"name\":\"bms\","
+                                  "\"cmd\":\"220102\",\"parameters\":[");
+
+    for (int i = 0; i < n; i++)
+    {
+        off += (size_t)snprintf(out + off, cap - off,
+                                "%s{\"name\":\"c%d\",\"expression\":\"B%d\"}",
+                                i ? "," : "", i, i % 60);
+    }
+
+    snprintf(out + off, cap - off, "]}]}");
+}
+
+void test_config_parse_wide_pid(void)
+{
+    /* REGRESSION (2026-09-16): the published Hyundai/Kia BMS DIDs decode
+       20–32 values from ONE reply and Xpeng's cell-voltage DID 192; the
+       old per-PID cap of 16 rejected every such profile on import with
+       "220105: more than 16 parameters". */
+    static ap_config_t cfg;          /* ~1 MB: static, never on the stack */
+    static char json[16384];
+    char err[96] = "";
+
+    /* Ioniq5/6 220102: 32 parameters parse into one contiguous slice */
+    build_wide_pid_json(json, sizeof(json), 32);
+    TEST_ASSERT_EQUAL(ESP_OK, ap_config_parse(json, &cfg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL(1, cfg.n_pids);
+    TEST_ASSERT_EQUAL(32, cfg.pids[0].param_count);
+    TEST_ASSERT_EQUAL(32, cfg.n_params);
+    TEST_ASSERT_EQUAL(0, cfg.pids[0].param_start);
+    TEST_ASSERT_EQUAL_STRING("c31", cfg.params[31].name);
+
+    /* the widest published PID (Xpeng 221122) fits */
+    build_wide_pid_json(json, sizeof(json), 192);
+    TEST_ASSERT_EQUAL(ESP_OK, ap_config_parse(json, &cfg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL(192, cfg.pids[0].param_count);
+
+    /* the cap itself still exists and is reported, not silently clipped */
+    build_wide_pid_json(json, sizeof(json), AP_PARAMS_PER + 1);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                      ap_config_parse(json, &cfg, err, sizeof(err)));
+    TEST_ASSERT_TRUE(strstr(err, "more than") != NULL);
+    TEST_ASSERT_EQUAL(0, cfg.n_pids); /* tables wiped on failure */
+}
+
 /* ---- yield-to-app window (legacy DEV_AUTOPID_ELM327_APP_BIT parity) ---------- */
 
 static void test_client_hold_window(void)
@@ -1910,6 +1959,7 @@ void app_main(void)
     RUN_TEST(test_init_sanitize);
     RUN_TEST(test_config_parse_sanitizes_cmd_and_init);
     RUN_TEST(test_config_parse_mux_param);
+    RUN_TEST(test_config_parse_wide_pid);
 
     RUN_TEST(test_dtc_format_all_letters);
     RUN_TEST(test_dtc_unformat_roundtrip_and_rejects);

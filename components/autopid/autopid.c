@@ -66,6 +66,10 @@ static const char *TAG = "autopid";
 
 static ap_config_t s_cfg EXT_RAM_BSS_ATTR;
 static ap_sched_t  s_sched EXT_RAM_BSS_ATTR;
+/* the due entry's parameter slice, copied under s_lock and consumed by
+   the poller task alone — PSRAM, not a stack frame: at AP_PARAMS_PER
+   256 the slice is ~60 KB, larger than the whole task stack */
+static ap_param_t  s_params_copy[AP_PARAMS_PER] EXT_RAM_BSS_ATTR;
 
 static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf;   /* internal: FreeRTOS object */
@@ -200,7 +204,7 @@ static void poller_task(void *arg)
         int i = ap_sched_next(&s_sched, &s_cfg, &due);
         ap_pid_t pid_copy;
         ap_filter_t flt_copy;
-        ap_param_t params_copy[AP_PARAMS_PER];
+        ap_param_t *params_copy = s_params_copy;
         bool is_pid = false, is_filter = false;
 
         if (i >= 0 && due <= now && i < s_cfg.n_pids)
