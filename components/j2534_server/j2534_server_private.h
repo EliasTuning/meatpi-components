@@ -38,6 +38,7 @@ typedef struct
     bool     enabled;
     bool     allow_reflash;    /* ECU-flashing gate (mirrors the setting) */
     bool     allow_lan;        /* accept on STA / USB-eth uplinks too */
+    bool     exclusive;        /* boot default: pause autopid while attached */
     uint16_t port;
 } j2534_config_t;
 

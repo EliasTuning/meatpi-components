@@ -53,6 +53,12 @@ static const settings_field_t FIELDS[] =
      * not reachable across a shared network. Set true only if you
      * understand that exposes the port to the whole LAN. */
     SETTINGS_BOOL("allow_lan", false),
+    /* Exclusive bus (boot default; runtime switch on the J2534 page /
+     * POST /api/j2534). While a tester is attached the background pollers
+     * (autopid: PID polling + DTC scans) stay off the bus — obd_gate's
+     * diagnostics hold — so the tool's conversations never interleave
+     * with ours. Off by default: telemetry keeps flowing during a scan. */
+    SETTINGS_BOOL("exclusive", false),
     SETTINGS_BOOL("cli", true),
 };
 
@@ -86,6 +92,8 @@ static esp_err_t on_apply(const cJSON *settings)
 
     s_cfg.allow_lan = cJSON_IsTrue(
         cJSON_GetObjectItemCaseSensitive(settings, "allow_lan"));
+    s_cfg.exclusive = cJSON_IsTrue(
+        cJSON_GetObjectItemCaseSensitive(settings, "exclusive"));
 
     if (!cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(settings, "cli")))
     {

@@ -49,6 +49,8 @@ static int cmd_j2534(int argc, char **argv)
     cmdline_printf("  tester      : %s\n",
                    st.client_connected ? "connected" : "-");
     cmdline_printf("  device_open : %s\n", st.device_open ? "yes" : "no");
+    cmdline_printf("  exclusive   : %s%s\n", st.exclusive ? "yes" : "no",
+                   st.autopid_paused ? " (autopid paused)" : "");
     cmdline_printf("  channels    : %u\n", st.channel_count);
     cmdline_printf("  frames rx/tx: %lu / %lu\n",
                    (unsigned long)st.frames_rx,

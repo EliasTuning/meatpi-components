@@ -58,6 +58,8 @@ static esp_err_t status_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(o, "frames_tx", st.frames_tx);
     cJSON_AddBoolToObject(o, "allow_reflash", st.allow_reflash);
     cJSON_AddBoolToObject(o, "allow_lan", st.allow_lan);
+    cJSON_AddBoolToObject(o, "exclusive", st.exclusive);
+    cJSON_AddBoolToObject(o, "autopid_paused", st.autopid_paused);
     cJSON_AddStringToObject(o, "phase", "2 (CAN + ISO15765 channels)");
 
     char *s = cJSON_PrintUnformatted(o);
@@ -75,12 +77,47 @@ static esp_err_t status_handler(httpd_req_t *req)
     return r;
 }
 
+/* POST /api/j2534 {"exclusive":bool} — the runtime switch (boot default =
+ * the setting); answers with the status like GET */
+static esp_err_t control_handler(httpd_req_t *req)
+{
+    char body[128];
+    int n = (req->content_len > 0 && req->content_len < sizeof(body))
+                ? httpd_req_recv(req, body, sizeof(body) - 1) : 0;
+
+    if (n <= 0)
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body");
+        return ESP_FAIL;
+    }
+
+    body[n] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    const cJSON *v = (root != NULL)
+        ? cJSON_GetObjectItemCaseSensitive(root, "exclusive") : NULL;
+
+    if (!cJSON_IsBool(v))
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "expected {\"exclusive\":bool}");
+        return ESP_FAIL;
+    }
+
+    j2534_server_set_exclusive(cJSON_IsTrue(v));
+    cJSON_Delete(root);
+    return status_handler(req);
+}
+
 esp_err_t j2534_server_register_http(void)
 {
     static const httpd_uri_t URIS[] =
     {
         { .uri = "/api/j2534", .method = HTTP_GET,
           .handler = status_handler },
+        { .uri = "/api/j2534", .method = HTTP_POST,
+          .handler = control_handler },
     };
 
     esp_err_t err = http_server_manager_register_handlers(

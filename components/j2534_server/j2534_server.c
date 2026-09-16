@@ -36,6 +36,7 @@
 
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "obd_gate.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -112,6 +113,36 @@ static SemaphoreHandle_t s_session_lock;
 static StaticSemaphore_t s_session_lock_buf;
 
 static j2534_server_status_t s_status;
+
+/* the "exclusive" option: while a tester is attached, hold obd_gate's
+ * diagnostics hold so autopid (PID polling + DTC scans) stays off the bus
+ * and cannot interleave with the tool's conversations; runtime-
+ * switchable, boot default = the setting */
+static const int s_diag_token;
+static volatile bool s_exclusive;
+
+static void diag_hold(bool on)
+{
+    obd_gate_diag_hold(&s_diag_token, on);
+
+    if (on)
+    {
+        /* let the poller get off the bus (it loops within 500 ms) before
+           the tester's first frame */
+        (void)obd_gate_diag_wait_ack(700);
+    }
+}
+
+void j2534_server_set_exclusive(bool on)
+{
+    s_exclusive = on;
+    diag_hold(on && s_status.client_connected);
+}
+
+bool j2534_server_exclusive(void)
+{
+    return s_exclusive;
+}
 
 /* ---- helpers ---------------------------------------------------------- */
 
@@ -566,6 +597,11 @@ static void serve_client(int sock)
     s_client_sock = sock;                 /* the RX pump may now push */
     ESP_LOGI(TAG, "tester connected");
 
+    if (s_exclusive)
+    {
+        diag_hold(true);
+    }
+
     while (s_run)
     {
         uint8_t hdr[J2534_HDR_SIZE];
@@ -599,6 +635,7 @@ static void serve_client(int sock)
     s_status.client_connected = false;
     s_status.device_open = false;
     s_status.channel_count = 0;
+    diag_hold(false);
     ESP_LOGI(TAG, "tester disconnected");
     xSemaphoreGive(s_session_lock);
 }
@@ -790,6 +827,7 @@ esp_err_t j2534_server_start(void)
         return ESP_OK;
     }
 
+    s_exclusive = j2534_settings_config()->exclusive;
     s_run = true;
     s_task = xTaskCreateStatic(listener_task, "j2534", J2534_TASK_STACK,
                                NULL, J2534_TASK_PRIO, s_task_stack,
@@ -804,6 +842,7 @@ esp_err_t j2534_server_start(void)
 
 esp_err_t j2534_server_stop(void)
 {
+    diag_hold(false); /* a stopping server holds nothing */
     s_run = false;
     s_started = false;
     return ESP_OK;
@@ -823,5 +862,7 @@ esp_err_t j2534_server_status(j2534_server_status_t *out)
     s_status.allow_reflash = cfg->allow_reflash;
     s_status.allow_lan = cfg->allow_lan;
     *out = s_status;
+    out->exclusive = s_exclusive;
+    out->autopid_paused = obd_gate_diag_held() && obd_gate_diag_acked();
     return ESP_OK;
 }

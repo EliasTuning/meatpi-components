@@ -38,6 +38,7 @@
 
 #include "can_isotp.h"
 #include "can_manager.h"
+#include "obd_gate.h"
 #include "can_core.h"
 
 #include "j2534_server.h"   /* J2534_MAX_CHANNELS */
@@ -226,6 +227,7 @@ static void teardown(channel_t *c)
         can_isotp()->close(c->isotp);
         c->isotp_bound = false;
     }
+    obd_gate_release(c); /* idempotent: only if this channel holds it */
     memset(c, 0, sizeof(*c));
     c->can_sub = -1;
 }
@@ -361,10 +363,21 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
         {
             st = J2534_ERR_INVALID_MSG;
         }
-        else if (can_isotp()->send(c->isotp, msg->data,
-                                   msg->data_size, 1000) != ESP_OK)
+        else
         {
-            st = J2534_ERR_FAILED;
+            /* an ESP-side requester on the shared bus: hold the
+               conversation gate from the request until READ_MSGS
+               delivers the reply (or the hold self-expires) so the
+               MIC chip (autopid) does not interleave; fail-open
+               (obd_gate.h). Owner identity = the channel. */
+            obd_gate_acquire(c, OBD_GATE_WAIT_MS);
+
+            if (can_isotp()->send(c->isotp, msg->data,
+                                  msg->data_size, 1000) != ESP_OK)
+            {
+                obd_gate_release(c);
+                st = J2534_ERR_FAILED;
+            }
         }
     }
 
@@ -561,6 +574,7 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
             out->extra_data_index = 0;
             out->data_size = (uint32_t)n;
             got = true;
+            obd_gate_release(c); /* the reply is in: conversation over */
         }
     }
 

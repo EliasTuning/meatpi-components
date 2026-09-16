@@ -61,9 +61,18 @@ typedef struct {
     uint32_t frames_tx;          /* wire frames sent                     */
     bool     allow_reflash;      /* ECU-flashing gate open (unsafe)      */
     bool     allow_lan;          /* reachable on STA/USB-eth uplinks     */
+    bool     exclusive;          /* runtime: autopid off the bus while a  */
+                                 /* tester is attached (obd_gate hold)   */
+    bool     autopid_paused;     /* the pollers acknowledged the hold    */
 } j2534_server_status_t;
 
 esp_err_t j2534_server_status(j2534_server_status_t *out);
+
+/** Runtime "exclusive" (boot default = the `exclusive` setting): while a
+ *  tester is attached the background pollers (autopid) stay off the bus.
+ *  Applies at once, also to a tester already attached. */
+void j2534_server_set_exclusive(bool on);
+bool j2534_server_exclusive(void);
 
 esp_err_t j2534_server_register_http(void); /* GET /api/j2534 */
 
