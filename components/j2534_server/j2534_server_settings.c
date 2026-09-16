@@ -57,12 +57,13 @@ static const settings_field_t FIELDS[] =
      * POST /api/j2534). While a tester is attached the background pollers
      * (autopid: PID polling + DTC scans) stay off the bus — obd_gate's
      * diagnostics hold — so the tool's conversations never interleave
-     * with ours. Off by default: telemetry keeps flowing during a scan. */
-    SETTINGS_BOOL("exclusive", false),
+     * with ours. ON by default (Ali 2026-09-16): a connected tool wants the
+     * bus to itself; turn off to keep AutoPID telemetry flowing meanwhile. */
+    SETTINGS_BOOL("exclusive", true),
     SETTINGS_BOOL("cli", true),
 };
 
-static j2534_config_t s_cfg = { .port = 6809 };
+static j2534_config_t s_cfg = { .port = 6809, .exclusive = true };
 static bool s_configured;
 
 const j2534_config_t *j2534_settings_config(void)
@@ -92,8 +93,8 @@ static esp_err_t on_apply(const cJSON *settings)
 
     s_cfg.allow_lan = cJSON_IsTrue(
         cJSON_GetObjectItemCaseSensitive(settings, "allow_lan"));
-    s_cfg.exclusive = cJSON_IsTrue(
-        cJSON_GetObjectItemCaseSensitive(settings, "exclusive"));
+    s_cfg.exclusive = !cJSON_IsFalse(
+        cJSON_GetObjectItemCaseSensitive(settings, "exclusive")); /* default on */
 
     if (!cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(settings, "cli")))
     {

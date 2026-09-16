@@ -818,6 +818,8 @@ esp_err_t j2534_server_start(void)
     }
 
     s_started = true;
+    s_exclusive = cfg->exclusive; /* the runtime switch's boot default, shown
+                                     in the status even while disabled */
     s_status.enabled = cfg->enabled;
     s_status.port = cfg->port;
 
@@ -827,7 +829,6 @@ esp_err_t j2534_server_start(void)
         return ESP_OK;
     }
 
-    s_exclusive = j2534_settings_config()->exclusive;
     s_run = true;
     s_task = xTaskCreateStatic(listener_task, "j2534", J2534_TASK_STACK,
                                NULL, J2534_TASK_PRIO, s_task_stack,
