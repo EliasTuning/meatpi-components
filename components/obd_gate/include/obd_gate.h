@@ -90,6 +90,34 @@ void obd_gate_release(const void *owner);
 
 void obd_gate_get_stats(obd_gate_stats_t *out);
 
+/* ---- diagnostics exclusive hold -------------------------------------------
+ * A diagnostic tool (the UDS Tool, the J2534 PassThru server) with its
+ * "exclusive" option on holds this while it is in use; the background
+ * pollers (autopid: PID polling + DTC scans) stay off the bus meanwhile
+ * and acknowledge. Refcounted by owner; independent of the `enabled`
+ * setting above (a different policy: not who speaks next, but who may
+ * speak at all). */
+
+/** Hold (@p on) or release the bus for @p owner (a stable pointer). */
+void obd_gate_diag_hold(const void *owner, bool on);
+
+/** True while any tool holds it. */
+bool obd_gate_diag_held(void);
+
+/** How many tools hold it right now. */
+uint8_t obd_gate_diag_holders(void);
+
+/** The poller's side: report every loop whether it is off the bus. */
+void obd_gate_diag_ack(bool off_bus);
+
+/** True when a poller acknowledged the current hold. */
+bool obd_gate_diag_acked(void);
+
+/** Wait (polling) up to @p wait_ms for the poller's acknowledgement.
+ *  True when acknowledged — or when no poller ever reported (nothing
+ *  to wait for, e.g. autopid disabled). */
+bool obd_gate_diag_wait_ack(uint32_t wait_ms);
+
 /* Ready-made hooks for an ESP-side engine's gate callbacks: ctx
  * is the engine instance pointer (the per-engine owner identity). */
 void obd_gate_engine_acquire(void *ctx);

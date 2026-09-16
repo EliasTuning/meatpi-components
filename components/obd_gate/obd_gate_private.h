@@ -73,6 +73,33 @@ void og_core_force(og_core_t *g, const void *owner, int64_t now_ms,
 /** Release iff held by @p owner; no-op otherwise. */
 void og_core_release(og_core_t *g, const void *owner);
 
+/* ---- diagnostics hold (obd_gate_diag.c — host-tested) ---------------------
+ * An ESP-side diagnostic tool (the UDS Tool, the J2534 PassThru server)
+ * with its "exclusive" option on asks the background bus pollers (autopid:
+ * PID polling + DTC scans) to stay off the bus while it is in use.
+ * Refcounted by owner identity; the poller acknowledges once it is off
+ * the bus so a tool can wait for that before its first request. */
+#define OG_DIAG_MAX_HOLDERS 4
+
+typedef struct
+{
+    const void *holders[OG_DIAG_MAX_HOLDERS];
+    uint8_t     n_holders;
+    bool        acked;       /* the poller confirmed it is off the bus   */
+    bool        poller_seen; /* a poller ever reported (else no waiting) */
+    uint32_t    holds;
+    uint32_t    releases;
+    uint32_t    overflow;    /* a 5th holder refused                     */
+} og_diag_t;
+
+void og_diag_init(og_diag_t *d);
+
+/** Add (@p on) or remove @p owner. Idempotent per owner. Returns true
+ *  when the HELD state (any holder at all) changed. */
+bool og_diag_set(og_diag_t *d, const void *owner, bool on);
+
+bool og_diag_held(const og_diag_t *d);
+
 /* ---- settings (obd_gate_settings.c) ----------------------------------------- */
 
 /** Register the "obd_gate" descriptor with settings_manager. */

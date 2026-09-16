@@ -146,6 +146,96 @@ void obd_gate_get_stats(obd_gate_stats_t *out)
 
 /* ---- ESP-side engine hooks (ctx = the engine instance pointer) -------------- */
 
+/* ---- diagnostics hold -------------------------------------------------- */
+
+static og_diag_t s_diag;
+
+void obd_gate_diag_hold(const void *owner, bool on)
+{
+    bool changed;
+
+    portENTER_CRITICAL(&s_mux);
+    changed = og_diag_set(&s_diag, owner, on);
+    portEXIT_CRITICAL(&s_mux);
+
+    if (changed)
+    {
+        ESP_LOGI(TAG, "diagnostic hold %s: background pollers %s",
+                 on ? "ON" : "OFF", on ? "pause" : "resume");
+    }
+}
+
+bool obd_gate_diag_held(void)
+{
+    bool held;
+
+    portENTER_CRITICAL(&s_mux);
+    held = og_diag_held(&s_diag);
+    portEXIT_CRITICAL(&s_mux);
+    return held;
+}
+
+uint8_t obd_gate_diag_holders(void)
+{
+    uint8_t n;
+
+    portENTER_CRITICAL(&s_mux);
+    n = s_diag.n_holders;
+    portEXIT_CRITICAL(&s_mux);
+    return n;
+}
+
+void obd_gate_diag_ack(bool off_bus)
+{
+    portENTER_CRITICAL(&s_mux);
+    s_diag.poller_seen = true;
+    s_diag.acked = off_bus && s_diag.n_holders > 0;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+bool obd_gate_diag_acked(void)
+{
+    bool a;
+
+    portENTER_CRITICAL(&s_mux);
+    a = s_diag.acked;
+    portEXIT_CRITICAL(&s_mux);
+    return a;
+}
+
+bool obd_gate_diag_wait_ack(uint32_t wait_ms)
+{
+    int64_t start = now_ms();
+
+    for (;;)
+    {
+        bool acked, seen, held;
+
+        portENTER_CRITICAL(&s_mux);
+        acked = s_diag.acked;
+        seen = s_diag.poller_seen;
+        held = s_diag.n_holders > 0;
+        portEXIT_CRITICAL(&s_mux);
+
+        if (!held || !seen)
+        {
+            return !seen; /* nothing held, or nobody to wait for */
+        }
+
+        if (acked)
+        {
+            return true;
+        }
+
+        if (now_ms() - start >= (int64_t)wait_ms)
+        {
+            return false;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(OG_POLL_MS));
+    }
+}
+
 void obd_gate_engine_acquire(void *ctx)
 {
     (void)obd_gate_acquire(ctx, OBD_GATE_WAIT_MS);

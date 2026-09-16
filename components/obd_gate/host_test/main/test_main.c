@@ -171,6 +171,60 @@ void test_three_owners_serialize_pairwise(void)
     TEST_ASSERT_EQUAL_UINT32(3, g.acquires);
 }
 
+/* ---- the diagnostics hold (og_diag_*) --------------------------------- */
+
+void test_diag_hold_refcounts_by_owner(void)
+{
+    og_diag_t d;
+
+    og_diag_init(&d);
+    TEST_ASSERT_FALSE(og_diag_held(&d));
+    TEST_ASSERT_TRUE(og_diag_set(&d, &CHIP, true));   /* -> held        */
+    TEST_ASSERT_TRUE(og_diag_held(&d));
+    TEST_ASSERT_FALSE(og_diag_set(&d, &ELM0, true));  /* still held     */
+    TEST_ASSERT_FALSE(og_diag_set(&d, &CHIP, true));  /* idempotent     */
+    TEST_ASSERT_EQUAL(2, d.n_holders);
+    TEST_ASSERT_FALSE(og_diag_set(&d, &CHIP, false)); /* one remains    */
+    TEST_ASSERT_TRUE(og_diag_held(&d));
+    TEST_ASSERT_TRUE(og_diag_set(&d, &ELM0, false));  /* -> released    */
+    TEST_ASSERT_FALSE(og_diag_held(&d));
+    TEST_ASSERT_FALSE(og_diag_set(&d, &ELM1, false)); /* non-holder     */
+    TEST_ASSERT_EQUAL_UINT32(2, d.holds);
+    TEST_ASSERT_EQUAL_UINT32(2, d.releases);
+}
+
+void test_diag_ack_resets_when_last_holder_leaves(void)
+{
+    og_diag_t d;
+
+    og_diag_init(&d);
+    og_diag_set(&d, &CHIP, true);
+    og_diag_set(&d, &ELM0, true);
+    d.acked = true;
+    og_diag_set(&d, &CHIP, false);
+    TEST_ASSERT_TRUE(d.acked);   /* someone still holds: ack stands  */
+    og_diag_set(&d, &ELM0, false);
+    TEST_ASSERT_FALSE(d.acked);  /* nobody: the next hold re-waits  */
+}
+
+void test_diag_fifth_holder_refused(void)
+{
+    static const int O[OG_DIAG_MAX_HOLDERS + 1];
+    og_diag_t d;
+
+    og_diag_init(&d);
+
+    for (int i = 0; i < OG_DIAG_MAX_HOLDERS; i++)
+    {
+        og_diag_set(&d, &O[i], true);
+    }
+
+    TEST_ASSERT_FALSE(og_diag_set(&d, &O[OG_DIAG_MAX_HOLDERS], true));
+    TEST_ASSERT_EQUAL_UINT32(1, d.overflow);
+    TEST_ASSERT_EQUAL(OG_DIAG_MAX_HOLDERS, d.n_holders);
+    TEST_ASSERT_TRUE(og_diag_held(&d));
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -186,6 +240,9 @@ void app_main(void)
     RUN_TEST(test_reservation_expires_when_waiter_gives_up);
     RUN_TEST(test_expired_hold_still_honors_waiter);
     RUN_TEST(test_three_owners_serialize_pairwise);
+    RUN_TEST(test_diag_hold_refcounts_by_owner);
+    RUN_TEST(test_diag_ack_resets_when_last_holder_leaves);
+    RUN_TEST(test_diag_fifth_holder_refused);
 
     UNITY_END();
 }

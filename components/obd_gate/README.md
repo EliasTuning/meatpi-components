@@ -13,6 +13,22 @@ polling (a driving app + autopid = bad data, meatpi 2026-07-11).
 The gate serializes those conversations: ONE holder at a time, keyed by
 an opaque owner pointer (the chip, or one engine instance).
 
+## Why its own component (not files in obd_chip)
+
+Asked 2026-09-16. `obd_chip` is a **driver** (the MIC3624 over UART: the HAL
+end of the standard's `core <- services <- app` rule). The gate is **policy**
+over the one physical bus, arbitrating between that driver and requesters
+that never touch the chip: autopid's and the add-on pack's engines,
+uds_manager's native ISO-TP transport, the J2534 ISO15765 channel, the
+script engine's bindings. Policy inside the driver would make every
+native-CAN feature depend on the UART chip driver and would make a lower
+layer know about the higher ones - section 3 forbids both ("a lower layer
+never depends on a higher one"; "extract the shared part into a lower
+component"). The 2026-09-16 diagnostics hold showed the second reason
+concretely: autopid depends on uds_manager, so uds_manager pausing autopid
+directly would be a cycle - the gate is the lower component both point down
+at. Cost: four small files with their own host suite (14 tests).
+
 ## Semantics (fail-open by design)
 
 - `obd_gate_acquire(owner, wait_ms)` blocks (10 ms poll) while another
@@ -43,6 +59,23 @@ an opaque owner pointer (the chip, or one engine instance).
 - NOT yet gated: direct ISO-TP requesters (uds `isotp` transport,
   j2534 ISO15765 channels) — diagnostic tools, rarely concurrent with
   a driving app; they can adopt `obd_gate_acquire` later.
+
+## Diagnostics hold (the tools' "Exclusive bus" option, 2026-09-16)
+
+A second, independent policy in the same component: an ESP-side diagnostic
+tool (the UDS Tool, the J2534 PassThru server, a running script's ECU
+bindings) with its Exclusive bus switch
+on asks the background bus pollers (autopid: PID polling AND DTC scans) to
+stay off the bus while it is in use — not "who speaks next" (the gate above)
+but "who may speak at all". `obd_gate_diag_hold(owner, on)` is refcounted by
+owner identity (up to 4 holders; pure core `obd_gate_diag.c`, host-tested);
+autopid's poller calls `obd_gate_diag_held()` every loop, pauses, and
+acknowledges with `obd_gate_diag_ack(true)`; a tool waits for that ack
+(`obd_gate_diag_wait_ack`, up to 700 ms — autopid loops within 500 ms) before
+its first request, so the bus is really quiet. The ack resets when the last
+holder leaves. Independent of the `enabled` setting. Lives here because
+autopid depends on uds_manager (a direct call would be a dependency cycle)
+and both requesters already depend on this policy component.
 
 ## Settings (`obd_gate`, v1, reboot-to-apply)
 
