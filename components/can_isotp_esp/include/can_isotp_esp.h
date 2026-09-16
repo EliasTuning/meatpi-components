@@ -35,7 +35,7 @@
  * Consumers (uds_manager's "isotp" transport, the J2534 ISO15765 channel)
  * keep using can_isotp() and know nothing about this component. A build
  * that carries an add-on pack with its own provider wins the slot: main
- * calls can_isotp_esp_register() AFTER ext_manager_init and it registers
+ * calls can_isotp_esp_init() AFTER ext_manager_init and it registers
  * only when the slot is still empty.
  *
  * Limits (esp_isotp 0.1.1): the flow control THIS side sends as receiver
@@ -70,10 +70,14 @@ typedef struct
     uint32_t rx_oversize;    /**< recv() cap too small: consumed, NO_MEM   */
 } can_isotp_esp_stats_t;
 
-/** Register as the ISO-TP provider iff the slot is empty (call in main's
- *  init pass right after ext_manager_init). Idempotent; ESP_OK also when
- *  an add-on pack already provides ISO-TP (then this stands by). */
-esp_err_t can_isotp_esp_register(void);
+/** Lifecycle: init-only (standard section 3 - like obd_gate). Registers as
+ *  the ISO-TP provider iff the slot is empty (main's init pass, right after
+ *  ext_manager_init). Nothing to start: the task and queue come up at the
+ *  first open(); nothing to stop: sessions belong to the consumers, which
+ *  close them in their own stop() (uds_manager, j2534_server), and the ops
+ *  table must live forever (can_isotp.h). Idempotent; ESP_OK also when an
+ *  add-on pack already provides ISO-TP (then this stands by). */
+esp_err_t can_isotp_esp_init(void);
 
 /** True when THIS component is the registered provider. */
 bool can_isotp_esp_active(void);

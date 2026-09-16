@@ -10,6 +10,37 @@ J2534 ISO15765 channel at all (`TASK_isotp_public.md` §0).
 This component is the public provider: the vendored `esp_isotp` stack in its
 **externally-managed mode** over `can_manager`'s shared bus.
 
+## API (`include/can_isotp_esp.h`)
+
+- `esp_err_t can_isotp_esp_init(void)` - init-only lifecycle: registers the
+  `can_isotp_ops_t` iff the slot is empty (main, right after `ext_manager_init`);
+  nothing to start (task + queue come up at the first `open()`), nothing to
+  stop (sessions are the consumers', the ops table lives forever).
+- `bool can_isotp_esp_active(void)` - true when THIS component is the provider.
+- `void can_isotp_esp_get_stats(can_isotp_esp_stats_t *out)` - sessions open/peak,
+  opens/open_fails, frames_fed/orphan, pdus_tx/rx, tx_timeouts, rx_dropped,
+  rx_oversize (surfaced by `GET /api/uds` as `provider_stats`).
+- The provider itself is reached through `can_isotp()` (can_manager's slot):
+  open / close / send / recv per `can_isotp.h`.
+
+## Dependencies
+
+`PRIV_REQUIRES can_manager esp_isotp log_manager esp_timer`. Init order: after
+`can_manager_init` and `ext_manager_init` (a pack's provider wins the slot),
+before `uds_manager`/`j2534_server` start; `open()` needs the bus up
+(`can_manager_start`). No settings (the consumers carry the knobs).
+
+## Memory footprint
+
+- Static: task stack 4096 B PSRAM (`EXT_RAM_BSS_ATTR`; measured high-water
+  3296 B free after a J2534 reflash leg), frame queue 2048 B PSRAM (static
+  storage), TCB + queue control ~250 B internal, table/stats ~100 B internal.
+- Per session (heap, freed on close): esp_isotp tx+rx buffers 2 x 4128 B PSRAM
+  + its handle ~200 B internal + TX frame pool 16 x ~40 B internal, mailbox
+  4 x 4130 B PSRAM, three semaphores ~300 B internal - about 25 KB PSRAM +
+  1.2 KB internal per open session, 5 sessions max (estimated from the
+  allocation sizes; bench PSRAM min_free stayed 3.89 MB with a session open).
+
 ## Design
 
 ```
@@ -48,7 +79,7 @@ This component is the public provider: the vendored `esp_isotp` stack in its
   stack, static) and the frame queue (2 KB PSRAM, static); per session
   ~8.3 KB (esp_isotp tx/rx buffers, PSRAM) + 16.5 KB mailbox (PSRAM) + a
   few hundred bytes internal for the semaphores.
-- **Registration:** `can_isotp_esp_register()` is called by main right
+- **Registration:** `can_isotp_esp_init()` is called by main right
   after `ext_manager_init` and registers ONLY when `can_isotp()` is still
   NULL — a build carrying the add-on pack keeps the pack's provider (the
   slot is single-writer). It also registers the `esp_isotp` log tag at WARN

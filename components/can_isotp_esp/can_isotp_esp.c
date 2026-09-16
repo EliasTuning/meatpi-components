@@ -673,7 +673,7 @@ static esp_err_t isotp_recv(can_isotp_session_t s, uint8_t *buf, size_t cap,
 
 /* ---- registration ---------------------------------------------------------- */
 
-esp_err_t can_isotp_esp_register(void)
+esp_err_t can_isotp_esp_init(void)
 {
     static const log_descriptor_t LOG_DESC = { "can_isotp_esp", ESP_LOG_INFO };
     /* the vendored stack logs every send at INFO — keep it quiet unless
