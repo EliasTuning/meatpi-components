@@ -49,6 +49,12 @@ bool uds_is_pending(const uint8_t *resp, size_t len);
 /** true when resp is the positive response to request SID @p req_sid. */
 bool uds_is_positive_for(uint8_t req_sid, const uint8_t *resp, size_t len);
 
+/** true when resp answers request SID @p req_sid at all: its positive
+ *  response (sid + 0x40) or a negative response naming it (7F sid nrc).
+ *  Anything else is a stray from another requester on the shared bus
+ *  (autopid's `41 0C ..` landing in a UDS window, bench 2026-09-16). */
+bool uds_response_matches(uint8_t req_sid, const uint8_t *resp, size_t len);
+
 /** NRC byte of a negative response, or 0 if @p resp is not negative. */
 uint8_t uds_nrc_of(const uint8_t *resp, size_t len);
 

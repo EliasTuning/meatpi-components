@@ -28,6 +28,33 @@
 
 #include "obd_chip.h"
 
+/* Re-send the 8-command target setup only when needed: the address or
+ * p2 changed, the previous transaction failed, or anyone else wrote to
+ * the chip in between (autopid's polls, an app) — detected with the
+ * driver's tx_bytes counter, which only we moved otherwise (read while
+ * we still hold the chip). One request = one AT line in a steady UDS
+ * conversation (bench 2026-09-16: 8 round-trips -> 1).
+ */
+static uds_addr_t s_setup_addr;
+static uint32_t s_setup_p2_ms;
+static uint32_t s_setup_tx_bytes; /* the chip's tx_bytes after our setup */
+static bool s_setup_valid;
+
+static bool setup_still_valid(const uds_addr_t *addr, uint32_t p2_ms)
+{
+    obd_chip_stats_t st;
+
+    if (!s_setup_valid || obd_chip_get_stats(&st) != ESP_OK)
+    {
+        return false;
+    }
+
+    return s_setup_addr.tx_id == addr->tx_id &&
+           s_setup_addr.rx_id == addr->rx_id &&
+           s_setup_addr.ext_id == addr->ext_id &&
+           s_setup_p2_ms == p2_ms && st.tx_bytes == s_setup_tx_bytes;
+}
+
 static esp_err_t obd_req(const char *cmd, char *resp, size_t resp_len,
                          uint32_t timeout_ms)
 {
@@ -46,8 +73,40 @@ static esp_err_t obd_transceive(const uds_addr_t *addr,
                                 size_t *resp_len, uint32_t p2_ms,
                                 uint32_t p2star_ms, uint8_t *pending_out)
 {
-    return uds_at_transceive(obd_req, addr, req, req_len, resp, resp_cap,
-                             resp_len, p2_ms, p2star_ms, pending_out);
+    /* hold the chip for the whole AT transaction (7 setup commands + the
+       request): autopid's polls wait at their claim instead of landing
+       between our commands (bench 2026-09-16: with polling, 1 of 3
+       requests survived; paused, 5 of 5) */
+    esp_err_t err = obd_chip_txn_begin(pdMS_TO_TICKS(2000));
+
+    if (err != ESP_OK)
+    {
+        return err; /* chip busy (monitor/update) or another transaction */
+    }
+
+    bool skip = setup_still_valid(addr, p2_ms);
+
+    err = uds_at_transceive_ex(obd_req, addr, req, req_len, resp, resp_cap,
+                               resp_len, p2_ms, p2star_ms, pending_out,
+                               skip);
+
+    obd_chip_stats_t st;
+
+    if (err == ESP_OK && obd_chip_get_stats(&st) == ESP_OK)
+    {
+        /* still holding the chip: this tx_bytes is ours alone */
+        s_setup_addr = *addr;
+        s_setup_p2_ms = p2_ms;
+        s_setup_tx_bytes = st.tx_bytes;
+        s_setup_valid = true;
+    }
+    else
+    {
+        s_setup_valid = false; /* re-address before the next one */
+    }
+
+    obd_chip_txn_end();
+    return err;
 }
 
 const uds_transport_t *uds_transport_obd(void)

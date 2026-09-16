@@ -36,7 +36,9 @@
 #include "freertos/semphr.h"
 
 #include "can_isotp.h"
+#include "can_isotp_esp.h"
 #include "can_manager.h"
+#include "obd_gate.h"
 #include "log_manager.h"
 
 #include "uds_manager_private.h"
@@ -57,6 +59,22 @@ static StaticSemaphore_t s_claim_buf;
 static esp_timer_handle_t s_tp_timer;
 static uds_addr_t s_tp_addr;
 static bool s_session;
+
+/* the "exclusive" option (obd_gate's diagnostics hold): asserted on use,
+ * released UDS_EXCLUSIVE_IDLE_MS after the last request unless a session
+ * (tester present) is open; runtime-switchable, boot default = setting */
+static volatile bool s_exclusive;
+static volatile bool s_holding;
+static const int s_diag_token;
+static esp_timer_handle_t s_excl_timer;
+
+/* the last transaction, for GET /api/uds */
+static int64_t s_last_ts_us;
+static esp_err_t s_last_err;
+static uint32_t s_last_tx_id;
+static uint32_t s_last_rx_id;
+static uint8_t s_last_req_sid;
+static uds_result_t s_last_res;
 
 /* ---- backend resolution ---------------------------------------------------- */
 
@@ -124,10 +142,38 @@ static esp_err_t do_transaction(const uds_transport_t *t,
     uint8_t pending = 0;
     esp_err_t err;
 
-    /* the transport delivers the FINAL response (consuming 0x78
-     * responsePending frames itself, with p2star per frame) */
-    err = t->transceive(addr, req, req_len, resp, resp_cap, resp_len,
-                        p2, p2star, &pending);
+    /* the shared bus has a second requester (autopid through the MIC): a
+       reply that does not belong to OUR SID is a stray — a frame left on
+       the bus by another conversation that landed in our window (bench
+       2026-09-16: `41 0C ..` for `3E 00`, `62 01 02` for a `22 01 01`).
+       The transaction hold stops NEW interleaving; a stray from a frame
+       already in flight when we grabbed the chip is retried within p2*,
+       with a fresh window each time. */
+    for (int attempt = 0; ; attempt++)
+    {
+        /* the transport delivers the FINAL response (consuming 0x78
+         * responsePending frames itself, with p2star per frame) */
+        err = t->transceive(addr, req, req_len, resp, resp_cap, resp_len,
+                            p2, p2star, &pending);
+
+        if (err != ESP_OK || req_len < 1 ||
+            uds_response_matches(req[0], resp, *resp_len))
+        {
+            break; /* our answer, or a hard transport error */
+        }
+
+        int64_t elapsed_us = esp_timer_get_time() - t0;
+
+        ESP_LOGW(TAG, "stray response %02X.. to request %02X (attempt %d, "
+                      "another requester on the bus?)",
+                 (*resp_len >= 1) ? resp[0] : 0u, req[0], attempt + 1);
+
+        if (attempt >= 2 || elapsed_us > (int64_t)p2star * 1000)
+        {
+            err = ESP_ERR_INVALID_RESPONSE;
+            break;
+        }
+    }
 
     if (result != NULL)
     {
@@ -154,6 +200,121 @@ static esp_err_t do_transaction(const uds_transport_t *t,
     return err;
 }
 
+/* ---- the exclusive option --------------------------------------------------- */
+
+static void excl_timer_cb(void *arg)
+{
+    (void)arg;
+
+    if (s_session)
+    {
+        /* a held session keeps the bus: look again later */
+        (void)esp_timer_start_once(s_excl_timer,
+                                   (uint64_t)UDS_EXCLUSIVE_IDLE_MS * 1000);
+        return;
+    }
+
+    if (s_holding)
+    {
+        s_holding = false;
+        obd_gate_diag_hold(&s_diag_token, false);
+    }
+}
+
+void uds_excl_touch(void)
+{
+    if (!s_exclusive)
+    {
+        return;
+    }
+
+    if (s_excl_timer == NULL)
+    {
+        const esp_timer_create_args_t a =
+        {
+            .callback = excl_timer_cb,
+            .name     = "uds_excl",
+        };
+
+        if (esp_timer_create(&a, &s_excl_timer) != ESP_OK)
+        {
+            return;
+        }
+    }
+
+    if (!s_holding)
+    {
+        s_holding = true;
+        obd_gate_diag_hold(&s_diag_token, true);
+        /* the poller confirms it is off the bus (it loops within 500 ms)
+           before our first request goes out */
+        (void)obd_gate_diag_wait_ack(700);
+    }
+
+    (void)esp_timer_stop(s_excl_timer);
+    (void)esp_timer_start_once(s_excl_timer,
+                               (uint64_t)UDS_EXCLUSIVE_IDLE_MS * 1000);
+}
+
+static void excl_release_now(void)
+{
+    if (s_excl_timer != NULL)
+    {
+        (void)esp_timer_stop(s_excl_timer);
+    }
+
+    if (s_holding)
+    {
+        s_holding = false;
+        obd_gate_diag_hold(&s_diag_token, false);
+    }
+}
+
+void uds_manager_set_exclusive(bool on)
+{
+    s_exclusive = on;
+
+    if (!on)
+    {
+        excl_release_now();
+    }
+    else if (s_session)
+    {
+        uds_excl_touch(); /* an open session takes the bus at once */
+    }
+}
+
+bool uds_manager_exclusive(void)
+{
+    return s_exclusive;
+}
+
+void uds_manager_get_status(uds_status_t *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->backend_setting = uds_settings_config()->backend;
+    out->backend_active = uds_manager_active_backend();
+    out->can_running = (can_manager_core_handle() != NULL);
+    out->provider = can_isotp_esp_active() ? "esp_isotp"
+                    : (can_isotp() != NULL) ? "add-on" : "none";
+    out->exclusive = s_exclusive;
+    out->exclusive_default = uds_settings_config()->exclusive;
+    out->holding = s_holding;
+    out->autopid_paused = obd_gate_diag_held() && obd_gate_diag_acked();
+    out->session_active = s_session;
+    out->last_ts_us = s_last_ts_us;
+    out->last_err = s_last_err;
+    out->last_tx_id = s_last_tx_id;
+    out->last_rx_id = s_last_rx_id;
+    out->last_req_sid = s_last_req_sid;
+    out->last = s_last_res;
+}
+
 /* ---- public request -------------------------------------------------------- */
 
 esp_err_t uds_request(const uds_addr_t *addr,
@@ -172,6 +333,13 @@ esp_err_t uds_request(const uds_addr_t *addr,
         return ESP_ERR_INVALID_ARG;
     }
 
+    uds_result_t local;
+
+    if (result == NULL)
+    {
+        result = &local; /* recorded as the last transaction below */
+    }
+
     /* a held session owns the claim already (uds_session_begin) */
     bool own_claim = !s_session;
 
@@ -181,6 +349,8 @@ esp_err_t uds_request(const uds_addr_t *addr,
         return ESP_ERR_INVALID_STATE; /* busy */
     }
 
+    uds_excl_touch(); /* exclusive option: autopid off the bus, now */
+
     const uds_transport_t *t = resolve_transport();
     esp_err_t err = t->open();
 
@@ -189,6 +359,18 @@ esp_err_t uds_request(const uds_addr_t *addr,
         err = do_transaction(t, addr, req, req_len, resp, resp_cap,
                              resp_len, opts, result);
     }
+    else
+    {
+        memset(result, 0, sizeof(*result));
+        result->backend = t->name;
+    }
+
+    s_last_ts_us = esp_timer_get_time();
+    s_last_err = err;
+    s_last_tx_id = addr->tx_id;
+    s_last_rx_id = addr->rx_id;
+    s_last_req_sid = req[0];
+    s_last_res = *result;
 
     if (own_claim)
     {
@@ -241,6 +423,7 @@ esp_err_t uds_session_begin(const uds_addr_t *addr)
 
     s_tp_addr = *addr;
     s_session = true;
+    uds_excl_touch(); /* exclusive option: the session holds the bus */
 
     if (s_tp_timer != NULL)
     {
@@ -266,6 +449,12 @@ esp_err_t uds_session_end(void)
 
     s_session = false;
     xSemaphoreGive(s_claim);
+
+    if (s_holding)
+    {
+        uds_excl_touch(); /* re-arm the idle release */
+    }
+
     return ESP_OK;
 }
 
@@ -308,16 +497,19 @@ esp_err_t uds_manager_start(void)
 
     (void)esp_timer_create(&targs, &s_tp_timer);
 
+    s_exclusive = cfg->exclusive;
     s_started = true;
-    ESP_LOGI(TAG, "started (backend=%s, p2=%lu p2*=%lu)",
+    ESP_LOGI(TAG, "started (backend=%s, p2=%lu p2*=%lu, exclusive=%d)",
              uds_manager_backend_name(cfg->backend),
-             (unsigned long)cfg->p2_ms, (unsigned long)cfg->p2star_ms);
+             (unsigned long)cfg->p2_ms, (unsigned long)cfg->p2star_ms,
+             cfg->exclusive);
     return ESP_OK;
 }
 
 esp_err_t uds_manager_stop(void)
 {
     (void)uds_session_end();
+    excl_release_now();
     s_started = false;
     return ESP_OK;
 }

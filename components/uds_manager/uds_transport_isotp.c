@@ -27,18 +27,23 @@
  *        capable path: multi-frame UDS, no ELM round-trips. One
  *        session, re-opened when the address changes. Without a
  *        provider (stock build) open() fails and uds_manager falls
- *        back to the obd_chip transport.
+ *        back to the obd_chip transport. An ESP-side requester on the
+ *        shared bus: every transaction holds obd_gate (request ->
+ *        final response) so the MIC chip (autopid) cannot interleave.
  */
 #include "uds_transport.h"
 
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
 #include "can_isotp.h"
 #include "can_manager.h"
+#include "obd_gate.h"
+#include "uds_manager_private.h"
 #include "uds_proto.h"
 
 static const char *TAG = "uds_manager";
@@ -50,6 +55,16 @@ static bool s_bound;
 static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf;
 static bool s_up;
+static const int s_gate_token; /* obd_gate owner identity */
+
+/* The provider allows ONE session per rx id. Holding ours forever after
+ * the last request would lock a J2534 ISO15765 channel out of that ECU
+ * (bench 2026-09-16: a UDS probe of 7E2/7EA made the J2534 CONNECT to
+ * the same pair fail). So the session is released after this much
+ * idle; the tester-present timer re-binds within it during a UDS
+ * session, a new request re-binds on demand (~1 ms). */
+#define ISOTP_IDLE_CLOSE_MS 5000
+static esp_timer_handle_t s_idle_timer;
 
 static esp_err_t isotp_open(void)
 {
@@ -80,6 +95,58 @@ static esp_err_t isotp_open(void)
     return ESP_OK;
 }
 
+static void unbind_locked(void)
+{
+    if (s_bound)
+    {
+        can_isotp()->close(s_sess);
+        s_bound = false;
+    }
+}
+
+/* esp_timer task: skip (and retry later) while a transaction holds
+   the lock — never block the timer task */
+static void idle_close_cb(void *arg)
+{
+    (void)arg;
+
+    if (s_lock == NULL || xSemaphoreTake(s_lock, 0) != pdTRUE)
+    {
+        if (s_idle_timer != NULL)
+        {
+            (void)esp_timer_start_once(
+                s_idle_timer, (uint64_t)ISOTP_IDLE_CLOSE_MS * 1000);
+        }
+
+        return;
+    }
+
+    unbind_locked();
+    xSemaphoreGive(s_lock);
+}
+
+/* (re)arm the idle close after every transaction */
+static void touch_idle_timer(void)
+{
+    if (s_idle_timer == NULL)
+    {
+        const esp_timer_create_args_t a =
+        {
+            .callback = idle_close_cb,
+            .name     = "uds_isotp_idle",
+        };
+
+        if (esp_timer_create(&a, &s_idle_timer) != ESP_OK)
+        {
+            return;
+        }
+    }
+
+    (void)esp_timer_stop(s_idle_timer);
+    (void)esp_timer_start_once(s_idle_timer,
+                               (uint64_t)ISOTP_IDLE_CLOSE_MS * 1000);
+}
+
 static esp_err_t bind_addr(const uds_addr_t *addr)
 {
     if (s_bound && s_addr.tx_id == addr->tx_id &&
@@ -88,11 +155,7 @@ static esp_err_t bind_addr(const uds_addr_t *addr)
         return ESP_OK; /* already bound to this ECU */
     }
 
-    if (s_bound)
-    {
-        can_isotp()->close(s_sess);
-        s_bound = false;
-    }
+    unbind_locked();
 
     can_isotp_cfg_t cfg =
     {
@@ -147,6 +210,12 @@ static esp_err_t isotp_transceive(const uds_addr_t *addr,
         return err;
     }
 
+    /* an ESP-side requester on the shared bus: hold the conversation
+       gate for the whole request -> final response so the MIC chip
+       (autopid) does not interleave; fail-open + self-expiring
+       (obd_gate.h), so a stuck side can never brick the other */
+    obd_gate_acquire(&s_gate_token, OBD_GATE_WAIT_MS);
+
     /* Drain any stale reassembled message before sending — otherwise a
      * late/previous response (or bus cross-talk on this rx_id) is read
      * back immediately and every reply comes out shifted by one. A large
@@ -172,6 +241,8 @@ static esp_err_t isotp_transceive(const uds_addr_t *addr,
 
     if (r != ESP_OK)
     {
+        obd_gate_release(&s_gate_token);
+        touch_idle_timer();
         xSemaphoreGive(s_lock);
         return (r == ESP_ERR_TIMEOUT) ? ESP_ERR_TIMEOUT : ESP_FAIL;
     }
@@ -200,6 +271,8 @@ static esp_err_t isotp_transceive(const uds_addr_t *addr,
         to = p2star_ms; /* extended window while pending */
     }
 
+    obd_gate_release(&s_gate_token);
+    touch_idle_timer();
     xSemaphoreGive(s_lock);
 
     if (pending_out != NULL)
@@ -255,12 +328,16 @@ esp_err_t uds_isotp_tx(const uds_addr_t *addr,
 
     if (err == ESP_OK)
     {
+        uds_excl_touch(); /* exclusive option: a raw PDU is use too */
+        obd_gate_acquire(&s_gate_token, OBD_GATE_WAIT_MS);
+
         esp_err_t r = can_isotp()->send(s_sess, data, len, timeout_ms);
 
         err = (r == ESP_OK)          ? ESP_OK :
               (r == ESP_ERR_TIMEOUT) ? ESP_ERR_TIMEOUT : ESP_FAIL;
     }
 
+    touch_idle_timer();
     xSemaphoreGive(s_lock);
     return err;
 }
@@ -306,6 +383,8 @@ esp_err_t uds_isotp_rx(const uds_addr_t *addr,
         }
     }
 
+    obd_gate_release(&s_gate_token); /* the raw conversation is over */
+    touch_idle_timer();
     xSemaphoreGive(s_lock);
     return err;
 }

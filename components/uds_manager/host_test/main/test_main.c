@@ -54,6 +54,24 @@ static void test_short_and_null_inputs(void)
     TEST_ASSERT_EQUAL_STRING("unknown", uds_nrc_name(0x01));
 }
 
+static void test_response_matches(void)
+{
+    /* the answer to OUR request: positive or a negative naming our SID */
+    const uint8_t pos[] = { 0x62, 0xF1, 0x90, 0x31 };
+    const uint8_t neg[] = { 0x7F, 0x22, 0x31 };
+    /* autopid's mode-01 reply landing in a UDS window (bench 2026-09-16) */
+    const uint8_t stray[] = { 0x41, 0x0C, 0x0C, 0x80 };
+    const uint8_t tp[] = { 0x7E, 0x00 };
+
+    TEST_ASSERT_TRUE(uds_response_matches(0x22, pos, sizeof(pos)));
+    TEST_ASSERT_TRUE(uds_response_matches(0x22, neg, sizeof(neg)));
+    TEST_ASSERT_TRUE(uds_response_matches(0x3E, tp, sizeof(tp)));
+    TEST_ASSERT_FALSE(uds_response_matches(0x3E, stray, sizeof(stray)));
+    TEST_ASSERT_FALSE(uds_response_matches(0x22, stray, sizeof(stray)));
+    TEST_ASSERT_FALSE(uds_response_matches(0x10, neg, sizeof(neg)));
+    TEST_ASSERT_FALSE(uds_response_matches(0x22, NULL, 0));
+}
+
 static void test_hex_to_bytes_ok(void)
 {
     uint8_t out[8];
@@ -133,6 +151,55 @@ static void test_at_parse_multiline_isotp(void)
     TEST_ASSERT_EQUAL_size_t(0x14, n); /* length prefix "014" = 20 bytes */
     TEST_ASSERT_EQUAL_UINT8(0x62, out[0]);
     TEST_ASSERT_EQUAL_UINT8(0x48, out[19]);
+}
+
+static void test_at_parse_pending_lines_then_final(void)
+{
+    /* with the response-count digit the MIC prints every 7F xx 78 it rode
+       out, then the final answer (bench 2026-09-16, erase routine) */
+    uint8_t out[16];
+    size_t n = 0;
+    uint8_t pend = 0;
+
+    const char *r = "7F 31 78\r7F 31 78\r7F 31 78\r71 01 FF 00 00\r\r>";
+    TEST_ASSERT_TRUE(uds_at_parse_response_ex(r, out, sizeof(out), &n, &pend));
+    TEST_ASSERT_EQUAL_size_t(5, n);
+    TEST_ASSERT_EQUAL_UINT8(0x71, out[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x00, out[4]);
+    TEST_ASSERT_EQUAL_UINT8(3, pend);
+
+    /* the plain entry point still returns the final, pendings dropped */
+    TEST_ASSERT_TRUE(uds_at_parse_response(r, out, sizeof(out), &n));
+    TEST_ASSERT_EQUAL_size_t(5, n);
+
+    /* only pendings, no final: nothing to return */
+    TEST_ASSERT_FALSE(uds_at_parse_response_ex("7F 31 78\r7F 31 78\r\r>", out,
+                                               sizeof(out), &n, &pend));
+    TEST_ASSERT_EQUAL_UINT8(2, pend);
+
+    /* a real negative response is NOT a pending: it is the answer */
+    TEST_ASSERT_TRUE(uds_at_parse_response_ex("7F 22 31\r\r>", out, sizeof(out),
+                                              &n, &pend));
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    TEST_ASSERT_EQUAL_UINT8(0x31, out[2]);
+    TEST_ASSERT_EQUAL_UINT8(0, pend);
+}
+
+static void test_at_parse_pending_then_multiframe_final(void)
+{
+    uint8_t out[32];
+    size_t n = 0;
+    uint8_t pend = 0;
+
+    const char *r =
+        "7F 22 78\r7F 22 78\r"
+        "014\r0: 62 F1 90 31 32 33\r1: 34 35 36 37 38 39 41\r"
+        "2: 42 43 44 45 46 47 48\r\r>";
+    TEST_ASSERT_TRUE(uds_at_parse_response_ex(r, out, sizeof(out), &n, &pend));
+    TEST_ASSERT_EQUAL_size_t(0x14, n);
+    TEST_ASSERT_EQUAL_UINT8(0x62, out[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x48, out[19]);
+    TEST_ASSERT_EQUAL_UINT8(2, pend);
 }
 
 static void test_at_parse_error_and_empty(void)
@@ -322,11 +389,14 @@ void app_main(void)
     RUN_TEST(test_negative_response);
     RUN_TEST(test_pending_response);
     RUN_TEST(test_short_and_null_inputs);
+    RUN_TEST(test_response_matches);
     RUN_TEST(test_hex_to_bytes_ok);
     RUN_TEST(test_hex_to_bytes_rejects);
     RUN_TEST(test_bytes_to_hex);
     RUN_TEST(test_at_parse_single_frame);
     RUN_TEST(test_at_parse_multiline_isotp);
+    RUN_TEST(test_at_parse_pending_lines_then_final);
+    RUN_TEST(test_at_parse_pending_then_multiframe_final);
     RUN_TEST(test_at_parse_error_and_empty);
     RUN_TEST(test_dtc_requests);
     RUN_TEST(test_dtc_parse_list_shapes);

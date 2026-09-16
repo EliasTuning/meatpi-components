@@ -139,9 +139,46 @@ esp_err_t uds_isotp_rx(const uds_addr_t *addr,
                        uint8_t *out, size_t cap, size_t *out_len,
                        uint32_t timeout_ms);
 
+/* ---- status + the exclusive option ---------------------------------------- */
+
+/** Idle after the last request before an exclusive hold lets autopid
+ *  back on the bus (a held session keeps it). */
+#define UDS_EXCLUSIVE_IDLE_MS 10000
+
+/** Snapshot for GET /api/uds. */
+typedef struct
+{
+    uds_backend_t backend_setting;
+    uds_backend_t backend_active;
+    const char   *provider;          /**< "esp_isotp" | "add-on" | "none" */
+    bool          can_running;
+    bool          exclusive;         /**< the runtime switch                */
+    bool          exclusive_default; /**< the boot setting                  */
+    bool          holding;           /**< our diagnostics hold is on now     */
+    bool          autopid_paused;    /**< the pollers acknowledged the hold  */
+    bool          session_active;    /**< tester-present session open        */
+    /* the last transaction (valid when last_ts_us != 0) */
+    int64_t       last_ts_us;
+    esp_err_t     last_err;
+    uint32_t      last_tx_id;
+    uint32_t      last_rx_id;
+    uint8_t       last_req_sid;
+    uds_result_t  last;
+} uds_status_t;
+
+void uds_manager_get_status(uds_status_t *out);
+
+/** Runtime "exclusive" (boot default = the `exclusive` setting): while
+ *  the tool is in use — a request, then UDS_EXCLUSIVE_IDLE_MS of idle,
+ *  or an open session — the background pollers (autopid: PID polling +
+ *  DTC scans) stay off the bus (obd_gate's diagnostics hold). Applies
+ *  at once. */
+void uds_manager_set_exclusive(bool on);
+bool uds_manager_exclusive(void);
+
 /* ---- surfaces -------------------------------------------------------------- */
 
-esp_err_t uds_manager_register_http(void); /* POST /api/uds/request */
+esp_err_t uds_manager_register_http(void); /* /api/uds, /request, /session */
 
 /** Which backend is effectively active right now (for status/CLI). */
 uds_backend_t uds_manager_active_backend(void);

@@ -75,6 +75,17 @@ const uds_transport_t *uds_transport_isotp(void);
 typedef esp_err_t (*uds_at_request_fn)(const char *cmd, char *resp,
                                        size_t resp_len, uint32_t timeout_ms);
 
+/** The same with @p skip_setup: the caller knows the chip is still in this
+ *  address' setup (nobody else wrote to it since), so only the request
+ *  line goes out — one request = one AT round-trip. */
+esp_err_t uds_at_transceive_ex(uds_at_request_fn req_fn,
+                               const uds_addr_t *addr,
+                               const uint8_t *req, size_t req_len,
+                               uint8_t *resp, size_t resp_cap,
+                               size_t *resp_len, uint32_t p2_ms,
+                               uint32_t p2star_ms, uint8_t *pending_out,
+                               bool skip_setup);
+
 esp_err_t uds_at_transceive(uds_at_request_fn req_fn,
                             const uds_addr_t *addr,
                             const uint8_t *req, size_t req_len,
@@ -86,6 +97,11 @@ esp_err_t uds_at_transceive(uds_at_request_fn req_fn,
  *  multi-frame, tolerant of index tokens and an ISO-TP length prefix)
  *  into UDS payload bytes. Host-tested. Returns false on no hex / a
  *  chip error token / overflow. */
+/** The same, also counting the chip's '7F xx 78' responsePending lines
+ *  that preceded the final answer (dropped from @p out). */
+bool uds_at_parse_response_ex(const char *resp, uint8_t *out, size_t cap,
+                              size_t *out_len, uint8_t *pending_out);
+
 bool uds_at_parse_response(const char *resp, uint8_t *out, size_t cap,
                            size_t *out_len);
 

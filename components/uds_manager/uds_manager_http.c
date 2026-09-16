@@ -22,7 +22,10 @@
 
 /**
  * @file uds_manager_http.c
- * @brief POST /api/uds/request — the UDS terminal's HTTP surface.
+ * @brief The UDS terminal's HTTP surface: GET /api/uds (status: the live
+ *        path, the exclusive switch, the last transaction), POST /api/uds
+ *        (the runtime exclusive switch), POST /api/uds/request (one
+ *        request), POST /api/uds/session (tester-present session).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +35,9 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
+#include "can_isotp_esp.h"
 #include "http_server_manager.h"
 
 #include "uds_manager.h"
@@ -40,7 +45,8 @@
 
 /* Big buffers live on the HEAP (PSRAM), not the 4 KB httpd worker stack. */
 #define UDS_RESP_CAP 4096
-#define UDS_HEX_CAP  (3 * 256 + 1)
+#define UDS_HEX_CAP  (3 * UDS_RESP_CAP + 1) /* the whole PDU, PSRAM */
+#define UDS_REQ_MAX  64                      /* one AT line on the chip */
 
 static const char *TAG = "uds_manager";
 
@@ -135,7 +141,7 @@ static esp_err_t request_handler(httpd_req_t *req)
     };
 
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
-    uint8_t reqb[64];
+    uint8_t reqb[UDS_REQ_MAX];
     size_t reqn = 0;
 
     if (!cJSON_IsString(data) ||
@@ -153,6 +159,12 @@ static esp_err_t request_handler(httpd_req_t *req)
     if (cJSON_IsNumber(v)) opts.p2_ms = (uint32_t)v->valueint;
     v = cJSON_GetObjectItemCaseSensitive(root, "p2star_ms");
     if (cJSON_IsNumber(v)) opts.p2star_ms = (uint32_t)v->valueint;
+    /* the page's "final response timeout" — the same thing as P2* */
+    v = cJSON_GetObjectItemCaseSensitive(root, "timeout_ms");
+    if (cJSON_IsNumber(v) && opts.p2star_ms == 0)
+    {
+        opts.p2star_ms = (uint32_t)v->valueint;
+    }
     bool session = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root,
                                                                  "session"));
     cJSON_Delete(root);
@@ -208,7 +220,7 @@ static esp_err_t request_handler(httpd_req_t *req)
         return send_json(req, o);
     }
 
-    uds_bytes_to_hex(respb, respn < 256 ? respn : 256, hex, UDS_HEX_CAP);
+    uds_bytes_to_hex(respb, respn, hex, UDS_HEX_CAP); /* the whole PDU */
     free(respb);
 
     cJSON_AddBoolToObject(o, "ok", true);
@@ -229,12 +241,224 @@ static esp_err_t request_handler(httpd_req_t *req)
     return send_json(req, o);
 }
 
+/* ---- GET /api/uds: the live path without sending anything ----------------- */
+
+static void add_hex_id(cJSON *o, const char *key, uint32_t id)
+{
+    char s[12];
+
+    snprintf(s, sizeof(s), "%lX", (unsigned long)id);
+    cJSON_AddStringToObject(o, key, s);
+}
+
+static cJSON *status_json(void)
+{
+    uds_status_t st;
+
+    uds_manager_get_status(&st);
+
+    cJSON *o = cJSON_CreateObject();
+
+    cJSON_AddStringToObject(o, "backend_setting",
+                            uds_manager_backend_name(st.backend_setting));
+    cJSON_AddStringToObject(o, "backend_active",
+                            uds_manager_backend_name(st.backend_active));
+    cJSON_AddStringToObject(o, "provider", st.provider);
+    cJSON_AddBoolToObject(o, "can_running", st.can_running);
+    cJSON_AddBoolToObject(o, "exclusive", st.exclusive);
+    cJSON_AddBoolToObject(o, "exclusive_default", st.exclusive_default);
+    cJSON_AddBoolToObject(o, "holding", st.holding);
+    cJSON_AddBoolToObject(o, "autopid_paused", st.autopid_paused);
+    cJSON_AddBoolToObject(o, "session_active", st.session_active);
+    cJSON_AddNumberToObject(o, "exclusive_idle_ms", UDS_EXCLUSIVE_IDLE_MS);
+    cJSON_AddNumberToObject(o, "max_request", UDS_REQ_MAX);
+    cJSON_AddNumberToObject(o, "max_response", UDS_RESP_CAP);
+
+    if (st.last_ts_us != 0)
+    {
+        cJSON *l = cJSON_AddObjectToObject(o, "last");
+
+        cJSON_AddNumberToObject(l, "age_ms",
+                                (double)((esp_timer_get_time() - st.last_ts_us)
+                                         / 1000));
+        cJSON_AddBoolToObject(l, "ok", st.last_err == ESP_OK);
+
+        if (st.last_err != ESP_OK)
+        {
+            cJSON_AddStringToObject(l, "error", esp_err_to_name(st.last_err));
+        }
+
+        add_hex_id(l, "tx_id", st.last_tx_id);
+        add_hex_id(l, "rx_id", st.last_rx_id);
+        cJSON_AddNumberToObject(l, "req_sid", st.last_req_sid);
+        cJSON_AddNumberToObject(l, "sid", st.last.sid);
+        cJSON_AddBoolToObject(l, "positive", !st.last.negative);
+
+        if (st.last.negative)
+        {
+            cJSON_AddNumberToObject(l, "nrc", st.last.nrc);
+            cJSON_AddStringToObject(l, "nrc_name",
+                                    st.last.nrc_name ? st.last.nrc_name : "");
+        }
+
+        cJSON_AddNumberToObject(l, "pending", st.last.pending_count);
+        cJSON_AddNumberToObject(l, "elapsed_ms", st.last.elapsed_ms);
+        cJSON_AddStringToObject(l, "backend",
+                                st.last.backend ? st.last.backend : "");
+    }
+    else
+    {
+        cJSON_AddNullToObject(o, "last");
+    }
+
+    if (can_isotp_esp_active())
+    {
+        can_isotp_esp_stats_t ps;
+
+        can_isotp_esp_get_stats(&ps);
+
+        cJSON *p = cJSON_AddObjectToObject(o, "provider_stats");
+
+        cJSON_AddNumberToObject(p, "sessions_open", ps.sessions_open);
+        cJSON_AddNumberToObject(p, "pdus_tx", ps.pdus_tx);
+        cJSON_AddNumberToObject(p, "pdus_rx", ps.pdus_rx);
+        cJSON_AddNumberToObject(p, "frames_fed", ps.frames_fed);
+        cJSON_AddNumberToObject(p, "tx_timeouts", ps.tx_timeouts);
+        cJSON_AddNumberToObject(p, "rx_dropped", ps.rx_dropped);
+    }
+
+    return o;
+}
+
+static esp_err_t status_handler(httpd_req_t *req)
+{
+    return send_json(req, status_json());
+}
+
+/* small JSON bodies (the control + session routes) */
+static cJSON *read_small_body(httpd_req_t *req)
+{
+    char body[192];
+
+    if (req->content_len == 0 || req->content_len >= sizeof(body))
+    {
+        return NULL;
+    }
+
+    int n = httpd_req_recv(req, body, req->content_len);
+
+    if (n <= 0)
+    {
+        return NULL;
+    }
+
+    body[n] = '\0';
+    return cJSON_Parse(body);
+}
+
+/* POST /api/uds {"exclusive":bool} — the runtime switch (boot default = the
+ * setting); answers with the status like GET */
+static esp_err_t control_handler(httpd_req_t *req)
+{
+    cJSON *root = read_small_body(req);
+    const cJSON *v = (root != NULL)
+        ? cJSON_GetObjectItemCaseSensitive(root, "exclusive") : NULL;
+
+    if (!cJSON_IsBool(v))
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "expected {\"exclusive\":bool}");
+        return ESP_FAIL;
+    }
+
+    uds_manager_set_exclusive(cJSON_IsTrue(v));
+    cJSON_Delete(root);
+    return send_json(req, status_json());
+}
+
+/* POST /api/uds/session {"action":"begin","tx_id","rx_id","ext"?} |
+ * {"action":"end"} — tester present while the page holds the session;
+ * requests inside it ride the held claim. 409 when another transaction/
+ * session owns the bus. */
+static esp_err_t session_handler(httpd_req_t *req)
+{
+    cJSON *root = read_small_body(req);
+    const cJSON *a = (root != NULL)
+        ? cJSON_GetObjectItemCaseSensitive(root, "action") : NULL;
+
+    if (!cJSON_IsString(a) || a->valuestring == NULL)
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "expected {\"action\":\"begin\"|\"end\"}");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err;
+
+    if (strcmp(a->valuestring, "begin") == 0)
+    {
+        uds_addr_t addr =
+        {
+            .tx_id  = id_of(root, "tx_id"),
+            .rx_id  = id_of(root, "rx_id"),
+            .ext_id = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "ext")),
+        };
+
+        if (addr.tx_id == 0 || addr.rx_id == 0)
+        {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "tx_id/rx_id");
+            return ESP_FAIL;
+        }
+
+        err = uds_session_begin(&addr);
+    }
+    else if (strcmp(a->valuestring, "end") == 0)
+    {
+        err = uds_session_end();
+    }
+    else
+    {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "action");
+        return ESP_FAIL;
+    }
+
+    cJSON_Delete(root);
+
+    if (err == ESP_ERR_INVALID_STATE)
+    {
+        httpd_resp_set_status(req, "409 Conflict");
+    }
+
+    cJSON *o = status_json();
+
+    cJSON_AddBoolToObject(o, "ok", err == ESP_OK);
+
+    if (err != ESP_OK)
+    {
+        cJSON_AddStringToObject(o, "error", (err == ESP_ERR_INVALID_STATE)
+                                    ? "busy or transport unavailable"
+                                    : esp_err_to_name(err));
+    }
+
+    return send_json(req, o);
+}
+
 esp_err_t uds_manager_register_http(void)
 {
     static const httpd_uri_t URIS[] =
     {
+        { .uri = "/api/uds", .method = HTTP_GET,
+          .handler = status_handler },
+        { .uri = "/api/uds", .method = HTTP_POST,
+          .handler = control_handler },
         { .uri = "/api/uds/request", .method = HTTP_POST,
           .handler = request_handler },
+        { .uri = "/api/uds/session", .method = HTTP_POST,
+          .handler = session_handler },
     };
 
     esp_err_t err = http_server_manager_register_handlers(

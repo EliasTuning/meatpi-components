@@ -42,6 +42,12 @@ bool uds_is_positive_for(uint8_t req_sid, const uint8_t *resp, size_t len)
            resp[0] == (uint8_t)(req_sid + UDS_POS_OFFSET);
 }
 
+bool uds_response_matches(uint8_t req_sid, const uint8_t *resp, size_t len)
+{
+    return uds_is_positive_for(req_sid, resp, len) ||
+           (uds_is_negative(resp, len) && resp[1] == req_sid);
+}
+
 uint8_t uds_nrc_of(const uint8_t *resp, size_t len)
 {
     return uds_is_negative(resp, len) ? resp[2] : 0u;

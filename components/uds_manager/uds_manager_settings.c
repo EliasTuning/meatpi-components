@@ -38,6 +38,11 @@ static const settings_field_t FIELDS[] =
     SETTINGS_INT("p2_ms", 50, 5000, 250),
     SETTINGS_INT("p2star_ms", 500, 30000, 5000),
     SETTINGS_INT("tester_present_ms", 500, 10000, 2000),
+    /* Exclusive bus (boot default; runtime switch on the UDS page / POST
+     * /api/uds): while the tool is in use (a request, then 10 s of idle,
+     * or an open session) the background pollers (autopid: PID polling +
+     * DTC scans) stay off the bus — obd_gate's diagnostics hold. */
+    SETTINGS_BOOL("exclusive", false),
     SETTINGS_BOOL("cli", true),
 };
 
@@ -77,6 +82,9 @@ static esp_err_t on_apply(const cJSON *settings)
     v = cJSON_GetObjectItemCaseSensitive(settings, "tester_present_ms");
     s_cfg.tester_present_ms = cJSON_IsNumber(v) ? (uint32_t)v->valueint
                                                 : 2000;
+
+    s_cfg.exclusive = cJSON_IsTrue(
+        cJSON_GetObjectItemCaseSensitive(settings, "exclusive"));
 
     if (!cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(settings, "cli")))
     {

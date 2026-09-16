@@ -13,7 +13,7 @@ idf_component_register(
     PRIV_INCLUDE_DIRS "."
     # Service: UDS protocol over a selectable transport (MIC via obd_chip,
     # or firmware ISO-TP on can_manager's provider slot).
-    PRIV_REQUIRES obd_chip can_manager event_manager obd_gate
+    PRIV_REQUIRES obd_chip can_manager can_isotp_esp event_manager obd_gate
                   settings_manager log_manager esp_timer
                   http_server_manager esp_http_server espressif__cjson
                   cmdline_manager console

@@ -32,6 +32,10 @@
 
 esp_err_t uds_manager_register_cli(void);
 
+/* the exclusive option: a raw ISO-TP tx/rx (uds_transport_isotp.c) counts
+ * as use of the tool, like a request */
+void uds_excl_touch(void);
+
 /* event_manager glue (uds_manager_events.c). */
 void uds_events_register(void);
 
@@ -44,6 +48,7 @@ typedef struct
     uint32_t      p2_ms;
     uint32_t      p2star_ms;
     uint32_t      tester_present_ms; /* tester-present period */
+    bool          exclusive;         /* boot default of the runtime switch */
 } uds_config_t;
 
 /** Register the "uds_manager" descriptor with settings_manager. */
