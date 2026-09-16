@@ -58,12 +58,15 @@ static esp_err_t obd_chip_get_handler(httpd_req_t *req)
     n += (size_t)snprintf(body + n, sizeof(body) - n,
                           "{\"ready\":%s,\"claim\":\"%s\","
                           "\"client_idle_ms\":%lu,"
+                          "\"eeprom_guard\":{\"rewrites\":%lu,\"blocked\":%lu},"
                           "\"uart\":{\"rx_bytes\":%lu,\"rx_chunks\":%lu,"
                           "\"rx_max_chunk\":%u,\"rx_overflows\":%lu,"
                           "\"rx_buffered\":%lu,\"tx_bytes\":%lu},"
                           "\"subscribers\":[",
                           st.ready ? "true" : "false", st.claim,
                           (unsigned long)st.client_idle_ms,
+                          (unsigned long)st.guard_rewrites,
+                          (unsigned long)st.guard_blocked,
                           (unsigned long)st.rx_bytes,
                           (unsigned long)st.rx_chunks,
                           (unsigned)st.rx_max_chunk,

@@ -318,3 +318,38 @@ managers; `settings_manager_start()` before `obd_chip_start()`.
   iterator + FFF1 marker.
 - **On-target (`test_apps/`, live bench):** all green 2026-07-03 — see
   `test_apps/README.md` for markers and the bench doc pointer.
+
+## EEPROM guard (2026-09-16)
+
+The chip persists a few settings to EEPROM and EEPROM has a write budget:
+`ATSP`/`ATSPA` (protocol), `ATM1` (memory on: every later protocol change
+sticks), `ATPP xx SV/ON/OFF` (programmable parameters; 0C/0F re-baud the UART
+= a bricked link), `ATSD` (store data byte), `ATCV` (voltage calibration),
+STN `STWBR`/`STSAVCAL`. Init strings replay per poll transition, apps re-send
+`ATSP` on every connect, terminal users type anything, so the guard lives in
+the driver, on every TX path (`obd_chip_guard.h`, pure, host-tested in
+`obd_chip_parse.c`):
+
+- rewritten in place, same length: `ATSP..` -> `ATTP..`, `ATM1` -> `ATM0`;
+- refused: `ATPP` (except `ATPPS`, the summary read), `ATSD`, `ATCV`, `STWBR`,
+  `STSAVCAL`. `obd_chip_request()` returns ESP_ERR_NOT_SUPPORTED; the raw
+  bridge path (`obd_chip_send`) drops the chunk and fans `?` + prompt back so
+  the app or terminal sees the ELM rejection and the chip never sees the write.
+
+A token counts only at a command boundary (start, CR/LF/space/tab/';'), so
+`DATA`, the `ST` inside `ATSTFF` and hex payloads never match. Counters:
+`GET /api/obd_chip` -> `eeprom_guard.rewrites` / `.blocked`; refused commands
+log at W with the text. autopid's `ap_init_sanitize()` is a wrapper over this
+guard and its config parse refuses a refused command in `cmd`/`init`; the UDS
+AT transport sends `ATTP` itself. Exempt by construction: boot provisioning
+(`bare_probe`: STSL*, `ATPP 0E/0F`, `STWBR`, once, behind a matching check) and
+the firmware update flow, which write the UART directly.
+
+## Transaction hold (2026-09-16)
+
+`obd_chip_txn_begin(timeout)` / `obd_chip_txn_end()`: the calling task takes the
+COMMAND claim across several `obd_chip_request()` calls (they nest; other
+requesters wait at their claim timeout, autopid's poll included). Born from the
+UDS AT transport: 7 setup commands + the request, and autopid's poll used to
+land between them (bench: 1 of 3 UDS requests survived with polling, 5 of 5
+with autopid paused). `end()` drops the hold whatever the nesting depth.

@@ -14,6 +14,7 @@ void test_overflow_is_flagged_not_fatal(void);
 void test_chip_error_classification(void);
 void test_monitor_command_classification(void);
 void test_fw_iterator_and_end_marker(void);
+void test_eeprom_guard(void);
 void test_stslcs_parse_full_native(void);
 void test_stslcs_parse_elm327_and_armed_wake(void);
 void test_stslcs_provision_policy(void);
@@ -33,6 +34,7 @@ void app_main(void)
     RUN_TEST(test_chip_error_classification);
     RUN_TEST(test_monitor_command_classification);
     RUN_TEST(test_fw_iterator_and_end_marker);
+    RUN_TEST(test_eeprom_guard);
     RUN_TEST(test_stslcs_parse_full_native);
     RUN_TEST(test_stslcs_parse_elm327_and_armed_wake);
     RUN_TEST(test_stslcs_provision_policy);

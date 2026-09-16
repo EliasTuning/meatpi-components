@@ -27,6 +27,7 @@
  *        replay real chip logs re-split at every chunk boundary.
  */
 #include "obd_chip_private.h"
+#include "obd_chip_guard.h"
 
 #include <ctype.h>
 #include <string.h>
@@ -289,4 +290,159 @@ size_t obd_fw_iter_next(obd_fw_iter_t *it, char *line, size_t line_len)
 bool obd_fw_line_is_end_marker(const char *line)
 {
     return strncmp(line, "FFF1", 4) == 0;
+}
+
+/* ---- EEPROM guard (obd_chip_guard.h, 2026-09-16) --------------------------
+ * One scan serves three callers: autopid's config parser (init strings,
+ * ';'-separated), the request engine (one command) and the raw bridge path
+ * (an app's or terminal's bytes, no NUL). Rewrites keep the length so a
+ * raw chunk can be patched in place. */
+
+static bool guard_boundary(const char *buf, size_t i)
+{
+    if (i == 0)
+    {
+        return true;
+    }
+
+    char p = buf[i - 1];
+
+    return p == '\r' || p == '\n' || p == ' ' || p == '\t' || p == ';';
+}
+
+static size_t guard_skip_ws(const char *buf, size_t len, size_t i)
+{
+    while (i < len && (buf[i] == ' ' || buf[i] == '\t'))
+    {
+        i++;
+    }
+
+    return i;
+}
+
+static char guard_lc(char c)
+{
+    return (char)tolower((unsigned char)c);
+}
+
+static obd_guard_t guard_scan(char *buf, size_t len, bool apply)
+{
+    obd_guard_t verdict = OBD_GUARD_PASS;
+
+    if (buf == NULL)
+    {
+        return verdict;
+    }
+
+    for (size_t i = 0; i + 1 < len; i++)
+    {
+        char c0 = guard_lc(buf[i]);
+        char c1 = guard_lc(buf[i + 1]);
+        bool at = (c0 == 'a' && c1 == 't');
+        bool st = (c0 == 's' && c1 == 't');
+
+        if ((!at && !st) || !guard_boundary(buf, i))
+        {
+            continue; /* "DATA", the "ST" inside "ATSTFF", hex payloads */
+        }
+
+        size_t j = guard_skip_ws(buf, len, i + 2);
+
+        if (j >= len)
+        {
+            break;
+        }
+
+        if (at)
+        {
+            char l1 = guard_lc(buf[j]);
+            size_t k = guard_skip_ws(buf, len, j + 1);
+            char l2 = (k < len) ? guard_lc(buf[k]) : '\0';
+
+            if (l1 == 's' && l2 == 'p')
+            {
+                /* ATSP (set + save protocol) -> ATTP (try protocol, RAM) */
+                if (apply)
+                {
+                    buf[i] = 'A';
+                    buf[i + 1] = 'T';
+                    buf[j] = 'T';
+                    buf[k] = 'P';
+                }
+
+                verdict = OBD_GUARD_REWRITTEN;
+                i = k;
+            }
+            else if (l1 == 'm' && l2 == '1')
+            {
+                /* ATM1 (memory on: later protocol changes stick) -> ATM0;
+                   ATMA/ATMR/ATMT are monitors, not memory (no digit) */
+                if (apply)
+                {
+                    buf[i] = 'A';
+                    buf[i + 1] = 'T';
+                    buf[j] = 'M';
+                    buf[k] = '0';
+                }
+
+                verdict = OBD_GUARD_REWRITTEN;
+                i = k;
+            }
+            else if (l1 == 'p' && l2 == 'p')
+            {
+                /* ATPP xx SV yy / ON / OFF write programmable parameters
+                   (0C/0F re-baud the UART); only ATPPS, the summary READ,
+                   is harmless */
+                size_t m = guard_skip_ws(buf, len, k + 1);
+                char l3 = (m < len) ? guard_lc(buf[m]) : '\0';
+
+                if (l3 != 's')
+                {
+                    return OBD_GUARD_BLOCKED;
+                }
+
+                i = m;
+            }
+            else if ((l1 == 's' && l2 == 'd') || (l1 == 'c' && l2 == 'v'))
+            {
+                /* ATSD hh (store data byte), ATCV dddd (voltage calibration) */
+                return OBD_GUARD_BLOCKED;
+            }
+        }
+        else
+        {
+            /* STN dialect: STWBR (write UART baud), STSAVCAL (save
+               calibration). STSBR (set baud, RAM), STSLCS (read) pass. */
+            char word[9];
+            size_t n = 0;
+            size_t p = j;
+
+            while (p < len && n < sizeof(word) - 1 &&
+                   isalpha((unsigned char)buf[p]))
+            {
+                word[n++] = (char)toupper((unsigned char)buf[p]);
+                p++;
+            }
+
+            word[n] = '\0';
+
+            if (strcmp(word, "WBR") == 0 || strcmp(word, "SAVCAL") == 0)
+            {
+                return OBD_GUARD_BLOCKED;
+            }
+        }
+    }
+
+    return verdict;
+}
+
+obd_guard_t obd_chip_guard_cmd(char *buf, size_t len)
+{
+    return guard_scan(buf, len, true);
+}
+
+obd_guard_t obd_chip_guard_check(const char *buf, size_t len)
+{
+    /* apply=false never writes; the cast only satisfies the shared scanner */
+    return guard_scan((char *)buf, len, false);
 }

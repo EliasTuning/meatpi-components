@@ -164,3 +164,75 @@ void test_fw_iterator_and_end_marker(void)
     TEST_ASSERT_EQUAL(8, obd_fw_iter_next(&it, line, sizeof(line)));
     TEST_ASSERT_TRUE(obd_fw_line_is_end_marker(line));
 }
+
+/* ---- EEPROM guard (obd_chip_guard.h) ------------------------------------------ */
+
+static void expect_rewrite(const char *in, const char *want)
+{
+    char buf[96];
+
+    strcpy(buf, in);
+    TEST_ASSERT_EQUAL_MESSAGE(OBD_GUARD_REWRITTEN,
+                              obd_chip_guard_cmd(buf, strlen(buf)), in);
+    TEST_ASSERT_EQUAL_STRING(want, buf);
+    /* the dry scan agrees and leaves the text alone */
+    strcpy(buf, in);
+    TEST_ASSERT_EQUAL(OBD_GUARD_REWRITTEN, obd_chip_guard_check(buf, strlen(buf)));
+    TEST_ASSERT_EQUAL_STRING(in, buf);
+}
+
+static void expect_verdict(const char *in, obd_guard_t want)
+{
+    char buf[96];
+
+    strcpy(buf, in);
+    TEST_ASSERT_EQUAL_MESSAGE(want, obd_chip_guard_check(buf, strlen(buf)), in);
+    TEST_ASSERT_EQUAL_STRING(in, buf);
+}
+
+void test_eeprom_guard(void)
+{
+    /* rewrites keep the length, canonicalize case, keep the spacing */
+    expect_rewrite("ATSP6", "ATTP6");
+    expect_rewrite("atsp0", "ATTP0");
+    expect_rewrite("AT SP A", "AT TP A");
+    expect_rewrite("at s p6", "AT T P6");
+    expect_rewrite("ATSP6\r", "ATTP6\r");
+    expect_rewrite("ATM1", "ATM0");
+    expect_rewrite("at m 1", "AT M 0");
+    /* a ';'-separated init chain (autopid) — every token is a boundary */
+    expect_rewrite("ATZ;ATSP6;atm1;ATSH7DF;atsp7", "ATZ;ATTP6;ATM0;ATSH7DF;ATTP7");
+    /* the Renault Zoe profile init, verbatim */
+    expect_rewrite("ATE0;ATH1;ATSP7;ATS0;ATM0;ATAT1;ATFCSM1;ATCP18;",
+                   "ATE0;ATH1;ATTP7;ATS0;ATM0;ATAT1;ATFCSM1;ATCP18;");
+
+    /* pass-throughs: the protective twins, monitors, headers, reads, data */
+    const char *pass[] = { "ATM0", "ATTP6", "ATSH7E4", "ATSTFF", "ATST96",
+                           "ATCRA7E8", "ATCAF1", "ATPPS", "ATMA", "ATMR 11;ATMT 1A",
+                           "ATRV", "ATRD", "ATDPN", "ATZ", "STSBR 2000000",
+                           "STSLCS", "STMA", "0100", "22 F1 90", "010C1",
+                           "VTVERS", "DATA", "xATSP6", "41 0C 0C 80" };
+
+    for (size_t i = 0; i < sizeof(pass) / sizeof(pass[0]); i++)
+    {
+        expect_verdict(pass[i], OBD_GUARD_PASS);
+    }
+
+    /* refused: EEPROM writes with no RAM twin */
+    const char *blocked[] = { "ATPP 0C SV 23", "ATPP0FON", "AT PP FF OFF",
+                              "atpp 0e sv 7a\r", "ATSD 1A", "ATCV 1250",
+                              "AT CV 0000", "STWBR", "st wbr\r", "STSAVCAL",
+                              "ATSH7E0;ATPP 0F SV 95" };
+
+    for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++)
+    {
+        expect_verdict(blocked[i], OBD_GUARD_BLOCKED);
+    }
+
+    /* raw chunk semantics: only the first len bytes count */
+    char raw[] = "ATSP6\rATPP 0F ON\r";
+
+    TEST_ASSERT_EQUAL(OBD_GUARD_REWRITTEN, obd_chip_guard_check(raw, 6));
+    TEST_ASSERT_EQUAL(OBD_GUARD_BLOCKED, obd_chip_guard_check(raw, strlen(raw)));
+    TEST_ASSERT_EQUAL(OBD_GUARD_PASS, obd_chip_guard_cmd(NULL, 0));
+}

@@ -33,6 +33,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "obd_chip_guard.h" /* obd_guard_t for the guard accounting hook */
 
 #ifdef __cplusplus
 extern "C" {
@@ -157,6 +158,11 @@ bool obd_core_bringup_wait(uint32_t timeout_ms);
 /* claim internals shared by request engine + fw update */
 esp_err_t obd_core_claim(int type, uint32_t timeout_ms);
 void      obd_core_release(void);
+
+/** EEPROM guard accounting + log line (GET /api/obd_chip
+ *  `eeprom_guard`): called by every TX path that ran the guard with a
+ *  non-PASS verdict; @p cmd/@p len is the text as the caller received it. */
+void obd_core_guard_note(obd_guard_t v, const char *cmd, size_t len);
 
 /** obd_gate owner identity for the MIC chip (address only — defined in
  *  obd_chip.c, shared with the request engine in obd_chip_cmd.c). */

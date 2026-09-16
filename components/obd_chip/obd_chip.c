@@ -82,6 +82,20 @@ static uint32_t s_rx_bytes;
 static uint32_t s_rx_chunks;
 static uint16_t s_rx_max_chunk;
 
+/* EEPROM guard accounting (obd_chip_guard.h) */
+static uint32_t s_guard_rewrites;
+static uint32_t s_guard_blocked;
+
+/* multi-command transaction hold (obd_chip_txn_begin): the task that owns
+ * the COMMAND claim across several requests. A request from THIS task
+ * neither claims nor releases (the transaction owns the claim). s_lock-
+ * protected. s_txn_start_us arms a fail-open steal so a transaction whose
+ * end() never ran (e.g. an httpd worker recycled mid-request) cannot brick
+ * the chip for other requesters — mirrors obd_gate's max-hold expiry. */
+static TaskHandle_t s_txn_task;
+static int64_t      s_txn_start_us;
+#define OBD_TXN_MAX_US (12 * 1000 * 1000) /* > worst UDS transaction */
+
 /* registry + state: PSRAM .bss (§2) */
 static obd_sub_t s_subs[OBD_MAX_SUBSCRIBERS] EXT_RAM_BSS_ATTR;
 static size_t s_sub_count;
@@ -250,6 +264,7 @@ uint32_t obd_chip_dropped(QueueHandle_t q)
 esp_err_t obd_core_claim(int type, uint32_t timeout_ms)
 {
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
 
     while (true)
     {
@@ -258,7 +273,22 @@ esp_err_t obd_core_claim(int type, uint32_t timeout_ms)
 
         portENTER_CRITICAL(&s_lock);
 
-        if (s_claim == CLAIM_NONE)
+        /* a request from the transaction owner already holds the claim */
+        if (type == CLAIM_COMMAND && s_txn_task != NULL &&
+            s_txn_task == self)
+        {
+            granted = true;
+        }
+        /* a transaction whose end() never ran can't brick the chip: steal
+           the COMMAND claim after the max hold (fail-open, like obd_gate) */
+        else if (s_claim == CLAIM_COMMAND && s_txn_task != NULL &&
+                 (esp_timer_get_time() - s_txn_start_us) > OBD_TXN_MAX_US)
+        {
+            s_txn_task = NULL;
+            s_claim = (claim_state_t)type;
+            granted = true;
+        }
+        else if (s_claim == CLAIM_NONE)
         {
             s_claim = (claim_state_t)type;
             granted = true;
@@ -295,7 +325,14 @@ esp_err_t obd_core_claim(int type, uint32_t timeout_ms)
 void obd_core_release(void)
 {
     portENTER_CRITICAL(&s_lock);
-    s_claim = CLAIM_NONE;
+
+    /* a nested request inside a held transaction does NOT release — the
+       transaction owns the claim until obd_chip_txn_end() */
+    if (s_txn_task == NULL || s_txn_task != xTaskGetCurrentTaskHandle())
+    {
+        s_claim = CLAIM_NONE;
+    }
+
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -314,6 +351,78 @@ esp_err_t obd_chip_release(void)
 {
     obd_core_release();
     return ESP_OK;
+}
+
+esp_err_t obd_chip_txn_begin(TickType_t timeout)
+{
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    bool already;
+
+    portENTER_CRITICAL(&s_lock);
+    already = (s_txn_task == self);
+    portEXIT_CRITICAL(&s_lock);
+
+    if (already)
+    {
+        return ESP_ERR_INVALID_STATE; /* one transaction per task */
+    }
+
+    /* take the COMMAND claim as a normal requester (no txn owner yet), then
+       become the owner: nested obd_chip_request() calls skip claim/release */
+    esp_err_t err = obd_core_claim(CLAIM_COMMAND,
+                                   timeout * portTICK_PERIOD_MS);
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    s_txn_task = self;
+    s_txn_start_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
+}
+
+void obd_chip_txn_end(void)
+{
+    portENTER_CRITICAL(&s_lock);
+
+    if (s_txn_task == xTaskGetCurrentTaskHandle())
+    {
+        s_txn_task = NULL;
+        s_claim = CLAIM_NONE;
+    }
+
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void obd_core_guard_note(obd_guard_t v, const char *cmd, size_t len)
+{
+    char head[40];
+    size_t n = 0;
+
+    for (size_t i = 0; i < len && n < sizeof(head) - 1; i++)
+    {
+        char c = cmd[i];
+
+        head[n++] = (c == '\r' || c == '\n') ? ' ' : c;
+    }
+
+    head[n] = '\0';
+
+    if (v == OBD_GUARD_BLOCKED)
+    {
+        s_guard_blocked++;
+        ESP_LOGW(TAG, "EEPROM guard refused '%s' (ATPP/ATSD/ATCV/STWBR "
+                      "write the chip's EEPROM)", head);
+    }
+    else if (v == OBD_GUARD_REWRITTEN)
+    {
+        s_guard_rewrites++;
+        ESP_LOGD(TAG, "EEPROM guard rewrote '%s' (ATSP->ATTP, ATM1->ATM0)",
+                 head);
+    }
 }
 
 bool obd_chip_is_monitor_cmd(const char *cmd)
@@ -356,6 +465,38 @@ esp_err_t obd_chip_send(const uint8_t *data, size_t len)
         return ESP_ERR_INVALID_STATE; /* fw update owns the wire */
     }
 
+    /* EEPROM guard (obd_chip_guard.h): apps re-send ATSP on every connect
+       and a terminal user can type ATPP — rewrite the two with RAM twins
+       in place, refuse the rest with the ELM "?" the sender expects, so
+       the chip never sees an EEPROM write from a bridge. */
+    uint8_t copy[256];
+    obd_guard_t gv = obd_chip_guard_check((const char *)data, len);
+
+    if (gv == OBD_GUARD_REWRITTEN && len > sizeof(copy))
+    {
+        gv = OBD_GUARD_BLOCKED; /* no scratch for a rewrite that long */
+    }
+
+    if (gv != OBD_GUARD_PASS)
+    {
+        obd_core_guard_note(gv, (const char *)data, len);
+    }
+
+    if (gv == OBD_GUARD_BLOCKED)
+    {
+        static const uint8_t refused[] = "?\r\r>";
+
+        obd_core_fanout(refused, sizeof(refused) - 1);
+        return ESP_OK;
+    }
+
+    if (gv == OBD_GUARD_REWRITTEN)
+    {
+        memcpy(copy, data, len);
+        (void)obd_chip_guard_cmd((char *)copy, len);
+        data = copy;
+    }
+
     /* obd_gate: a CR submits a command to the chip — that opens a bus
        conversation, so serialize against the ESP-side ELM engines. May
        block up to OBD_GATE_WAIT_MS; released when the RX fan-out sees
@@ -387,6 +528,8 @@ esp_err_t obd_chip_get_stats(obd_chip_stats_t *out)
     out->rx_chunks = s_rx_chunks;
     out->rx_max_chunk = s_rx_max_chunk;
     out->client_idle_ms = obd_chip_client_idle_ms();
+    out->guard_rewrites = s_guard_rewrites;
+    out->guard_blocked = s_guard_blocked;
     obd_uart_get_stats(&out->tx_bytes, &out->rx_overflows,
                        &out->rx_buffered);
     return ESP_OK;

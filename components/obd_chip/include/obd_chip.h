@@ -64,6 +64,8 @@ extern "C" {
 #endif
 
 /** RX fan-out chunk: small, copied by value into each subscriber's queue. */
+#include "obd_chip_guard.h" /* the EEPROM guard (pure) every TX path runs */
+
 #define OBD_CHIP_CHUNK_SIZE 128
 
 typedef struct
@@ -167,6 +169,20 @@ esp_err_t obd_chip_request(const char *cmd, char *resp, size_t resp_len,
 esp_err_t obd_chip_claim(obd_claim_t type, TickType_t timeout);
 esp_err_t obd_chip_release(void);
 
+/**
+ * Hold the chip for a multi-command transaction from the CALLING task
+ * (2026-09-16: the UDS AT transport sends 7 setup commands + the request;
+ * autopid's poll used to land between them and its reply became the UDS
+ * "response" — 1 of 3 requests survived). Takes the COMMAND claim; every
+ * obd_chip_request() from this task then nests inside the hold while other
+ * requesters wait (their normal claim timeout). One end() per begin();
+ * end() drops the hold whatever the nesting depth. ESP_ERR_INVALID_STATE
+ * when this task already holds a transaction or MONITOR/EXCLUSIVE is held,
+ * ESP_ERR_TIMEOUT when the chip stayed busy for @p timeout.
+ */
+esp_err_t obd_chip_txn_begin(TickType_t timeout);
+void      obd_chip_txn_end(void);
+
 /** True if @p cmd is a monitor-class (streaming) command — table-driven,
  *  case/whitespace-insensitive (ATMA/ATMR/ATMT/STM/STMA…). Pure. */
 bool obd_chip_is_monitor_cmd(const char *cmd);
@@ -229,6 +245,8 @@ typedef struct
     uint32_t    rx_buffered;    /* bytes waiting in the driver ring now   */
     uint32_t    tx_bytes;       /* bytes written to the chip              */
     uint32_t    client_idle_ms; /* obd_chip_client_idle_ms()              */
+    uint32_t    guard_rewrites; /* EEPROM guard: ATSP->ATTP / ATM1->ATM0  */
+    uint32_t    guard_blocked;  /* EEPROM guard: ATPP/ATSD/ATCV/STWBR refused */
 } obd_chip_stats_t;
 
 typedef struct

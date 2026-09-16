@@ -102,6 +102,31 @@ esp_err_t obd_chip_request(const char *cmd, char *resp, size_t resp_len,
         return ESP_ERR_NOT_SUPPORTED;
     }
 
+    /* EEPROM guard (obd_chip_guard.h): ATSP/ATM1 go out as their RAM
+       twins, ATPP/ATSD/ATCV/STWBR never go out. Runs on a copy of the
+       command head (the API takes a const string); the rare command
+       longer than the copy is guarded on its head and sent whole. */
+    size_t cmd_len = strlen(cmd);
+    char guarded[256];
+    size_t glen = (cmd_len < sizeof(guarded)) ? cmd_len : sizeof(guarded) - 1;
+
+    memcpy(guarded, cmd, glen);
+    guarded[glen] = '\0';
+
+    obd_guard_t gv = obd_chip_guard_cmd(guarded, glen);
+
+    if (gv != OBD_GUARD_PASS)
+    {
+        obd_core_guard_note(gv, cmd, cmd_len);
+    }
+
+    if (gv == OBD_GUARD_BLOCKED)
+    {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    const char *head = (gv == OBD_GUARD_REWRITTEN) ? guarded : cmd;
+
     /* async bring-up: never write mid-negotiation — wait within the
        caller's own budget, then time out without touching the wire
        (boot-window callers like the autopid poller just retry) */
@@ -144,11 +169,15 @@ esp_err_t obd_chip_request(const char *cmd, char *resp, size_t resp_len,
 
     obd_parse_reset(&s_acc);
 
-    /* send the command, appending the CR if the caller omitted it */
-    size_t cmd_len = strlen(cmd);
+    /* send the (guarded) command, appending the CR if the caller omitted it */
     bool needs_cr = (cmd_len == 0 || cmd[cmd_len - 1] != '\r');
 
-    err = obd_uart_write((const uint8_t *)cmd, cmd_len);
+    err = obd_uart_write((const uint8_t *)head, glen);
+
+    if (err == ESP_OK && cmd_len > glen)
+    {
+        err = obd_uart_write((const uint8_t *)cmd + glen, cmd_len - glen);
+    }
 
     if (err == ESP_OK && needs_cr)
     {
