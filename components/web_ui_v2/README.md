@@ -118,12 +118,30 @@ green afterwards). What changed, and what to keep doing:
   over "Polling") holds `enabled`, the pause rules and, under advanced,
   the event rate limit / console flag; each PID group's
   own switch, init chain and (standard) protocol head that group's pane
-  on the **Parameters** tab, and the vehicle name + init sit above the
-  profile picker. Picking a profile in the dropdown IS the load (the
-  vehicle-specific PIDs are replaced live, name + init staged for
-  Submit); **Fetch latest** re-reads the published list with caches
-  bypassed, and the device's current car is preselected on first load
-  (meatpi 2026-09-06 — no separate Load Profile button). The pause threshold is one
+  on the **Parameters** tab. The Vehicle Specific pane heads with ONE
+  **Vehicle profile** row (the `vehicle` setting, still editable) plus a
+  **Choose profile** button (meatpi 2026-09-17, replacing the "Your car"
+  dropdown that PUT the config the moment it changed): a search dialog
+  over the latest published `vehicle_profiles.json` (fetched when it
+  opens, **Fetch latest** re-reads it, arrow keys / Enter / Esc work)
+  whose "Use this profile" only STAGES the pick on the page: the
+  vehicle-specific PIDs are replaced in the table (`Unsaved edits` chip
+  + an info banner with **Discard**), name + init + enable are staged
+  for Submit. Apply Configuration sends the PIDs AND saves the card's
+  staged autopid settings (`PUT /api/settings/autopid`), then offers the
+  restart they need (settings are reboot-to-apply, standard 4.2) in one
+  modal: *Save, restart later* / *Save and restart now* (the sleep-off
+  acknowledgement rides in it; dismissing saves nothing and the pane says
+  so). A refresh after Apply keeps the fields (it used to empty them:
+  they were staged for Submit only, Ali 2026-09-17); "later" leaves the
+  sidebar's Restart pending notice plus a warn banner on the Parameters
+  card with **Restart now**. Nothing reaches the device on its own.
+  Names longer than the schema's 63 chars
+  are cut to fit. Same day: the card's autopid settings/schema load
+  retries once and a failure shows a crit banner with **Retry** on the
+  Parameters tab (it used to drop every group row silently with the
+  error on the hidden Settings tab; reproduced by aborting one request
+  with Playwright). The pause threshold is one
   "Pause polling" choice — *below the Power Saving sleep voltage* /
   *below a voltage I choose* / *never* — mapped onto the firmware's
   `pause_below_mv` (0 = no fixed threshold) + `pause_follow_sleep`; the
@@ -373,7 +391,7 @@ green afterwards). What changed, and what to keep doing:
 
 ### PID lists on Automate > Parameters (2026-09-16)
 
-The three PID tables (Standard / Vehicle Specific / Custom) were a fixed-width spreadsheet of inline inputs: a hard 890-960 px grid that clipped the delete button even at 1440 px and hid half the columns behind an unsignposted scroll at the 1024 px phone layout, parameter sub-rows with no headers that did not line up with the PID columns, every single-value PID shown twice, group/init/cycle repeated on every row, thirteen primary Test buttons, and no live values. `pidTable()` now renders a list: one row per PID = enable switch (the firmware's `enabled`, default true), name + request (+ RX ID on std/custom), the live value(s) the poller holds, a ghost Test and delete (the Vehicle Specific list has the Your car picker right under its enable switch, ahead of the name + init it fills). Expanding a row (the `▸ n parameters` caret, `Expand all` / `Collapse all` in the toolbar) shows the details panel: group / cycle / PID init, then the parameter table WITH headers: per-parameter switch, name, expression (red border while empty), unit, live value, delete, `Add parameter`. Live values: `GET /api/autopid` every 2.5 s while the page is open, written into the cells in place (`liveCell()`), so typing is never interrupted; the toolbar counts `N PIDs · M parameters`, filters by name / request / parameter name, and shows an `Unsaved edits` chip until Apply; a rejected Apply prints the firmware's reason under the list as well as in the toast. Layout is CSS grid with `--pidcols` per list (no min-width), flex-wrapping under 860 px; phones at 1024 CSS px fit without horizontal scroll (verified with Playwright against the bench DUT at 1440 and 1024). Kept on purpose: std names/commands read-only, the live-apply model (Apply Configuration + the Submit-staged vehicle name/init), the `▸` caret text the probes key on. The Test button fires ONE shot per PID (`type` + `expressions[]`, no longer one request per parameter) and the modal shows the firmware's transcript (`> sent` / `< received` for the type init, PID init, ATCRA, request, ATCRA off), the payload and every decoded parameter (meatpi 2026-09-16: "show what is being sent and what is received"). `probe_automate.mjs` covers the rows; the profile import is bench-proven by `tools/testbench/obd/autopid_profile_bench.py`.
+The three PID tables (Standard / Vehicle Specific / Custom) were a fixed-width spreadsheet of inline inputs: a hard 890-960 px grid that clipped the delete button even at 1440 px and hid half the columns behind an unsignposted scroll at the 1024 px phone layout, parameter sub-rows with no headers that did not line up with the PID columns, every single-value PID shown twice, group/init/cycle repeated on every row, thirteen primary Test buttons, and no live values. `pidTable()` now renders a list: one row per PID = enable switch (the firmware's `enabled`, default true), name + request (+ RX ID on std/custom), the live value(s) the poller holds, a ghost Test and delete (the Vehicle Specific list heads with its enable switch, the Vehicle profile row with the Choose profile dialog, and the init chain). Expanding a row (the `▸ n parameters` caret, `Expand all` / `Collapse all` in the toolbar) shows the details panel: group / cycle / PID init, then the parameter table WITH headers: per-parameter switch, name, expression (red border while empty), unit, live value, delete, `Add parameter`. Live values: `GET /api/autopid` every 2.5 s while the page is open, written into the cells in place (`liveCell()`), so typing is never interrupted; the toolbar counts `N PIDs · M parameters`, filters by name / request / parameter name, and shows an `Unsaved edits` chip until Apply; a rejected Apply prints the firmware's reason under the list as well as in the toast. Layout is CSS grid with `--pidcols` per list (no min-width), flex-wrapping under 860 px; phones at 1024 CSS px fit without horizontal scroll (verified with Playwright against the bench DUT at 1440 and 1024). Kept on purpose: std names/commands read-only, the live-apply model (Apply Configuration + the Submit-staged vehicle name/init), the `▸` caret text the probes key on. The Test button fires ONE shot per PID (`type` + `expressions[]`, no longer one request per parameter) and the modal shows the firmware's transcript (`> sent` / `< received` for the type init, PID init, ATCRA, request, ATCRA off), the payload and every decoded parameter (meatpi 2026-09-16: "show what is being sent and what is received"). `probe_automate.mjs` covers the rows; the profile import is bench-proven by `tools/testbench/obd/autopid_profile_bench.py`.
 
 ## On-demand page chunks (2026-09-07)
 
