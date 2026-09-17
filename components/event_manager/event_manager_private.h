@@ -38,15 +38,16 @@ extern "C" {
 #define EM_TIMERS_MAX  4
 #define EM_MATCH_MAX   4
 #define EM_WHEN_MAX    4
-#define EM_SOURCES_MAX 24
-#define EM_ACTIONS_MAX 16
-#define EM_VALUES_MAX  16
+#define EM_SOURCES_MAX 32    /* 23 registered 2026-09-17: headroom >= 2 (§12) */
+#define EM_ACTIONS_MAX 24    /* 14 registered                              */
+#define EM_VALUES_MAX  24    /* 7 registered                               */
 #define EM_WITH_MAX    384   /* serialized `with` object per rule        */
 #define EM_RING        32    /* /api/events/log entries                  */
 
 #define EM_NAME_LEN 32
 #define EM_SEL_LEN  33       /* "source.name"                            */
 #define EM_KEY_LEN  16
+#define EM_VALUE_LEN 40      /* a live-value template in `when`         */
 
 typedef enum
 {
@@ -73,6 +74,10 @@ typedef struct
     char         key[EM_KEY_LEN];
     em_op_t      op;
     em_operand_t val;           /* unused for `changed`                   */
+    /* "${autopid.SOC}": a LIVE value rendered when the rule fires (then
+       key is empty) — conditions on state the trigger does not carry
+       (2026-09-17, the Rules Builder) */
+    char         value[EM_VALUE_LEN];
 } em_when_t;
 
 typedef struct
@@ -87,6 +92,10 @@ typedef struct
     char         action[EM_NAME_LEN];       /* `do`                       */
     char         with_json[EM_WITH_MAX];    /* serialized object or ""    */
     uint32_t     cooldown_ms;
+    /* a "while" rule: the action is applied when the conditions come
+       true and reversed (run with "undo":true) when they stop holding —
+       on the next trigger event, or on the 1 s live re-check */
+    bool         undo;
 } em_rule_t;
 
 /** Per-rule runtime state (RAM only; `changed` is per-boot by design). */
@@ -100,6 +109,11 @@ typedef struct
         double num;
         char   str[EM_STR_MAX];
     } last[EM_WHEN_MAX];        /* previous value per `changed` condition */
+    bool       active;          /* undo rules: the action is in effect    */
+    uint32_t   fired;           /* the action ran (or was queued) OK      */
+    int64_t    last_fired_us;   /* 0 = never                              */
+    em_event_t last_ev;         /* undo rules: the event that (re)armed
+                                   them, re-checked against live values */
 } em_rule_state_t;
 
 /** Settings-applied timer config (the engine owns the esp_timer handles). */
@@ -109,7 +123,8 @@ typedef struct
     uint32_t period_s;
 } em_timer_cfg_t;
 
-/* ---- pure: rules (event_manager_rules.c — host-tested) --------------------- */
+/* ---- pure: rules parse (event_manager_rules.c) + evaluation
+        (event_manager_eval.c) — both host-tested ------------------------------ */
 
 /** Parse+shape-validate the rules array. Registry-existence checks are
  *  the caller's (they need the live registries). */
@@ -151,6 +166,62 @@ esp_err_t em_template_render(const char *tpl, const em_event_t *ev,
 /** Render one kv value as a raw string (the template formatting rules). */
 void em_kv_render(const em_kv_t *kv, char *out, size_t out_len);
 
+/** `when` with live values: conditions carrying `value` ("${...}") are
+ *  rendered through @p resolver (NULL = they never hold); the rest read
+ *  the trigger's fields as before. Updates `changed` slots like
+ *  em_rule_when. */
+bool em_rule_when_ex(const em_rule_t *r, const em_event_t *ev,
+                     em_rule_state_t *st, em_tpl_resolver_t resolver);
+
+/** True when any condition reads a live value. */
+bool em_rule_has_live(const em_rule_t *r);
+
+/** The between-events re-check of an ACTIVE undo rule: only its
+ *  live-value conditions (never `changed`, never trigger fields — those
+ *  move only with a new event), against the stored last_ev. True when
+ *  there is nothing live to re-check. */
+bool em_rule_live_holds(const em_rule_t *r, const em_rule_state_t *st,
+                        em_tpl_resolver_t resolver);
+
+/** What a matched event means for a rule (pure, host-tested): plain rules
+ *  RUN whenever `when` holds; a while-rule (`undo`) RUNs on the first
+ *  holding event (the caller sets st->active once the action was applied,
+ *  after its cooldown check), stores that event for the live re-check,
+ *  and UNDOes on the first event where the conditions stop holding. */
+typedef enum
+{
+    EM_STEP_NONE = 0,
+    EM_STEP_RUN,
+    EM_STEP_UNDO,
+} em_step_t;
+
+em_step_t em_rule_step(const em_rule_t *r, em_rule_state_t *st, bool holds,
+                       const em_event_t *ev);
+
+/** The engine's whole per-event decision for one rule: selector + `match`
+ *  filter, `when` (live values through @p resolver), the while-rule step,
+ *  the cooldown gate (RUN only when it passes; @p suppressed set when it
+ *  did not). The caller runs the action and, on success, calls
+ *  em_rule_applied() so an undo rule becomes active. Pure: the host
+ *  scenario tests replay whole rule combinations through it. */
+em_step_t em_rule_decide(const em_rule_t *r, em_rule_state_t *st,
+                         const em_event_t *ev, const char *selector,
+                         int64_t now_us, em_tpl_resolver_t resolver,
+                         bool *suppressed);
+void em_rule_applied(const em_rule_t *r, em_rule_state_t *st);
+
+/** The dispatcher's periodic pass over ACTIVE while-rules with live
+ *  conditions: true (and st->active cleared) when the undo is due — the
+ *  caller runs the action with undo against st->last_ev. */
+bool em_rule_recheck(const em_rule_t *r, em_rule_state_t *st,
+                     em_tpl_resolver_t resolver);
+
+/** `undo` is only valid on actions that can reverse themselves; the
+ *  settings validator supplies the registry lookup. Error names the rule. */
+esp_err_t em_rules_validate_undo(const em_rule_t *rules, int count,
+                                 bool (*undoable)(const char *action),
+                                 char *err, size_t err_len);
+
 #ifndef EM_HOST_TEST
 /* ---- registry half (event_manager_registry.c): registries, the log
         ring, the JSON builders. The engine half (event_manager.c) owns
@@ -187,6 +258,7 @@ cJSON *em_core_sources_json(void);
 cJSON *em_core_actions_json(void);
 cJSON *em_core_values_json(void);
 cJSON *em_core_log_json(void);      /* stats + the event ring            */
+cJSON *em_core_rules_json(void);    /* per-rule runtime: fired, active   */
 #endif
 
 #ifdef __cplusplus

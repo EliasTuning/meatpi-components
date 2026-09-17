@@ -178,6 +178,30 @@ bool em_selector_known(const char *selector)
     return false;
 }
 
+void event_manager_capacity(size_t *src_used, size_t *src_cap,
+                            size_t *act_used, size_t *act_cap)
+{
+    if (src_used != NULL)
+    {
+        *src_used = (size_t)s_n_sources;
+    }
+
+    if (src_cap != NULL)
+    {
+        *src_cap = EM_SOURCES_MAX;
+    }
+
+    if (act_used != NULL)
+    {
+        *act_used = (size_t)s_n_actions;
+    }
+
+    if (act_cap != NULL)
+    {
+        *act_cap = EM_ACTIONS_MAX;
+    }
+}
+
 int em_source_count(void) { return s_n_sources; }
 int em_action_count(void) { return s_n_actions; }
 int em_value_count(void)  { return s_n_values; }
@@ -288,6 +312,7 @@ cJSON *em_core_actions_json(void)
 
         cJSON_AddItemToObject(o, "params_schema",
                               schema ? schema : cJSON_CreateObject());
+        cJSON_AddBoolToObject(o, "undoable", s_actions[i].undoable);
         cJSON_AddItemToArray(arr, o);
     }
 

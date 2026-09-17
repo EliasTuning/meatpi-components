@@ -22,15 +22,17 @@
 
 /**
  * @file event_manager_rules.c
- * @brief PURE rule engine (host-tested): parse/shape-validate the rules
- *        array, `match` equality pre-filter, `when` condition list
- *        (AND; ==/!=/>/>=/</<=/changed/contains), cooldown arithmetic.
- *        No IDF types beyond cJSON; time is a caller-supplied 64-bit µs.
+ * @brief PURE rule parsing (host-tested): parse/shape-validate the rules
+ *        array (name/on/match/when incl. live-value conditions/do/with/
+ *        undo/cooldown_ms) and the undo-vs-action check the settings
+ *        validator runs with the live registry. Evaluation lives in
+ *        event_manager_eval.c. No IDF types beyond cJSON.
  */
 #include "event_manager_private.h"
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- parse -------------------------------------------------------------------- */
@@ -153,6 +155,8 @@ esp_err_t em_rules_parse(const cJSON *rules, em_rule_t *out, int max,
                                                            "enabled");
 
         r->enabled = !cJSON_IsFalse(en);
+        r->undo = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item,
+                                                              "undo"));
 
         if (!copy_bounded(r->on, sizeof(r->on),
                           cJSON_GetObjectItemCaseSensitive(item, "on"),
@@ -259,18 +263,36 @@ esp_err_t em_rules_parse(const cJSON *rules, em_rule_t *out, int max,
 
                 em_when_t *c = &r->when[r->n_when];
                 char op[12];
+                const cJSON *wk = cJSON_GetObjectItemCaseSensitive(w,
+                                                                   "key");
+                const cJSON *wv = cJSON_GetObjectItemCaseSensitive(w,
+                                                                   "value");
+                bool has_key = cJSON_IsString(wk) &&
+                               wk->valuestring[0] != '\0';
+                bool has_val = cJSON_IsString(wv) &&
+                               wv->valuestring[0] != '\0';
 
-                if (!copy_bounded(c->key, sizeof(c->key),
-                                  cJSON_GetObjectItemCaseSensitive(w,
-                                                                   "key"),
-                                  true) ||
-                    c->key[0] == '\0' ||
+                /* key = a field of the trigger; value = a live-value
+                   template ("${autopid.SOC}") read when the rule fires.
+                   Exactly one of the two. */
+                if (has_key == has_val)
+                {
+                    perr(err, err_len, idx, "when needs key or value");
+                    return ESP_ERR_INVALID_ARG;
+                }
+
+                if ((has_key && !copy_bounded(c->key, sizeof(c->key), wk,
+                                              true)) ||
+                    (has_val && (!copy_bounded(c->value, sizeof(c->value),
+                                               wv, true) ||
+                                 strstr(c->value, "${") == NULL)) ||
                     !copy_bounded(op, sizeof(op),
                                   cJSON_GetObjectItemCaseSensitive(w,
                                                                    "op"),
                                   true))
                 {
-                    perr(err, err_len, idx, "when needs key+op");
+                    perr(err, err_len, idx,
+                         "when needs op; value needs ${...}");
                     return ESP_ERR_INVALID_ARG;
                 }
 
@@ -375,156 +397,19 @@ esp_err_t em_rules_parse(const cJSON *rules, em_rule_t *out, int max,
 
 /* ---- evaluation --------------------------------------------------------------- */
 
-const em_kv_t *em_event_get(const em_event_t *ev, const char *key)
+esp_err_t em_rules_validate_undo(const em_rule_t *rules, int count,
+                                 bool (*undoable)(const char *action),
+                                 char *err, size_t err_len)
 {
-    for (uint8_t i = 0; i < ev->n && i < EM_KV_MAX; i++)
+    for (int i = 0; i < count; i++)
     {
-        if (ev->kv[i].key != NULL && strcmp(ev->kv[i].key, key) == 0)
+        if (rules[i].undo && !undoable(rules[i].action))
         {
-            return &ev->kv[i];
+            snprintf(err, err_len, "%s: '%s' cannot undo", rules[i].name,
+                     rules[i].action);
+            return ESP_ERR_INVALID_ARG;
         }
     }
 
-    return NULL;
-}
-
-/** kv as a number (bools 0/1); false when it is a string. */
-static bool kv_num(const em_kv_t *kv, double *out)
-{
-    switch (kv->type)
-    {
-        case EM_VAL_F64:  *out = kv->v.f64;            return true;
-        case EM_VAL_I64:  *out = (double)kv->v.i64;    return true;
-        case EM_VAL_BOOL: *out = kv->v.b ? 1 : 0;      return true;
-        default:                                        return false;
-    }
-}
-
-static bool operand_equals_kv(const em_operand_t *o, const em_kv_t *kv)
-{
-    double n;
-
-    if (o->is_num)
-    {
-        return kv_num(kv, &n) && n == o->num;
-    }
-
-    return kv->type == EM_VAL_STR && strcmp(kv->v.str, o->str) == 0;
-}
-
-bool em_rule_match(const em_rule_t *r, const em_event_t *ev)
-{
-    for (uint8_t i = 0; i < r->n_match; i++)
-    {
-        const em_kv_t *kv = em_event_get(ev, r->match[i].key);
-
-        if (kv == NULL || !operand_equals_kv(&r->match[i], kv))
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-static bool when_holds(const em_when_t *c, const em_kv_t *kv,
-                       em_rule_state_t *st, int slot)
-{
-    double n;
-
-    switch (c->op)
-    {
-        case EM_OP_EQ:
-            return operand_equals_kv(&c->val, kv);
-        case EM_OP_NE:
-            return !operand_equals_kv(&c->val, kv);
-        case EM_OP_GT:
-            return kv_num(kv, &n) && n > c->val.num;
-        case EM_OP_GE:
-            return kv_num(kv, &n) && n >= c->val.num;
-        case EM_OP_LT:
-            return kv_num(kv, &n) && n < c->val.num;
-        case EM_OP_LE:
-            return kv_num(kv, &n) && n <= c->val.num;
-        case EM_OP_CONTAINS:
-            return kv->type == EM_VAL_STR && !c->val.is_num &&
-                   strstr(kv->v.str, c->val.str) != NULL;
-        case EM_OP_CHANGED:
-        {
-            /* differs from the previous match-passing occurrence; the
-               first one counts as changed (slot invalid) */
-            bool is_num = kv_num(kv, &n);
-            bool changed;
-
-            if (!st->last[slot].valid)
-            {
-                changed = true;
-            }
-            else if (is_num != st->last[slot].is_num)
-            {
-                changed = true;
-            }
-            else if (is_num)
-            {
-                changed = (n != st->last[slot].num);
-            }
-            else
-            {
-                changed = (strcmp(kv->v.str, st->last[slot].str) != 0);
-            }
-
-            /* slot updates happen for every matched event (caller
-               invokes em_rule_when on each) */
-            st->last[slot].valid = true;
-            st->last[slot].is_num = is_num;
-            st->last[slot].num = is_num ? n : 0;
-
-            if (!is_num)
-            {
-                snprintf(st->last[slot].str, EM_STR_MAX, "%s",
-                         (kv->type == EM_VAL_STR) ? kv->v.str : "");
-            }
-
-            return changed;
-        }
-        default:
-            return false;
-    }
-}
-
-bool em_rule_when(const em_rule_t *r, const em_event_t *ev,
-                  em_rule_state_t *st)
-{
-    bool all = true;
-
-    for (uint8_t i = 0; i < r->n_when; i++)
-    {
-        const em_kv_t *kv = em_event_get(ev, r->when[i].key);
-
-        if (kv == NULL)
-        {
-            all = false;    /* keep going: changed slots still update    */
-            continue;
-        }
-
-        if (!when_holds(&r->when[i], kv, st, i))
-        {
-            all = false;
-        }
-    }
-
-    return all;
-}
-
-bool em_rule_cooldown_ok(const em_rule_t *r, em_rule_state_t *st,
-                         int64_t now_us)
-{
-    if (r->cooldown_ms > 0 && st->last_fire_us != 0 &&
-        now_us - st->last_fire_us < (int64_t)r->cooldown_ms * 1000)
-    {
-        return false;
-    }
-
-    st->last_fire_us = now_us;
-    return true;
+    return ESP_OK;
 }

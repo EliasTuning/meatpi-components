@@ -117,6 +117,13 @@ int em_settings_timer_count(void)
     return s_n_timers;
 }
 
+static bool action_undoable(const char *name)
+{
+    const em_action_t *a = em_find_action(name);
+
+    return a != NULL && a->undoable;
+}
+
 static esp_err_t on_validate(const cJSON *settings, char *err,
                              size_t err_len)
 {
@@ -150,6 +157,19 @@ static esp_err_t on_validate(const cJSON *settings, char *err,
             snprintf(err, err_len, "%s: unknown event '%s'",
                      probe[i].name, probe[i].on);
             return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    /* `undo` only on actions that can reverse themselves (pure check, the
+       registry lookup injected) — skipped at the boot apply like the rest */
+    if (em_action_count() > 0)
+    {
+        rc = em_rules_validate_undo(probe, count, action_undoable, err,
+                                    err_len);
+
+        if (rc != ESP_OK)
+        {
+            return rc;
         }
     }
 

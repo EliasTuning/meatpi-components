@@ -121,6 +121,12 @@ typedef struct
        other events. Like every action, run() MUST NOT touch flash (the
        workers are PSRAM stacks — §2 corollary). Default false = inline. */
     bool        blocking;
+    /* true = the action can be reversed: a rule with `undo:true` (a
+       "while" rule) calls run() again with "undo":true added to `with`
+       when its conditions stop holding (autopid.group restores the
+       configured group state, led.indicate clears). Default false =
+       settings validation rejects `undo` on the action. 2026-09-17 */
+    bool        undoable;
 } em_action_t;
 
 /* ---- lifecycle ---------------------------------------------------------------- */
@@ -190,6 +196,11 @@ typedef struct
 } event_manager_stats_t;
 
 esp_err_t event_manager_stats(event_manager_stats_t *out);
+
+/** Registry occupancy for the WICAN CAPS boot line / health surface
+ *  (standard §12): sources and actions are the cross-component tables. */
+void event_manager_capacity(size_t *src_used, size_t *src_cap,
+                            size_t *act_used, size_t *act_cap);
 
 /** The /api/events discovery + log routes (own-routes pattern §9.1). */
 esp_err_t event_manager_register_http(void);

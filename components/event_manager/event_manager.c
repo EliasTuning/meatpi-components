@@ -60,6 +60,7 @@ static const char *TAG = "event_manager";
 #define EM_WORKERS       2
 #define EM_JOB_QUEUE     8
 #define EM_WORKER_STACK  4096
+#define EM_RECHECK_US    1000000 /* live re-check of active undo rules */
 
 /* ---- runtime halves of the settings-applied config --------------------------------
         event_manager_settings.c owns the PARSED config (rules, timer periods,
@@ -89,6 +90,7 @@ typedef struct
     const em_action_t *action;
     cJSON             *with;       /* owned by the job                    */
     em_event_t         trigger;
+    int                rule;       /* index, for the per-rule counters    */
 } em_job_t;
 
 static QueueHandle_t s_jobq;
@@ -112,6 +114,21 @@ static inline void stat_bump(uint32_t *counter)
 {
     portENTER_CRITICAL(&s_stats_mux);
     (*counter)++;
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
+/** Per-rule counters (the list's "fired 3x, 2 min ago"): dispatcher
+ *  (inline actions) and workers both bump them. */
+static void rule_fired(int r)
+{
+    if (r < 0 || r >= EM_RULES_MAX)
+    {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_stats_mux);
+    s_rule_state[r].fired++;
+    s_rule_state[r].last_fired_us = esp_timer_get_time();
     portEXIT_CRITICAL(&s_stats_mux);
 }
 
@@ -272,6 +289,7 @@ static void worker_task(void *arg)
         if (err == ESP_OK)
         {
             stat_bump(&s_stats.fired);
+            rule_fired(job.rule);
         }
         else
         {
@@ -282,6 +300,77 @@ static void worker_task(void *arg)
     }
 }
 
+/** Render the rule's `with` and run (inline) or queue (blocking) its
+ *  action; @p undo adds "undo":true so an undoable action reverses
+ *  itself. True = ran OK or was queued (the ring marks it fired). */
+static bool run_action(const em_rule_t *rule, int r, const em_event_t *ev,
+                       bool undo)
+{
+    const em_action_t *action = em_find_action(rule->action);
+
+    if (action == NULL)
+    {
+        ESP_LOGW(TAG, "%s: unknown action '%s'", rule->name,
+                 rule->action);
+        s_stats.action_errors++;
+        return false;
+    }
+
+    static char s_render[2048] EXT_RAM_BSS_ATTR; /* dispatcher only */
+    cJSON *with = (rule->with_json[0] != '\0')
+                      ? cJSON_Parse(rule->with_json)
+                      : cJSON_CreateObject();
+
+    if (with == NULL)
+    {
+        s_stats.action_errors++;
+        return false;
+    }
+
+    render_with(with, ev, s_render, sizeof(s_render));
+
+    if (undo)
+    {
+        cJSON_AddBoolToObject(with, "undo", true);
+        ESP_LOGI(TAG, "%s: conditions no longer hold, undoing %s",
+                 rule->name, rule->action);
+    }
+
+    if (action->blocking)
+    {
+        /* offload to the worker pool — ownership of `with` moves to
+           the job; do NOT delete it here. Marks the ring as
+           dispatched; the worker records the real fired/error stat. */
+        em_job_t job = { .action = action, .with = with,
+                         .trigger = *ev, .rule = r };
+
+        if (enqueue_job(&job))
+        {
+            return true;
+        }
+
+        cJSON_Delete(with); /* couldn't queue at all */
+        s_stats.blocking_dropped++;
+        return false;
+    }
+
+    esp_err_t err = action->run(with, ev);
+
+    cJSON_Delete(with);
+
+    if (err == ESP_OK)
+    {
+        stat_bump(&s_stats.fired);
+        rule_fired(r);
+        return true;
+    }
+
+    ESP_LOGW(TAG, "%s: action %s failed (%s)", rule->name, rule->action,
+             esp_err_to_name(err));
+    stat_bump(&s_stats.action_errors);
+    return false;
+}
+
 static void dispatch_one(const em_event_t *ev)
 {
     char selector[EM_SEL_LEN];
@@ -290,98 +379,95 @@ static void dispatch_one(const em_event_t *ev)
     snprintf(selector, sizeof(selector), "%s.%s", ev->source, ev->name);
 
     const em_rule_t *rules = em_settings_rules();
+    int64_t now = esp_timer_get_time();
 
     for (int r = 0; r < em_rule_count(); r++)
     {
         const em_rule_t *rule = &rules[r];
+        em_rule_state_t *st = &s_rule_state[r];
+        bool suppressed = false;
 
-        if (!rule->enabled || strcmp(rule->on, selector) != 0 ||
-            !em_rule_match(rule, ev))
+        /* the decision is pure (em_rule_decide, host-tested with whole
+           scenarios); this loop only runs actions and keeps the stats */
+        switch (em_rule_decide(rule, st, ev, selector, now, em_value_resolve,
+                               &suppressed))
         {
-            continue;
+            case EM_STEP_RUN:
+                if (run_action(rule, r, ev, false))
+                {
+                    em_rule_applied(rule, st);
+                    fired |= (uint16_t)(1u << r);
+                }
+                break;
+            case EM_STEP_UNDO:
+                if (run_action(rule, r, ev, true))
+                {
+                    fired |= (uint16_t)(1u << r);
+                }
+                break;
+            default:
+                break;
         }
 
-        /* when-eval also updates the `changed` slots — run it for every
-           matched event even if cooldown later suppresses the action */
-        if (!em_rule_when(rule, ev, &s_rule_state[r]))
-        {
-            continue;
-        }
-
-        if (!em_rule_cooldown_ok(rule, &s_rule_state[r],
-                                 esp_timer_get_time()))
+        if (suppressed)
         {
             s_stats.suppressed++;
-            continue;
-        }
-
-        const em_action_t *action = em_find_action(rule->action);
-
-        if (action == NULL)
-        {
-            ESP_LOGW(TAG, "%s: unknown action '%s'", rule->name,
-                     rule->action);
-            s_stats.action_errors++;
-            continue;
-        }
-
-        static char s_render[2048] EXT_RAM_BSS_ATTR; /* dispatcher only */
-        cJSON *with = (rule->with_json[0] != '\0')
-                          ? cJSON_Parse(rule->with_json)
-                          : cJSON_CreateObject();
-
-        if (with == NULL)
-        {
-            s_stats.action_errors++;
-            continue;
-        }
-
-        render_with(with, ev, s_render, sizeof(s_render));
-
-        if (action->blocking)
-        {
-            /* offload to the worker pool — ownership of `with` moves to
-               the job; do NOT delete it here. Marks the ring as
-               dispatched; the worker records the real fired/error stat. */
-            em_job_t job = { .action = action, .with = with,
-                             .trigger = *ev };
-
-            if (enqueue_job(&job))
-            {
-                fired |= (uint16_t)(1u << r);
-            }
-            else
-            {
-                cJSON_Delete(with); /* couldn't queue at all */
-                s_stats.blocking_dropped++;
-            }
-
-            continue;
-        }
-
-        esp_err_t err = action->run(with, ev);
-
-        cJSON_Delete(with);
-
-        if (err == ESP_OK)
-        {
-            stat_bump(&s_stats.fired);
-            fired |= (uint16_t)(1u << r);
-        }
-        else
-        {
-            ESP_LOGW(TAG, "%s: action %s failed (%s)", rule->name,
-                     rule->action, esp_err_to_name(err));
-            stat_bump(&s_stats.action_errors);
         }
     }
 
     em_ring_append(ev, fired);
 }
 
+/** Between events: an ACTIVE undo rule whose live-value conditions no
+ *  longer hold gets its undo — its trigger may stay silent (SOC drifting
+ *  down while CHARGING never changes). Runs every EM_RECHECK_US. */
+static void recheck_active(void)
+{
+    const em_rule_t *rules = em_settings_rules();
+
+    for (int r = 0; r < em_rule_count(); r++)
+    {
+        em_rule_state_t *st = &s_rule_state[r];
+
+        if (em_rule_recheck(&rules[r], st, em_value_resolve))
+        {
+            (void)run_action(&rules[r], r, &st->last_ev, true);
+        }
+    }
+}
+
+cJSON *em_core_rules_json(void)
+{
+    cJSON *arr = cJSON_CreateArray();
+    const em_rule_t *rules = em_settings_rules();
+    int64_t now = esp_timer_get_time();
+
+    for (int r = 0; r < em_rule_count() && arr != NULL; r++)
+    {
+        const em_rule_state_t *st = &s_rule_state[r];
+        cJSON *o = cJSON_CreateObject();
+
+        cJSON_AddStringToObject(o, "name", rules[r].name);
+        cJSON_AddBoolToObject(o, "enabled", rules[r].enabled);
+        cJSON_AddBoolToObject(o, "undo", rules[r].undo);
+        cJSON_AddBoolToObject(o, "active", st->active);
+        cJSON_AddNumberToObject(o, "fired", st->fired);
+        cJSON_AddNumberToObject(o, "last_fired_age_s",
+                                st->last_fired_us
+                                    ? (double)((now - st->last_fired_us)
+                                               / 1000000)
+                                    : -1);
+        cJSON_AddItemToArray(arr, o);
+    }
+
+    return arr;
+}
+
 static void dispatcher_task(void *arg)
 {
     (void)arg;
+
+    int64_t last_check_us = 0;
 
     while (true)
     {
@@ -390,6 +476,14 @@ static void dispatcher_task(void *arg)
         if (xQueueReceive(s_q, &ev, pdMS_TO_TICKS(500)) == pdTRUE)
         {
             dispatch_one(&ev);
+        }
+
+        int64_t now = esp_timer_get_time();
+
+        if (now - last_check_us >= EM_RECHECK_US)
+        {
+            last_check_us = now;
+            recheck_active();
         }
     }
 }

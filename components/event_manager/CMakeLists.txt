@@ -3,6 +3,7 @@ idf_component_register(
          "event_manager_settings.c"
          "event_manager_registry.c"
          "event_manager_rules.c"
+         "event_manager_eval.c"
          "event_manager_template.c"
          "event_manager_http.c"
     INCLUDE_DIRS "include"

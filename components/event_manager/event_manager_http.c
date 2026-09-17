@@ -30,6 +30,8 @@
  * GET /api/events/actions — registered actions + params_schema
  * GET /api/events/values  — pull-value names (trailing '.' = prefix)
  * GET /api/events/log     — stats + the last 32 events + fired rules
+ * GET /api/events/rules   — per-rule runtime: fired count, last fired,
+                             active (undo rules) — the list's badges
  */
 #include <stdlib.h>
 
@@ -88,6 +90,11 @@ static esp_err_t log_handler(httpd_req_t *req)
     return send_json(req, em_core_log_json());
 }
 
+static esp_err_t rules_handler(httpd_req_t *req)
+{
+    return send_json(req, em_core_rules_json());
+}
+
 esp_err_t event_manager_register_http(void)
 {
     static const httpd_uri_t URIS[] =
@@ -100,6 +107,8 @@ esp_err_t event_manager_register_http(void)
           .handler = values_handler },
         { .uri = "/api/events/log", .method = HTTP_GET,
           .handler = log_handler },
+        { .uri = "/api/events/rules", .method = HTTP_GET,
+          .handler = rules_handler },
     };
 
     esp_err_t err = http_server_manager_register_handlers(
