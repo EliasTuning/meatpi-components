@@ -36,6 +36,12 @@ static esp_err_t act_indicate(const cJSON *with, const em_event_t *ev)
 {
     (void)ev;
 
+    /* the engine's undo of a "while" rule: the alert goes away */
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(with, "undo")))
+    {
+        return led_manager_clear(LED_MANAGER_PRIO_ALERT);
+    }
+
     const cJSON *r = cJSON_GetObjectItemCaseSensitive(with, "r");
     const cJSON *g = cJSON_GetObjectItemCaseSensitive(with, "g");
     const cJSON *b = cJSON_GetObjectItemCaseSensitive(with, "b");
@@ -94,6 +100,7 @@ void lm_events_register(void)
             "\"enum\":[\"solid\",\"off\",\"blink_slow\",\"blink_fast\"]}},"
             "\"required\":[\"r\",\"g\",\"b\"]}",
         .run = act_indicate,
+        .undoable = true,
     };
     static const em_action_t CLEAR =
     {

@@ -28,6 +28,11 @@ use case picks by urgency, no registration needed.
 
 ## Decided semantics
 
+- **`led.indicate` is undoable (2026-09-17)**: a rule with `undo:true` runs
+  the action again with `"undo":true` when its conditions stop holding, and
+  the handler clears the ALERT slot (`led_manager_clear`) — "blink while the
+  battery is low" is one rule.
+
 - Blink is the AW2023's **hardware pattern engine** (T1..T4 timers): zero
   CPU after the register writes. Fast ≈ 130 ms on/off, slow ≈ 510 ms.
 - A mixed color blinks as one: the same pattern timing is written to every
