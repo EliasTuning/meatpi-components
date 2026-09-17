@@ -175,7 +175,18 @@ static esp_err_t act_group(const cJSON *with, const em_event_t *trigger)
     const cJSON *period = cJSON_GetObjectItemCaseSensitive(with,
                                                            "period_ms");
 
-    if (!cJSON_IsString(group) || !cJSON_IsBool(enabled))
+    if (!cJSON_IsString(group))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* the engine's undo of a "while" rule: back to the configured state */
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(with, "undo")))
+    {
+        return autopid_group_restore(group->valuestring);
+    }
+
+    if (!cJSON_IsBool(enabled))
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -420,6 +431,7 @@ void ap_events_register(void)
             "\"period_ms\":{\"type\":\"integer\",\"minimum\":0}},"
             "\"required\":[\"group\",\"enabled\"]}",
         .run = act_group,
+        .undoable = true,
     };
 
     /* DTC (TASK_dtc.md §7) */

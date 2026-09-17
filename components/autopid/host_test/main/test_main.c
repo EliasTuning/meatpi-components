@@ -203,6 +203,37 @@ void test_sched_fail_backoff(void)
     TEST_ASSERT_EQUAL(1000 * 1000, ap_sched_period_us(&s_st, &s_cfg, p));
 }
 
+void test_sched_group_set_restore(void)
+{
+    /* the §5b override and its undo (2026-09-17: a while-rule ending must
+       put the group back to the CONFIGURED state, not merely re-enable it) */
+    cfg_reset();
+
+    int g = add_group("default", true, 1000);
+    int p = add_pid("soc", g, 0, 1);
+    int g2 = add_group("charging", false, 500);
+    int p2 = add_pid("cell", g2, 0, 1);
+
+    ap_sched_reset(&s_st, &s_cfg, 0);
+    ap_sched_group_set(&s_st, g, false, 250);
+    TEST_ASSERT_FALSE(ap_sched_entry_enabled(&s_st, &s_cfg, p));
+    TEST_ASSERT_EQUAL(250 * 1000, ap_sched_period_us(&s_st, &s_cfg, p));
+    ap_sched_group_set(&s_st, g, true, -1);   /* -1 keeps the override    */
+    TEST_ASSERT_TRUE(ap_sched_entry_enabled(&s_st, &s_cfg, p));
+    TEST_ASSERT_EQUAL(250 * 1000, ap_sched_period_us(&s_st, &s_cfg, p));
+    ap_sched_group_restore(&s_st, &s_cfg, g);  /* the undo                 */
+    TEST_ASSERT_TRUE(ap_sched_entry_enabled(&s_st, &s_cfg, p));
+    TEST_ASSERT_EQUAL(1000 * 1000, ap_sched_period_us(&s_st, &s_cfg, p));
+    /* a group configured OFF: enabled by a rule, restore switches it off */
+    TEST_ASSERT_FALSE(ap_sched_entry_enabled(&s_st, &s_cfg, p2));
+    ap_sched_group_set(&s_st, g2, true, 100);
+    TEST_ASSERT_TRUE(ap_sched_entry_enabled(&s_st, &s_cfg, p2));
+    TEST_ASSERT_EQUAL(100 * 1000, ap_sched_period_us(&s_st, &s_cfg, p2));
+    ap_sched_group_restore(&s_st, &s_cfg, g2);
+    TEST_ASSERT_FALSE(ap_sched_entry_enabled(&s_st, &s_cfg, p2));
+    TEST_ASSERT_EQUAL(500 * 1000, ap_sched_period_us(&s_st, &s_cfg, p2));
+}
+
 void test_sched_stagger(void)
 {
     cfg_reset();
@@ -2006,6 +2037,7 @@ void app_main(void)
     RUN_TEST(test_dbc_muxed_value_crosscheck);
 
     RUN_TEST(test_client_hold_window);
+    RUN_TEST(test_sched_group_set_restore);
 
     UNITY_END();
 }

@@ -136,6 +136,23 @@ int64_t ap_sched_period_us(const ap_sched_t *st, const ap_config_t *cfg,
     return period_ms * 1000;
 }
 
+void ap_sched_group_set(ap_sched_t *st, int g, bool enabled,
+                        int32_t period_override_ms)
+{
+    st->group_enabled[g] = enabled;
+
+    if (period_override_ms >= 0)
+    {
+        st->group_period_override[g] = period_override_ms;
+    }
+}
+
+void ap_sched_group_restore(ap_sched_t *st, const ap_config_t *cfg, int g)
+{
+    st->group_enabled[g] = cfg->groups[g].enabled_default;
+    st->group_period_override[g] = -1;
+}
+
 int ap_sched_next(const ap_sched_t *st, const ap_config_t *cfg,
                   int64_t *due_us)
 {

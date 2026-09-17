@@ -189,6 +189,13 @@ int ap_sched_next(const ap_sched_t *st, const ap_config_t *cfg,
                   int64_t *due_us);
 
 /** Record a run of entry @p i: reschedule + fail-streak bookkeeping. */
+/** Runtime group control (pure): set = the §5b override (period < 0 keeps
+ *  the current override), restore = back to the configured defaults (the
+ *  undo of a while-rule). @p g is a valid group index. */
+void ap_sched_group_set(ap_sched_t *st, int g, bool enabled,
+                        int32_t period_override_ms);
+void ap_sched_group_restore(ap_sched_t *st, const ap_config_t *cfg, int g);
+
 void ap_sched_ran(ap_sched_t *st, const ap_config_t *cfg, int i,
                   int64_t now_us, bool ok);
 
@@ -222,6 +229,12 @@ const char *autopid_config_path(void);
 
 /* core internals shared with the http/cli surfaces (autopid.c) */
 const ap_config_t *ap_core_config(void);
+/* autopid_group.c (runtime group control + its JSON) borrows the core's
+   lock, scheduler state and poller wake-up through these */
+void ap_core_lock(void);
+void ap_core_unlock(void);
+ap_sched_t *ap_core_sched(void);
+void ap_core_wake(void);
 esp_err_t ap_core_group_json(cJSON *arr);   /* append group states       */
 uint16_t ap_core_sub_floor_count(void);     /* PIDs configured 1..49 ms  */
 void ap_core_scan_pause(bool on);           /* std scan owns the chip    */

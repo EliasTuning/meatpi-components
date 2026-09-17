@@ -6,6 +6,7 @@ idf_component_register(
          "autopid_filter.c"
          "autopid_config.c"
          "autopid_sched.c"
+         "autopid_group.c"
          "autopid_resp.c"
          "autopid_std.c"
          "autopid_cache.c"

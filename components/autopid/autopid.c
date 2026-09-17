@@ -486,71 +486,30 @@ esp_err_t autopid_stop(void)
     return ESP_OK;
 }
 
-esp_err_t autopid_group_set(const char *group, bool enabled,
-                            int32_t period_override_ms)
+/* ---- runtime group control lives in autopid_group.c: it borrows the
+   core's lock, tables and poller handle through these ------------------- */
+
+void ap_core_lock(void)
 {
-    if (group == NULL)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    esp_err_t err = ESP_ERR_NOT_FOUND;
-
     xSemaphoreTake(s_lock, portMAX_DELAY);
+}
 
-    for (int g = 0; g < s_cfg.n_groups; g++)
-    {
-        if (strcmp(s_cfg.groups[g].name, group) == 0)
-        {
-            s_sched.group_enabled[g] = enabled;
-
-            if (period_override_ms >= 0)
-            {
-                s_sched.group_period_override[g] = period_override_ms;
-            }
-
-            err = ESP_OK;
-            ESP_LOGI(TAG, "group '%s': %s%s", group,
-                     enabled ? "enabled" : "disabled",
-                     (period_override_ms >= 0) ? " (period override)" : "");
-            break;
-        }
-    }
-
+void ap_core_unlock(void)
+{
     xSemaphoreGive(s_lock);
+}
 
-    if (err == ESP_OK && s_task != NULL)
+ap_sched_t *ap_core_sched(void)
+{
+    return &s_sched;
+}
+
+void ap_core_wake(void)
+{
+    if (s_task != NULL)
     {
         xTaskNotifyGive(s_task);
     }
-
-    return err;
-}
-
-esp_err_t ap_core_group_json(cJSON *arr)
-{
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-
-    for (int g = 0; g < s_cfg.n_groups; g++)
-    {
-        cJSON *o = cJSON_CreateObject();
-
-        if (o == NULL)
-        {
-            break;
-        }
-
-        cJSON_AddStringToObject(o, "name", s_cfg.groups[g].name);
-        cJSON_AddBoolToObject(o, "enabled", s_sched.group_enabled[g]);
-        cJSON_AddNumberToObject(o, "period_ms",
-                                (s_sched.group_period_override[g] >= 0)
-                                    ? s_sched.group_period_override[g]
-                                    : (double)s_cfg.groups[g].period_ms);
-        cJSON_AddItemToArray(arr, o);
-    }
-
-    xSemaphoreGive(s_lock);
-    return ESP_OK;
 }
 
 void ap_core_scan_pause(bool on)

@@ -52,6 +52,26 @@ Decisions log there is authoritative; the big ones:
   (enable, per-type enables, init strings, pause voltage, min event
   interval — reboot-to-apply like every component).
 
+## API (`include/autopid.h`)
+
+- `autopid_init()` / `_start()` / `_stop()` — settings + log descriptor; the
+  poller task (PSRAM stack, notify-driven); stop latches the idle state.
+- `autopid_group_set(group, enabled, period_override_ms)` — the EPHEMERAL
+  runtime group switch/rate override (`POST /api/autopid/group`, the
+  `autopid.group` rule action); `< 0` keeps the period, 0 = max rate.
+- `autopid_group_restore(group)` (2026-09-17) — back to the configured
+  enable + rate: the undo of an `autopid.group` while-rule.
+- `autopid_snapshot(&json)` / `autopid_get_value(param, &v, &unit)` /
+  `autopid_set_value_sink(sink)` / `autopid_publish_external(...)` — the
+  live value cache in and out.
+- `autopid_config_json_dup(&s)` / `autopid_reload_config()` — the PID table
+  file (`PUT /api/autopid/config` applies LIVE).
+- `autopid_stats(&st)` / `autopid_ecu_online()` — poll counters, pause
+  reasons, ECU presence.
+- `autopid_dtc_scan_start()` / `_scanning()` / `_report(&json)` /
+  `_clear(codes, mode, ...)` / `_desc(code, ...)` — the DTC engine.
+- `autopid_register_http()` / `autopid_register_cli()` — own routes/commands.
+
 ## Files
 
 | File | Role |
@@ -60,7 +80,8 @@ Decisions log there is authoritative; the big ones:
 | `autopid_runner.c` | the chip-facing poll: type/per-PID init transitions, ATCRA rxheader, request → parse → guard → eval → cache |
 | `autopid_filter.c` | the ATMA filter window: MONITOR claim, header/CRA choreography, frame capture (`ap_filter_frame`, pure), retried stop |
 | `autopid_std.c` | standard PIDs: vendored SAE table (obd2_standard_pids.h), PURE bit_start→expression mapping + bitmap parser, the async support scan (`/data/autopid/std_scan.json`) |
-| `autopid_sched.c` | PURE scheduler: due times, group inheritance/override, fail backoff (×4 after 3), period-0 high-fidelity round-robin, stagger |
+| `autopid_sched.c` | PURE scheduler: due times, group inheritance/override (`ap_sched_group_set`/`_restore`, 2026-09-17), fail backoff (×4 after 3), period-0 high-fidelity round-robin, stagger |
+| `autopid_group.c` | runtime group control: `autopid_group_set`/`_restore` (name lookup under the core lock + poller wake-up over the pure scheduler calls) and the group state JSON (split out of autopid.c 2026-09-17) |
 | `autopid_resp.c` | PURE ELM text → payload bytes (headers on/off, ISO-TP single/multi, lowest-responder rule, noise/error lines) + the cross-talk guard (`ap_payload_matches_cmd` — a second chip master's response can't be cached as ours) |
 | `autopid_config.c` | PURE JSON parse/validate + target file load/save (atomic) |
 | `autopid_cache.c` | latest-value slots (PSRAM, mutex), legacy snapshot + detail JSON, plus the **external-value table** (12 name-keyed injected samples: GPS from the ESPNetLink dongle) merged into every snapshot/get/detail |

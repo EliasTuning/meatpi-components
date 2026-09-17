@@ -62,6 +62,11 @@ esp_err_t autopid_stop(void);
 esp_err_t autopid_group_set(const char *group, bool enabled,
                             int32_t period_override_ms);
 
+/** Drop the runtime override: enabled back to the group's configured
+ *  default, period back to the configured one. The `undo` of the
+ *  `autopid.group` rule action (a "while" rule ending). */
+esp_err_t autopid_group_restore(const char *group);
+
 /**
  * The live value snapshot as a cJSON object — the LEGACY autopid_data
  * shape ({"ParamName": value, ...}) so existing dashboards keep working;
