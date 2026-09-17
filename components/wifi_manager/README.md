@@ -53,6 +53,14 @@ by the future button/input manager).
 
 ## Dependencies
 
+- `event_manager` (2026-09-17, PRIV): `wifi_manager_events.c` declares the
+  `wifi.sta {connected, ssid}` source and the `${wifi.ssid}` /
+  `${wifi.connected}` live values, and publishes from the got-IP / disconnect
+  handlers (a real drop only; failed attempts stay quiet). Declares are
+  static writes, so init order against event_manager is free; publishing
+  never blocks. event_manager sits below wifi_manager in the graph (its own
+  dependencies never reach wifi_manager), so no cycle.
+
 - `settings_manager` (private) — configuration descriptor; **init order:**
   `settings_manager_init()` → `wifi_manager_init()` → `settings_manager_start()`
   (runs `on_apply`) → `wifi_manager_start()`.
@@ -121,6 +129,9 @@ Passwords are redacted in settings GETs (HTTP_API.md §1).
 
 ## Memory footprint (measured 2026-07-26, `idf.py size-components`)
 
+- `wifi_manager_events.c` (2026-09-17, estimated): 40 B internal `.bss`
+  (the current SSID + connected flag + spinlock), no task, no heap.
+
 | Where | What | Size |
 |---|---|---|
 | Flash | code + rodata | 15.5 KiB |
@@ -167,4 +178,3 @@ otherwise never getting an uplink, field-hit on a fresh WiCAN Pro — and
 the pause is **bounded** to `WM_AP_CLIENT_MAX_PAUSES` × 10 s (60 s), so
 an uplink outage never lasts as long as a phone stays parked on the AP.
 The client sees at most one channel hop.
-

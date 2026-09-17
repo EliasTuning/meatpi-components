@@ -624,6 +624,9 @@ static void on_sta_got_ip(const ip_event_got_ip_t *event)
     xEventGroupSetBits(s_events, WIFI_MANAGER_BIT_STA_CONNECTED);
     xEventGroupClearBits(s_events, WIFI_MANAGER_BIT_STA_DISCONNECTED);
     dev_status_manager_set(DEV_STATUS_BIT_STA_CONNECTED);
+    wm_events_sta(true, (s_connected_idx >= 0)
+                            ? cfg->sta[s_connected_idx].ssid
+                            : s_status.last_attempted_ssid);
 
     if (s_callbacks.sta_connected != NULL)
     {
@@ -732,6 +735,11 @@ static void on_sta_disconnected(const wifi_event_sta_disconnected_t *event)
     xEventGroupSetBits(s_events, WIFI_MANAGER_BIT_STA_DISCONNECTED);
     dev_status_manager_clear(DEV_STATUS_BIT_STA_CONNECTED |
                              DEV_STATUS_BIT_STA_AP_OVERLAP);
+
+    if (was_connected)
+    {
+        wm_events_sta(false, ""); /* a real drop, not a failed attempt */
+    }
 
     if (event != NULL)
     {
@@ -1078,6 +1086,7 @@ esp_err_t wifi_manager_init(void)
     static const log_descriptor_t LOG_DESC = { "wifi_manager", ESP_LOG_INFO };
 
     log_manager_register(&LOG_DESC); /* per-TAG level control (§9.2) */
+    wm_events_register();            /* wifi.sta + ${wifi.ssid} (rules) */
 
     if (s_events == NULL)
     {

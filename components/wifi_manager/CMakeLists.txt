@@ -6,6 +6,7 @@
          "wifi_manager_http.c"
          "wifi_manager_cli.c"
          "wifi_manager_suspend.c"
+         "wifi_manager_events.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     # public header exposes only esp_err + FreeRTOS event-group types
@@ -15,5 +16,5 @@
     # the radio code never touches either.
     PRIV_REQUIRES esp_wifi esp_netif esp_event settings_manager log_manager
                   dev_status_manager http_server_manager esp_http_server
-                  cmdline_manager
+                  cmdline_manager event_manager
 )

@@ -300,6 +300,10 @@ esp_err_t wm_settings_register(void);
 #define WM_AP_PASSWORD_DEFAULT "@meatpi#"
 
 const wm_config_t *wm_settings_config(void);
+
+/* wifi_manager_events.c: the wifi.sta event + ${wifi.ssid} value */
+void wm_events_register(void);
+void wm_events_sta(bool connected, const char *ssid);
 bool wm_settings_is_configured(void);
 
 #ifdef __cplusplus
