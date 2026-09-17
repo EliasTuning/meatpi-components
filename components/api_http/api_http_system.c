@@ -35,6 +35,7 @@
 #include "sdkconfig.h"
 
 #include "bridge_manager.h"
+#include "event_manager.h"
 #include "cmdline_manager.h"
 #include "dev_status_manager.h"
 #include "http_server_manager.h"
@@ -171,6 +172,17 @@ static esp_err_t status_handler(httpd_req_t *req)
     c = cJSON_AddObjectToObject(caps, "bridge_ep");
     cJSON_AddNumberToObject(c, "used", eu);
     cJSON_AddNumberToObject(c, "cap", ec);
+
+    /* the rules engine registries (standard §12, 2026-09-17) */
+    size_t su, sc, au, ac;
+
+    event_manager_capacity(&su, &sc, &au, &ac);
+    c = cJSON_AddObjectToObject(caps, "events_src");
+    cJSON_AddNumberToObject(c, "used", su);
+    cJSON_AddNumberToObject(c, "cap", sc);
+    c = cJSON_AddObjectToObject(caps, "events_act");
+    cJSON_AddNumberToObject(c, "used", au);
+    cJSON_AddNumberToObject(c, "cap", ac);
 
     cJSON_AddNumberToObject(health, "faults",
                             dev_status_manager_faults(NULL, 0));
