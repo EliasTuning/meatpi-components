@@ -110,6 +110,35 @@ green afterwards). What changed, and what to keep doing:
   nest. Verified with a Playwright flow on hardware (expand, in-place
   switch with a staged edit kept, guard modal, deep link, narrow window).
 - **DOM hygiene.** `Element.append/prepend/replaceChildren` are wrapped
+- **Rules & Events: the rule builder (2026-09-17, the Rules Builder
+  canvas).** The rules list shows every rule as a sentence ("When WiFi
+  connects to HomeAP → poll the default group every 10 s, back to the
+  configured rate when that stops being true") with the technical form
+  (name · event → action · undo · cooldown) underneath, a switch, the
+  runtime badge from `GET /api/events/rules` (fired N×, last fired, active;
+  refreshed every 5 s while the pane is open), edit / duplicate / delete.
+  Add Rule (and the Templates menu: slow polling at home, extra PIDs while
+  charging, alert on a value, LED on a new DTC) opens the builder: Name,
+  **When** (a plain-language trigger picker over `/api/events/sources`
+  with its own fields: saved networks for `wifi.sta`, parameter names from
+  the autopid config for `autopid.param`, status bits, MQTT topic, a
+  timer period that creates the timer named after the rule), **Only if**
+  (up to 4 rows of field / operator / value; fields are the trigger's own
+  keys plus every live value the registry offers, `autopid.` expanded to
+  the parameter names and marked LIVE; stored as `when[].key` or
+  `when[].value:"${...}"`), **Then** (an action picker over
+  `/api/events/actions` with friendly forms: group + rate for
+  `autopid.group`, colour + mode for the LED, topic/payload with the
+  template hint; registered actions the vocabulary does not know get a
+  generic form from their `params_schema`), the **Undo** switch (only for
+  `undoable` actions: a while-rule that reverses when the conditions stop
+  holding), a preview sentence, and **Edit as JSON** (round-trips with the
+  form, unknown keys kept). Trigger state fields (`connected`, `edge`,
+  `state`, `set`) are written into `when`, identities (`param`, `pid`,
+  `topic`, `bit`, `timer`) into `match`, so an undo rule sees the opposite
+  event. Add/Save validates (name `[A-Za-z0-9_]{1,15}`, unique, ≤ 4
+  conditions, ≤ 4 timers) before the modal closes and stages the
+  `event_manager` settings for Submit. `probe_rules.mjs` covers it.
   once to drop `null`/`false` children — conditional children
   (`cond ? el : null`) used to print the word "null" on the page.
 - **Automate split by concern (2026-09-06).** The old "Behaviour" tab
