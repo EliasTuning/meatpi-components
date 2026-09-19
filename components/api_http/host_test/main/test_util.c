@@ -87,6 +87,78 @@ static void test_unredact_no_stored_value(void)
     cJSON_Delete(stored);
 }
 
+static void test_redact_array_items(void)
+{
+    cJSON *obj = cJSON_Parse(
+        "{\"enabled\":true,\"destinations\":["
+        "{\"name\":\"d1\",\"url\":\"http://x\",\"auth_token\":\"tok\","
+        "\"api_key\":\"key\",\"basic_password\":\"pw\"},"
+        "{\"name\":\"d2\",\"auth_token\":\"\"}],\"nums\":[1,2]}");
+
+    api_util_redact(obj);
+
+    const cJSON *arr = cJSON_GetObjectItem(obj, "destinations");
+    const cJSON *d1 = cJSON_GetArrayItem(arr, 0);
+
+    /* every secret-suffixed key inside the rows is blanked; the rest and
+       non-object arrays are untouched */
+    TEST_ASSERT_EQUAL_STRING("", cJSON_GetObjectItem(d1, "auth_token")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("", cJSON_GetObjectItem(d1, "api_key")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("", cJSON_GetObjectItem(d1, "basic_password")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("http://x", cJSON_GetObjectItem(d1, "url")->valuestring);
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(cJSON_GetObjectItem(obj, "nums")));
+    cJSON_Delete(obj);
+}
+
+static void test_unredact_array_items_by_name(void)
+{
+    cJSON *stored = cJSON_Parse(
+        "{\"destinations\":["
+        "{\"name\":\"d1\",\"auth_token\":\"tok1\",\"api_key\":\"key1\"},"
+        "{\"name\":\"d2\",\"auth_token\":\"tok2\"}]}");
+    /* the UI deleted d1 and added d3 in front: rows match by NAME, not
+       by position, so d2 keeps ITS token and d3 stays empty */
+    cJSON *in = cJSON_Parse(
+        "{\"destinations\":["
+        "{\"name\":\"d3\",\"auth_token\":\"\"},"
+        "{\"name\":\"d2\",\"auth_token\":\"\",\"api_key\":\"new\"}]}");
+
+    api_util_unredact(in, stored);
+
+    const cJSON *arr = cJSON_GetObjectItem(in, "destinations");
+    const cJSON *d3 = cJSON_GetArrayItem(arr, 0);
+    const cJSON *d2 = cJSON_GetArrayItem(arr, 1);
+
+    TEST_ASSERT_EQUAL_STRING("", cJSON_GetObjectItem(d3, "auth_token")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("tok2", cJSON_GetObjectItem(d2, "auth_token")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("new", cJSON_GetObjectItem(d2, "api_key")->valuestring);
+    cJSON_Delete(in);
+    cJSON_Delete(stored);
+}
+
+static void test_unredact_array_items_by_index(void)
+{
+    /* rows without a name fall back to positional matching */
+    cJSON *stored = cJSON_Parse(
+        "{\"peers\":[{\"preshared_key\":\"psk0\"},{\"preshared_key\":\"psk1\"}]}");
+    cJSON *in = cJSON_Parse(
+        "{\"peers\":[{\"preshared_key\":\"\"},{\"preshared_key\":\"\"},"
+        "{\"preshared_key\":\"\"}]}");
+
+    api_util_unredact(in, stored);
+
+    const cJSON *arr = cJSON_GetObjectItem(in, "peers");
+
+    TEST_ASSERT_EQUAL_STRING("psk0",
+        cJSON_GetObjectItem(cJSON_GetArrayItem(arr, 0), "preshared_key")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("psk1",
+        cJSON_GetObjectItem(cJSON_GetArrayItem(arr, 1), "preshared_key")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("",
+        cJSON_GetObjectItem(cJSON_GetArrayItem(arr, 2), "preshared_key")->valuestring);
+    cJSON_Delete(in);
+    cJSON_Delete(stored);
+}
+
 /* ---- settings route parsing ------------------------------------------------------ */
 
 static void test_path_plain_name(void)
@@ -157,6 +229,9 @@ void run_util_tests(void)
     RUN_TEST(test_redact_wireguard_keys);
     RUN_TEST(test_unredact_keeps_stored_on_empty);
     RUN_TEST(test_unredact_no_stored_value);
+    RUN_TEST(test_redact_array_items);
+    RUN_TEST(test_unredact_array_items_by_name);
+    RUN_TEST(test_unredact_array_items_by_index);
     RUN_TEST(test_path_plain_name);
     RUN_TEST(test_path_schema);
     RUN_TEST(test_path_rejects_bad);

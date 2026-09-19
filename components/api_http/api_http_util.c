@@ -39,7 +39,8 @@ static bool key_is_password(const char *key)
      * keep-stored. `public_key` fields deliberately NOT here — peers'
      * public keys are display data (vpn_manager) */
     static const char *const SUFFIXES[] =
-        { "_password", "private_key", "preshared_key", "auth_key" };
+        { "_password", "private_key", "preshared_key", "auth_key",
+          "_token", "api_key" }; /* _token/api_key: data_destinations */
     size_t klen = strlen(key);
 
     for (size_t i = 0; i < sizeof(SUFFIXES) / sizeof(SUFFIXES[0]); i++)
@@ -66,7 +67,53 @@ void api_util_redact(cJSON *obj)
         {
             cJSON_SetValuestring(item, "");
         }
+        else if (cJSON_IsArray(item))
+        {
+            /* bounded arrays of objects (rev 2.5 field tables): one
+               nesting level, e.g. data_destinations[].auth_token */
+            cJSON *el = NULL;
+
+            cJSON_ArrayForEach(el, item)
+            {
+                if (cJSON_IsObject(el))
+                {
+                    api_util_redact(el);
+                }
+            }
+        }
     }
+}
+
+/** The stored array element that corresponds to @p el: same `name` when
+ *  both carry one (rows may be reordered/deleted by the UI), else the
+ *  same index. NULL when none. */
+static const cJSON *stored_element(const cJSON *stored_arr, const cJSON *el,
+                                   int idx)
+{
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(el, "name");
+
+    if (cJSON_IsString(name) && name->valuestring != NULL)
+    {
+        const cJSON *cand = NULL;
+
+        cJSON_ArrayForEach(cand, stored_arr)
+        {
+            const cJSON *n = cJSON_GetObjectItemCaseSensitive(cand, "name");
+
+            if (cJSON_IsObject(cand) && cJSON_IsString(n) &&
+                n->valuestring != NULL &&
+                strcmp(n->valuestring, name->valuestring) == 0)
+            {
+                return cand;
+            }
+        }
+
+        return NULL;
+    }
+
+    const cJSON *by_idx = cJSON_GetArrayItem((cJSON *)stored_arr, idx);
+
+    return cJSON_IsObject(by_idx) ? by_idx : NULL;
 }
 
 void api_util_unredact(cJSON *in, const cJSON *stored)
@@ -75,6 +122,32 @@ void api_util_unredact(cJSON *in, const cJSON *stored)
 
     cJSON_ArrayForEach(item, in)
     {
+        if (item->string != NULL && cJSON_IsArray(item))
+        {
+            const cJSON *stored_arr = stored != NULL
+                ? cJSON_GetObjectItemCaseSensitive(stored, item->string)
+                : NULL;
+            cJSON *el = NULL;
+            int idx = 0;
+
+            cJSON_ArrayForEach(el, item)
+            {
+                if (cJSON_IsObject(el) && cJSON_IsArray(stored_arr))
+                {
+                    const cJSON *was = stored_element(stored_arr, el, idx);
+
+                    if (was != NULL)
+                    {
+                        api_util_unredact(el, was);
+                    }
+                }
+
+                idx++;
+            }
+
+            continue;
+        }
+
         if (item->string == NULL || !cJSON_IsString(item) ||
             !key_is_password(item->string) ||
             item->valuestring == NULL || item->valuestring[0] != '\0')

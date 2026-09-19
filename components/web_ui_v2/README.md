@@ -455,7 +455,7 @@ Manager) and `monitor.js` (CAN Monitor, 2026-09-07).
 DEVICE: Status (stat cards + network/system tables) · Settings (WiFi/AP
 · Station & Bluetooth w/ scan · CAN · MQTT) · Automate (autopid
 polling switch + pause rules · PID groups with their own
-switch/init/protocol · Home Assistant webhook · destinations-as-event-rules · PID
+switch/init/protocol · Home Assistant webhook · Data destinations (the `data_destinations` table: MQTT / HTTP / HTTPS + cert set / ABRP rows with auth, live counters from `/api/destinations`, Test per row, one-time import of the older timer-rule destinations; 2026-09-19) · PID
 table/scan/vehicle-profile/raw-config) · Power Saving · Logger (per-stream status · gate ·
 newest files · settings split per stream) · Dashboard (state chips · group switches + poll stats · sparkline
 tiles over the parameter's own min/max, with the PID and the value's age ·
@@ -552,6 +552,7 @@ start preview.html         # clickable in any browser, zero device
 npm i jsdom                # once
 node smoke.mjs             # every route, assert 0 JS errors + non-empty view
 node probe_automate.mjs    # interaction probe: Automate + Rules editor flows
+node probe_destinations.mjs # Automate > Data destinations: rows, options per type, Test, import
 node probe_adv.mjs         # advanced-gating visibility probe
 ```
 

@@ -46,6 +46,18 @@ same AP-trust model as the rest of the API; revisit with the auth story.
   cache — borrowed pointers (esp-mqtt's TLS config does not copy) must
   stay valid until reboot; freeing would be a use-after-free at the next
   handshake. Bounded leak per config operation — the legacy-proven trade.
+- **Eager cache (2026-09-19).** Every present part of every set is read
+  into PSRAM by the rescan — at `cert_manager_start()` (main task) and
+  after each upload/delete (httpd task), both internal-stack contexts —
+  so a consumer's first `cert_manager_get()` is never a flash read on
+  ITS stack. Found on the bench: the data_destinations poster (PSRAM
+  stack, like the ha_webhooks poster) hit `assert failed:
+  spi_flash_disable_interrupts_caches_and_other_cpu cache_utils.c:126` on
+  its first HTTPS delivery with a cert set (§2: littlefs reads disable
+  the cache). The lazy path still exists for a part that appears without
+  a rescan, but refuses (`ESP_ERR_INVALID_STATE` + a `W`) when the
+  caller's stack is in external RAM (`esp_ptr_external_ram`). Worst case
+  10 × 3 × 8 KB PSRAM; typically one 2 KB CA.
 - Legacy on-disk layout AND multipart field names preserved
   (`ca.pem`/`client.crt`/`client.key`; form fields
   `ca`/`client_cert`/`client_key`), so migrated devices keep their sets

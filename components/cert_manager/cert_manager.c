@@ -33,6 +33,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h" /* esp_ptr_external_ram: the PSRAM-stack guard */
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -126,6 +127,64 @@ static esp_err_t scan_cb(const char *name, bool is_dir, size_t size,
     return ESP_OK;
 }
 
+/** Read one part from the filesystem into the PSRAM cache. A FLASH READ
+ *  (littlefs -> esp_partition_read disables the cache): only ever called
+ *  from internal-stack contexts — the rescan (main task at start, the
+ *  httpd task on upload/delete) or a guarded lazy get. */
+static void load_part(cm_set_t *set, cert_manager_part_t part)
+{
+    char path[128];
+    char *buf = heap_caps_malloc(CERT_MANAGER_PEM_MAX + 1,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t len = 0;
+
+    set_path(path, sizeof(path), set->info.name, part);
+
+    if (buf != NULL &&
+        filesystem_read(path, buf, CERT_MANAGER_PEM_MAX, &len) == ESP_OK)
+    {
+        buf[len] = '\0';
+        set->pem[part] = buf;
+        set->pem_len[part] = len + 1; /* incl. NUL, TLS-style */
+    }
+    else
+    {
+        heap_caps_free(buf);
+    }
+}
+
+/** Every present part of every set goes into the cache HERE, so that a
+ *  consumer's first borrow is never a flash read on ITS stack: the
+ *  data_destinations poster (PSRAM stack) asserted in
+ *  spi_flash_disable_interrupts_caches_and_other_cpu on its first HTTPS
+ *  delivery with a cert set (bench 2026-09-19) — the ha_webhooks poster
+ *  would have done the same with a cert_set configured. ≤ 10 × 3 × 8 KB
+ *  of PSRAM worst case, typically one 2 KB CA. */
+static void load_all(void)
+{
+    for (size_t i = 0; i < s_count; i++)
+    {
+        cm_set_t *set = &s_sets[i];
+
+        if (set->info.has_ca && set->pem[CERT_MANAGER_CA] == NULL)
+        {
+            load_part(set, CERT_MANAGER_CA);
+        }
+
+        if (set->info.has_client_cert &&
+            set->pem[CERT_MANAGER_CLIENT_CERT] == NULL)
+        {
+            load_part(set, CERT_MANAGER_CLIENT_CERT);
+        }
+
+        if (set->info.has_client_key &&
+            set->pem[CERT_MANAGER_CLIENT_KEY] == NULL)
+        {
+            load_part(set, CERT_MANAGER_CLIENT_KEY);
+        }
+    }
+}
+
 static void rescan(void)
 {
     for (size_t i = 0; i < s_count; i++)
@@ -135,6 +194,7 @@ static void rescan(void)
 
     s_count = 0;
     filesystem_list(CM_DIR, scan_cb, NULL);
+    load_all();
 }
 
 /* ---- internal API for the HTTP layer -------------------------------------------- */
@@ -283,26 +343,21 @@ esp_err_t cert_manager_get(const char *set, cert_manager_part_t part,
 
     if (entry != NULL && entry->pem[part] == NULL)
     {
-        char path[128];
-        char *buf = heap_caps_malloc(CERT_MANAGER_PEM_MAX + 1,
-                                     MALLOC_CAP_SPIRAM |
-                                         MALLOC_CAP_8BIT);
-        size_t len = 0;
+        /* not cached (a part that appeared without a rescan): the lazy
+           load is a flash read, forbidden on a PSRAM stack (§2) — refuse
+           with a warning instead of the cache_utils.c:126 assert */
+        int marker = 0;
 
-        set_path(path, sizeof(path), set, part);
+        if (esp_ptr_external_ram(&marker))
+        {
+            ESP_LOGW(TAG, "set '%s' part %s not cached; a PSRAM-stack "
+                          "caller cannot load it",
+                     set, cm_part_filename(part));
+            xSemaphoreGive(s_lock);
+            return ESP_ERR_INVALID_STATE;
+        }
 
-        if (buf != NULL &&
-            filesystem_read(path, buf, CERT_MANAGER_PEM_MAX, &len) ==
-                ESP_OK)
-        {
-            buf[len] = '\0';
-            entry->pem[part] = buf;
-            entry->pem_len[part] = len + 1; /* incl. NUL, TLS-style */
-        }
-        else
-        {
-            heap_caps_free(buf);
-        }
+        load_part(entry, part);
     }
 
     if (entry != NULL && entry->pem[part] != NULL)
