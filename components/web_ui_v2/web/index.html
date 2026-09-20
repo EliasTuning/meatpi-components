@@ -1480,6 +1480,8 @@ PAGES.status=async(view)=>{
         ["AP Address",w&&w.ap_ip?w.ap_ip:"—"],
         ["AP Clients",w?(w.ap_started?String(w.clients||0):"AP off"):"—"],
         ["mDNS",(st.device_id||(conn.info&&conn.info.device_id))?("wican_"+(st.device_id||conn.info.device_id)+".local"):"—"],
+        ["Bluetooth ID",st.bluetooth_id||(st.device_id||(conn.info&&conn.info.device_id)?("WiC_"+(st.device_id||conn.info.device_id)):"—")],
+        ["WiFi MAC",st.wifi_mac||(conn.info&&conn.info.mac)||"—"],
         ["MQTT",b.mqtt_connected?"Connected":"Off"],
         ["VPN",vpn?(vpn.state||"disabled"):"—"]])),
       card("System","cpu",kv([

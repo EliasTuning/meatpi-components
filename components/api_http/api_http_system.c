@@ -25,6 +25,7 @@
  * @brief `/api/status` + `/api/info` (dev_status_manager/HTTP_API.md) and
  *        `/api/restart*` (restart_tracker/HTTP_API.md).
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -82,6 +83,31 @@ static esp_err_t status_handler(httpd_req_t *req)
                             dev_status_manager_app_version());
     cJSON_AddStringToObject(resp, "partition",
                             dev_status_manager_partition_label());
+
+    {
+        const char *device_id = dev_status_manager_device_id();
+        char bluetooth_id[32] = { 0 };
+        uint8_t wifi_mac[6] = { 0 };
+        char wifi_mac_str[18] = { 0 };
+
+        cJSON_AddStringToObject(resp, "device_id",
+                                (device_id && device_id[0]) ? device_id : "");
+        if (device_id && device_id[0])
+        {
+            snprintf(bluetooth_id, sizeof(bluetooth_id), "WiC_%s", device_id);
+        }
+        cJSON_AddStringToObject(resp, "bluetooth_id",
+                                bluetooth_id[0] ? bluetooth_id : "N/A");
+        if (esp_read_mac(wifi_mac, ESP_MAC_WIFI_STA) == ESP_OK)
+        {
+            snprintf(wifi_mac_str, sizeof(wifi_mac_str),
+                     "%02X:%02X:%02X:%02X:%02X:%02X",
+                     wifi_mac[0], wifi_mac[1], wifi_mac[2],
+                     wifi_mac[3], wifi_mac[4], wifi_mac[5]);
+        }
+        cJSON_AddStringToObject(resp, "wifi_mac",
+                                wifi_mac_str[0] ? wifi_mac_str : "N/A");
+    }
 
     /* reboot counters come from restart_tracker (0s when unavailable) */
     static restart_tracker_state_t state; /* big struct: keep off the stack */

@@ -168,9 +168,13 @@ esp_err_t blm_io_queue_tx(const uint8_t *data, size_t len)
         chunk.len = (uint16_t)n;
         memcpy(chunk.data, data, n);
 
-        if (xQueueSend(s_tx_q, &chunk, 0) != pdTRUE)
+        /* Brief wait instead of a 0-tick drop: a 22-byte SLCAN line that
+           arrives while FFF1 is congested is the first TP20 data PDU, and
+           skipping it breaks the session. 50 ms matches the host-TX wait
+           used on the legacy SLCAN path. */
+        if (xQueueSend(s_tx_q, &chunk, pdMS_TO_TICKS(50)) != pdTRUE)
         {
-            s_tx_drops++; /* never block the caller (bridge pump) */
+            s_tx_drops++;
 
             if ((s_tx_drops % 100) == 1)
             {
