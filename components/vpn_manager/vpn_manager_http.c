@@ -82,6 +82,19 @@ static esp_err_t vpn_get_handler(httpd_req_t *req)
             cJSON_AddItemToArray(arr, cJSON_CreateString(cidr));
         }
     }
+    else
+    {
+        /* the subnet routes learned from the tailnet (2026-11-01): the
+           networks the subnet routers advertise, routed into the tunnel */
+        static vpn_ts_route_t routes[VPN_TS_MAX_ROUTES] EXT_RAM_BSS_ATTR; /* httpd task only; PSRAM */
+        int n = vpn_ts_get_routes(routes, VPN_TS_MAX_ROUTES);
+        cJSON *arr = cJSON_AddArrayToObject(obj, "routes");
+
+        for (int i = 0; arr != NULL && i < n; i++)
+        {
+            cJSON_AddItemToArray(arr, cJSON_CreateString(routes[i].cidr));
+        }
+    }
     cJSON_AddStringToObject(obj, "ts_ip", st.ts_ip);
     cJSON_AddNumberToObject(obj, "ts_peers", st.ts_peers);
     /* the DERP relay (2026-10-31, issue 1024): false until the relay

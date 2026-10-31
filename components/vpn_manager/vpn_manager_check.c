@@ -274,7 +274,9 @@ const char *vpn_ts_hold_reason(unsigned free_kb, unsigned need_kb, bool ble_on,
     if (ble_on)
     {
         append(out, len, &pos, sep);
-        append(out, len, &pos, "turn Bluetooth off (about 40 KB)");
+        /* measured 2026-10-31 on the build with the controller's code in
+           flash: Bluetooth costs 31.5 KB on Lean and 34.6 KB on Full */
+        append(out, len, &pos, "turn Bluetooth off (about 32 KB)");
         sep = ", ";
     }
 

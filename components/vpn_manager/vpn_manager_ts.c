@@ -34,6 +34,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+#include "flash_jobs.h"
+#include "ip4_routes.h"
 #include "microlink.h"
 
 #include "vpn_manager_private.h"
@@ -67,6 +69,10 @@ esp_err_t vpn_ts_up(const vpn_config_t *cfg)
         .enable_disco = true,
         .max_peers = 0, /* microlink default */
         .control_url = s_control_url[0] != '\0' ? s_control_url : NULL,
+        /* the client's NVS work (the device keys, the peer cache) runs on
+           the flash worker's internal stack: the state task and every
+           microlink task live on PSRAM stacks (2026-11-01) */
+        .flash_run = flash_jobs_run,
     };
 
     /* the internal heap around the two bring-up calls: init = the client's
@@ -202,4 +208,31 @@ int vpn_ts_get_peers(vpn_ts_peer_t *out, int max)
     }
 
     return written;
+}
+
+int vpn_ts_get_routes(vpn_ts_route_t *out, int max)
+{
+    if (s_ml == NULL || out == NULL || max <= 0)
+    {
+        return 0;
+    }
+
+    microlink_route_t routes[VPN_TS_MAX_ROUTES];
+    int n = microlink_get_routes(s_ml, routes,
+                                 max < VPN_TS_MAX_ROUTES ? max : VPN_TS_MAX_ROUTES);
+
+    for (int i = 0; i < n; i++)
+    {
+        ip4_routes_entry_t e = { .network = routes[i].network,
+                                 .mask = routes[i].mask };
+
+        ip4_routes_format(&e, out[i].cidr, sizeof(out[i].cidr));
+        out[i].via[0] = '\0';
+        if (routes[i].via_vpn_ip != 0)
+        {
+            microlink_ip_to_str(routes[i].via_vpn_ip, out[i].via);
+        }
+    }
+
+    return n;
 }

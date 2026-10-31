@@ -111,7 +111,35 @@ the internal-RAM-flat leg; `.\test.ps1 tspublic`).
 
 ## Surfaces
 
-- `GET /api/vpn`: `{state, type, endpoint, network, paused, routes, ts_ip, ts_peers, derp, reason, connects, failures, uptime_s, peers}` (`state` is `disabled | waiting | paused | connecting | connected`; `network` = the station's network, "" without one; `derp` (2026-10-31, issue 1024) = the Tailscale DERP relay connection is up, false for wireguard, while the relay is in backoff and before the first map; `reason` = why the tunnel is held in `waiting`, "" otherwise, see the internal-RAM floor below).
+- `GET /api/vpn`: `{state, type, endpoint, network, paused, routes, ts_ip, ts_peers, derp, reason, connects, failures, uptime_s, peers}` (`state` is `disabled | waiting | paused | connecting | connected`; `network` = the station's network, "" without one; `derp` (2026-10-31, issue 1024) = the Tailscale DERP relay connection is up, false for wireguard, while the relay is in backoff and before the first map; `reason` = why the tunnel is held in `waiting`, "" otherwise, see the internal-RAM floor below; `routes` = for wireguard the `routes` setting's networks, for tailscale (2026-11-01) the subnet routes learned from the tailnet, see below).
+
+## Subnet routes on the tailnet (2026-11-01)
+
+A tailnet node that advertises a network as a subnet router (`tailscale up
+--advertise-routes=192.168.1.0/24`, approved on the admin console or on
+headscale) carries that network in its `AllowedIPs` in the map, beside its
+own address. A phone accepts such routes by default; the WiCAN ignored them
+(a Discord question, 2026-11-01: an MQTT broker at home behind a subnet
+router, reachable from the phone, "WiCAN says it can't connect"), because
+microlink installed every peer with its own address only and lwIP sent the
+broker's address out of the station. Since 2026-11-01 microlink takes every
+IPv4 network of a peer's `AllowedIPs` beyond its own address (up to 4 per
+peer, 8 across the tailnet; an exit node's `0.0.0.0/0` is logged and not
+taken, IPv6 is not), allows it on the peer's WireGuard entry (outbound
+lookup and inbound source check) and installs it in `ip4_routes`, the
+destination table in front of lwIP's netif walk, where a directly connected
+network always wins (a WiCAN at home on the advertised LAN keeps talking to
+it directly). The routes follow the map: a peer removed or a route
+withdrawn leaves the table at the next map update, every route goes with
+the tunnel. `GET /api/vpn` lists them as `routes` and the `vpn` command
+prints `route <cidr> via <tailnet address>`; the log line `ml_wg_mgr:
+subnet route 10.99.0.0/24 via betty-peer` names each one. No setting:
+accepting the tailnet's approved routes is the phone's behaviour; a device
+that must not take one needs the route withdrawn or disapproved on the
+control server. Bench: `ts_public_soak.sh` (the subnet router legs:
+betty advertises `10.99.0.0/24`, headscale approves it, a destination test
+to an address in it arrives at the receiver from the DUT's tailnet
+address; `.\test.ps1 tspublic`).
 - `POST /api/vpn/keygen`: `{public_key, pending_reboot:true}`.
 - CLI `vpn`, same status as text.
 - Event source `vpn.state {connected, paused, network}`.
@@ -143,7 +171,7 @@ latency ever hurts, add a rule on `vpn.state`.
 
 ## Footprint
 
-PSRAM: the two peer-snapshot tables of the HTTP and CLI surfaces (1.3 KB each, PSRAM since 2026-09-22) and the 176 B hold reason. The 6 KB state-task stack is INTERNAL (`vpn_manager.c`: the Tailscale start reads and writes the device keys in NVS from it; `WICAN RAMMAP vpn_manager=6520` with the VPN enabled).
+PSRAM: the two peer-snapshot tables of the HTTP and CLI surfaces (1.3 KB each, PSRAM since 2026-09-22), the two route-snapshot tables (2026-11-01, 320 B each), the 176 B hold reason, and since 2026-11-01 the 6 KB state-task stack (`vpn_manager.c`: it was internal because the Tailscale start reads and writes the device keys in NVS from it, `WICAN RAMMAP vpn_manager=6520`; microlink runs that work through its `flash_run` hook now, which `vpn_manager_ts.c` sets to `flash_jobs_run`, the shared internal-stack worker, and the WireGuard manager task of the client moved with it: lever 2 of `internal/TASK_ble_tailscale_margin.md`). The TCB stays internal (FreeRTOS). `.\test.ps1 stackaudit` asserts both placements whenever the tasks exist; `tspublic` asserts them with the tunnel up.
 
 **Where Tailscale's internal RAM goes (mapped 2026-10-31 on the public rig, `.\test.ps1 tspublic`, the per-step lines of `vpn_ts_up()`, `microlink_start()`, the relay and the coordinator; a fresh boot with 53.6 KB free before the start):**
 
@@ -160,7 +188,7 @@ PSRAM: the two peer-snapshot tables of the HTTP and CLI surfaces (1.3 KB each, P
 
 With the BLE controller's code in flash (`CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY`, the evening's build 1) the same start read 73.0 KB before and 51.5 KB steady, the same 21.5 KB, and with Bluetooth on the Lean profile beside it (40.9 KB before the start) Tailscale connected and held 18.6 KB steady, 15.2 KB at the lowest point: the first run of both together (`.\test.ps1 tspublic` PASS, ble_manager README "the lever that did reach"). The `ml_udp_rx` stack is PSRAM since that build, which changed nothing here: the client's UDP socket API is never used on the WiCAN's path.
 
-So Tailscale costs 22.3 KB steady and 25.7 KB at its lowest point, and three task stacks account for 17.5 KB of it: `ml_wg_mgr` 7 KB (NVS peer cache), `vpn_state` 6 KB (NVS device keys at the start) and `ml_udp_rx` 4 KB (nothing in its path touches flash: the one that could move today). Moving the two NVS writers to PSRAM stacks means handing their flash writes to an internal-stack worker, the pattern the NimBLE bond store needs too. The per-packet buffers, the TLS contexts and the map's JSON are PSRAM already (`CONFIG_SPIRAM_USE_MALLOC`, allocations above 32 B). Internal: FreeRTOS objects + the lwip
+So Tailscale cost 22.3 KB steady and 25.7 KB at its lowest point until 2026-10-31, and three task stacks accounted for 17.5 KB of it: `ml_wg_mgr` 7 KB (NVS peer cache), `vpn_state` 6 KB (NVS device keys at the start) and `ml_udp_rx` 4 KB (nothing in its path touches flash). **Since 2026-11-01 the two NVS writers run on PSRAM stacks** (their flash work on the `flash_jobs` worker through microlink's `flash_run` hook), and the same stage on the same unit read: 93.8 KB free before the start (the HTTP server's and the vehicle writer's moves of the previous night on top), `microlink_init` 8.4 KB (the client's 4 KB plus the flash worker's 4.4 KB, created by the first key read and gone 5 s later), `microlink_start` 0.5 KB (the WireGuard manager's row reads 0: it was 7.5 KB), 74.6 KB at `connected` (the lowest point, 19.2 KB below the start), 79.2 KB at the relay's handshake, 84.0 KB steady: **about 10 KB steady, 19 KB at the dip**. The floor rule (the dip plus a 10 KB margin, rounded up) therefore keeps `VPN_TS_INTERNAL_FLOOR_KB` at 30; what moved is the steady cost, which is what Bluetooth and Tailscale together live on. The NimBLE bond store needs the same worker pattern for the host task's 4 KB (lever 3, not built). The per-packet buffers, the TLS contexts and the map's JSON are PSRAM already (`CONFIG_SPIRAM_USE_MALLOC`, allocations above 32 B). Internal: FreeRTOS objects + the lwip
 netif esp_wireguard creates while up. **Tailscale, measured 2026-10-31 on
 the bench unit (ESP-IDF 6.1, the ESPNetLink on the USB port, BLE off, the
 WiFi Lean profile):** the internal floor settles at 51.9 KB with the VPN

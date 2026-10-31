@@ -267,16 +267,18 @@ static void test_ts_hold_reason_names_the_levers(void)
         "not started: 24 KB of internal RAM free, Tailscale needs 30 KB: use WireGuard",
         vpn_ts_hold_reason(24, 30, false, false, out, sizeof(out)));
 
-    /* Bluetooth on: named first, WireGuard as the alternative */
+    /* Bluetooth on: named first, WireGuard as the alternative (the number
+       is the measured cost on the flash-only controller build, 2026-10-31:
+       31.5 KB on Lean, 34.6 on Full) */
     TEST_ASSERT_EQUAL_STRING(
         "not started: 24 KB of internal RAM free, Tailscale needs 30 KB: "
-        "turn Bluetooth off (about 40 KB), or use WireGuard",
+        "turn Bluetooth off (about 32 KB), or use WireGuard",
         vpn_ts_hold_reason(24, 30, true, false, out, sizeof(out)));
 
     /* both levers */
     TEST_ASSERT_EQUAL_STRING(
         "not started: 9 KB of internal RAM free, Tailscale needs 30 KB: "
-        "turn Bluetooth off (about 40 KB), set the WiFi memory profile to Lean "
+        "turn Bluetooth off (about 32 KB), set the WiFi memory profile to Lean "
         "(about 14 KB), or use WireGuard",
         vpn_ts_hold_reason(9, 30, true, true, out, sizeof(out)));
 

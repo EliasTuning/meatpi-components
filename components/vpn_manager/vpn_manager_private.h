@@ -74,9 +74,15 @@ const char *vpn_check_config(const vpn_config_t *cfg);
 bool vpn_check_routes(const char *routes, char *err, size_t err_len);
 
 /* The internal-RAM floor Tailscale needs at the moment it starts (issue
- * 1024, 2026-10-31): its bring-up takes about 20 KB on a bench unit
- * (51.9 KB settled -> 33.1 KB at the connect, 31.5 KB steady), and the
- * device keeps headroom for WiFi bursts, the SD card's DMA and TLS. */
+ * 1024, 2026-10-31): the rule is the bring-up's lowest-point cost plus a
+ * 10 KB working margin (WiFi bursts, the SD card's DMA, TLS), rounded up.
+ * Re-derived 2026-11-01 with the state task and the client's WireGuard
+ * manager on PSRAM stacks (their NVS work on the flash worker): the start
+ * still dips 19 KB below the pre-start level (the connect's 9 KB burst,
+ * the client's 4 KB of queues and keys, the flash worker's 4.4 KB that the
+ * first key read creates for 5 s), while the steady cost is about 10 KB
+ * (it was 22 KB with the stacks internal; 25.7 KB at the dip). 19 + 10,
+ * rounded: the floor stays at 30. */
 #define VPN_TS_INTERNAL_FLOOR_KB 30u
 
 /* Pure, host-tested: the hold reason shown on /api/vpn and the console
@@ -124,6 +130,20 @@ typedef struct
 } vpn_ts_peer_t;
 
 int vpn_ts_get_peers(vpn_ts_peer_t *out, int max);
+
+/* The subnet routes learned from the tailnet (2026-11-01): a network a
+ * peer advertises as a subnet router and the control server approved,
+ * installed into the tunnel (`/api/vpn` `routes` for the tailscale type,
+ * the `vpn` command). Returns the number of entries written (0 when the
+ * tunnel is down or type != tailscale). */
+#define VPN_TS_MAX_ROUTES 8
+typedef struct
+{
+    char cidr[24];   /* "a.b.c.d/n" */
+    char via[16];    /* the subnet router's tailnet address */
+} vpn_ts_route_t;
+
+int vpn_ts_get_routes(vpn_ts_route_t *out, int max);
 
 /* ---- settings (vpn_manager_settings.c) ------------------------------------ */
 

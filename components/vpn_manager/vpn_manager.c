@@ -60,13 +60,18 @@ static const char *TAG = "vpn_manager";
 
 static volatile bool s_run;
 static TaskHandle_t s_task;
-/* The state task uses a DYNAMIC internal stack (plain xTaskCreate),
- * created only when the VPN feature is enabled, so it costs zero
- * internal RAM when disabled. INTERNAL (not PSRAM) because the
- * tailscale path calls microlink_init here, which reads/writes device
- * keys in NVS = flash access, and §2-corollary forbids flash IO from a
- * PSRAM-stack task (WireGuard does no NVS, so it never tripped this). */
+/* The state task's stack lives in PSRAM since 2026-11-01 (it was 6 KB of
+ * internal RAM: the Tailscale path reads and writes the device keys in NVS
+ * from this task, which the standard's section 2 corollary forbids on a
+ * PSRAM stack; microlink runs that work through its flash hook now, the
+ * flash_jobs worker, see vpn_manager_ts.c). The stack is taken from the
+ * PSRAM heap at the first start and kept (the task lives for the firmware's
+ * life, s_run parks it); the TCB is a static (internal: FreeRTOS). A PSRAM
+ * stack overflows silently: the watermark is on /api/status/tasks and
+ * `.\test.ps1 stackaudit` reads it. */
 #define VPN_TASK_STACK 6144 /* watermark-checked on the bench 2026-07-07; was 7168, see TASK_tailscale.md internal-RAM note */
+static StaticTask_t  s_task_tcb;   /* internal: FreeRTOS */
+static StackType_t  *s_task_stack; /* PSRAM, VPN_TASK_STACK bytes */
 
 static vpn_manager_status_t s_status;
 static uint32_t s_up_since_ms;
@@ -521,14 +526,21 @@ esp_err_t vpn_manager_start(void)
 
     if (s_task == NULL)
     {
-        if (xTaskCreate(state_task, "vpn_state", VPN_TASK_STACK,
-                        NULL, 3, &s_task) != pdPASS)
+        if (s_task_stack == NULL)
         {
-            s_task = NULL;
+            s_task_stack = heap_caps_malloc(VPN_TASK_STACK,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+
+        if (s_task_stack != NULL)
+        {
+            s_task = xTaskCreateStatic(state_task, "vpn_state", VPN_TASK_STACK,
+                                       NULL, 3, s_task_stack, &s_task_tcb);
         }
 
         if (s_task == NULL)
         {
+            ESP_LOGE(TAG, "state task not created (no PSRAM for its stack)");
             return ESP_FAIL;
         }
     }

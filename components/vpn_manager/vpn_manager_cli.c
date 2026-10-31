@@ -92,6 +92,15 @@ static int cmd_vpn(int argc, char **argv)
                            peers[i].online ? "online " : "offline",
                            peers[i].direct_path ? "direct" : "relay");
         }
+
+        /* the subnet routes learned from the tailnet (2026-11-01) */
+        static vpn_ts_route_t routes[VPN_TS_MAX_ROUTES] EXT_RAM_BSS_ATTR; /* PSRAM */
+        int nr = vpn_ts_get_routes(routes, VPN_TS_MAX_ROUTES);
+
+        for (int i = 0; i < nr; i++)
+        {
+            cmdline_printf("  route %-18s via %s\n", routes[i].cidr, routes[i].via);
+        }
     }
 
     cmdline_printf("  connects %lu, failures %lu, uptime %lu s\n",
