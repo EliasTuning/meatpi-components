@@ -77,6 +77,47 @@ free its 4 KB and is the next one worth measuring. The Tailscale hold reason
 (vpn_manager) does not name this profile on purpose: 3 KB is no help against
 a 30 KB floor.
 
+**The NimBLE host task on a PSRAM stack (2026-11-01, lever 3 of
+`internal/TASK_ble_tailscale_margin.md`).** The host task was the one BLE
+stack that had to be internal, because the bond store writes NVS from it:
+`ble_store_config.c` calls a persist function of IDF's `ble_store_nvs.c`
+after every write or delete of its tables (a pairing, a bonded peer's CCCD
+change, the round-robin eviction of the oldest bond), and that opens NVS,
+writes the blob and commits. `ble_manager_store_nvs.c` wraps the six
+persist functions this build compiles at link time (`CMakeLists.txt`, the
+`--wrap` + `-u` idiom of ip4_routes) and runs the real one through
+`flash_jobs_run()`, so the write lands on the flash worker with the host
+task blocked on it, as it was blocked on its own write before. The store's
+load (`ble_store_config_init()`, every table read from NVS) is wrapped the
+same way, because the host calls it from its own task at every startup
+(`ble_hs_pvcy_set_default_irk()` under `CONFIG_BT_NIMBLE_STATIC_TO_DYNAMIC`;
+the first image without that wrap aborted there at 1 s of uptime, IDF's
+assertion naming `nimble_host`). With that, `ble_manager_gatt_nimble.c`
+creates the host task itself (`nimble_host`, 6 KB: the port's
+`CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE` 4 KB left 1028 B of headroom right
+after a pairing in the first `blesec` run, the standard's line, so 2 KB
+were added where they cost nothing; priority and core as
+`esp_nimble_enable()`) on a PSRAM static with a static TCB, once for the
+firmware's life: it runs
+`nimble_port_run()` until `nimble_port_stop()` returns it, parks on a task
+notification, and the next bring-up wakes it; `blm_gatt_stack_down()` waits
+for the park before `nimble_port_deinit()`. Nothing is deleted or freed, so
+the runtime restarts (interface_manager around an access-point station,
+the config mode, the sleep path) race no task lifetime. The per-step line
+reads `host task 0 B` now. A PSRAM stack's overflow is silent (standard
+§2): the task's watermark is on `/api/status/tasks` (`stack_ext` true)
+whenever Bluetooth is on, `blesec` reads it after the pairing (the ECDH of
+LE Secure Connections is the deepest path the task runs) and `stackaudit`
+asserts the placement. A persist the worker could not run (no internal RAM
+for it) is reported to NimBLE as `BLE_HS_ESTORE_FAIL` with one W line: the
+bond works for the session and is not persisted; `health.flash_jobs`
+`refusals` counts it. Measured (`bleram`, 2026-11-01, the bench unit without
+the dongle): Bluetooth costs **30.1 KB on Full and 27.0 KB on Lean** (34.6
+and 31.5 KB the night before: 4.5 KB less on either profile, the host task's
+stack and TCB no longer from the internal heap); `blesec` on the same image:
+3924 B of headroom before a pairing, 3076 B after it, the pairing 5 jobs on
+the worker, the reconnect after a reboot 33, 0 refusals, the bond persisted.
+
 **The lever that did reach (2026-10-31 evening): `CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY`**
 (the firmware's `sdkconfig.defaults`), the controller's code in flash instead
 of IRAM. On the ESP32-S3 every IRAM byte freed becomes an internal-heap byte:

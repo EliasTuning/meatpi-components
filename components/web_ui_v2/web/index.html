@@ -4291,7 +4291,8 @@ PAGES.vpn=async(view)=>{
     dbgRows.replaceChildren(kv([
       ["Type",v.type||"-"],["State",v.state||"-"],["Endpoint",(v.endpoint&&!/^:\d*$/.test(v.endpoint))?v.endpoint:"-"],
       ["Network",v.network||"-"],
-      ["Routes",Array.isArray(v.routes)&&v.routes.length?v.routes.join(", "):"-"],
+      /* the tailscale type's routes are the tailnet's approved subnet routes, learned (2026-11-01) */
+      [v.type==="tailscale"?"Routes (from the tailnet)":"Routes",Array.isArray(v.routes)&&v.routes.length?v.routes.join(", "):"-"],
       ["Tailscale IP",v.ts_ip||"-"],["Peers",v.ts_peers],
       ["Relay",v.type==="tailscale"?(v.derp?"up":"down"):"-"],["Connects",v.connects],
       ["Failures",v.failures],["Uptime",fmt.dur(v.uptime_s)]]));}

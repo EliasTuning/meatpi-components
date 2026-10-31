@@ -26,6 +26,7 @@
 #include "ble_manager.h"
 #include "bridge_manager.h"
 #include "dev_status_manager.h"
+#include "flash_jobs.h"
 #include "log_manager.h"
 #include "settings_manager.h"
 
@@ -180,6 +181,9 @@ void app_main(void)
 
     /* ---- compose like main -------------------------------------------- */
     ESP_ERROR_CHECK(log_manager_init());
+    /* the bond store writes from the NimBLE host task, which runs on a
+       PSRAM stack: its NVS work needs the flash worker (2026-11-01) */
+    ESP_ERROR_CHECK(flash_jobs_init());
     ESP_ERROR_CHECK(dev_status_manager_init());
     ESP_ERROR_CHECK(settings_manager_init());
     ESP_ERROR_CHECK(log_manager_register_settings());

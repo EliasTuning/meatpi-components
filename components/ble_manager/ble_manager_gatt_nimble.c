@@ -43,20 +43,27 @@
  *           (same effective policy as legacy's ENC_MITM CCCDs).
  *         - long CLI writes: NimBLE reassembles queued writes and
  *           delivers ONE access call - newline-split as usual.
+ *         - the host task (2026-11-01): created here on a PSRAM stack
+ *           instead of by nimble_port_freertos_init(), which takes 4 KB
+ *           of the internal heap; the bond store's NVS writes that made
+ *           the stack internal run on the flash_jobs worker
+ *           (ble_manager_store_nvs.c wraps them and the store's load).
  */
 #include <string.h>
+
+#include "sdkconfig.h"
 
 #include "esp_attr.h"
 #include "esp_bt.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -376,11 +383,105 @@ static void on_reset(int reason)
     blm_tx_on_link_reset();
 }
 
+/* ---- the host task ------------------------------------------------------------------------ */
+
+/* The NimBLE host task on a PSRAM stack (2026-11-01, lever 3 of
+   internal/TASK_ble_tailscale_margin.md). IDF's esp_nimble_enable() would
+   create it with a 4 KB stack from the internal heap, and it had to be
+   internal because the bond store writes NVS from this task; those writes
+   run on the flash_jobs worker now (ble_manager_store_nvs.c wraps the
+   persist functions and the store's load, which the host also calls from
+   this task at startup), and nothing else the task runs touches the flash
+   (HCI, ATT, the security manager's ECDH, the GATT callbacks, which the
+   channel owners keep to flag-and-wake). The size is the port's 4 KB
+   (CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE) plus 2 KB: blesec measured
+   1028 B of headroom on 4 KB right after a pairing (the ECDH of LE Secure
+   Connections is the deepest path the task runs), the standard's line,
+   and a PSRAM stack's overflow is silent (section 2) while its bytes cost
+   nothing internal. The task's watermark is on the task monitor whenever
+   it exists, blesec reads it after the pairing and stackaudit asserts the
+   placement.
+
+   One task for the firmware's life: created at the first bring-up, it runs
+   nimble_port_run() until nimble_port_stop() returns it, then parks on a
+   notification until the next bring-up. Nothing is ever deleted or freed
+   (the TCB is a static, the stack a PSRAM static), so the restart path
+   (interface_manager stops and starts the stack around an access-point
+   station, the config mode, the sleep path) has no task lifetime to
+   race: the stopper waits for the park before it tears the port down,
+   which is also one step cleaner than the port's own order (the host
+   task deleting itself while nimble_port_deinit() ran beside it). */
+/* the port's NIMBLE_HS_STACK_SIZE is this Kconfig value; named here so the
+   static stack audit (tools/stack_audit.py) resolves the size from
+   sdkconfig.h */
+#define BLM_HOST_STACK_BYTES (CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE + 2048)
+
+static StaticTask_t s_host_tcb; /* internal: FreeRTOS TCB */
+static StackType_t  s_host_stack[BLM_HOST_STACK_BYTES] EXT_RAM_BSS_ATTR;
+static TaskHandle_t s_host_task;
+static SemaphoreHandle_t s_host_parked;     /* the task -> the stopper */
+static StaticSemaphore_t s_host_parked_buf; /* internal: FreeRTOS object */
+
 static void host_task(void *arg)
 {
     (void)arg;
-    nimble_port_run();          /* returns at nimble_port_stop() */
-    nimble_port_freertos_deinit();
+
+    for (;;)
+    {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY); /* a bring-up */
+        nimble_port_run();                             /* until nimble_port_stop() */
+        ESP_LOGD(TAG, "host task parked: stack_hw=%u",
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
+        xSemaphoreGive(s_host_parked);
+    }
+}
+
+/* The task's first creation (nothing on later bring-ups). The values are
+   esp_nimble_enable()'s (nimble_port_freertos.c) but the stack size: the
+   priority configMAX_PRIORITIES - 4, pinned to NIMBLE_CORE. The task
+   waits for host_task_wake(); created and woken apart so the bring-up's
+   per-step line measures the creation alone (the host's startup, which
+   runs at once after the wake, loads the bond store through the flash
+   worker, whose 4.4 KB internal stack lives for 5 s after that job). */
+static esp_err_t host_task_create(void)
+{
+    if (s_host_parked == NULL)
+    {
+        s_host_parked = xSemaphoreCreateBinaryStatic(&s_host_parked_buf);
+    }
+
+    if (s_host_task == NULL)
+    {
+        s_host_task = xTaskCreateStaticPinnedToCore(
+            host_task, "nimble_host",
+            sizeof(s_host_stack) / sizeof(s_host_stack[0]), NULL,
+            configMAX_PRIORITIES - 4, s_host_stack, &s_host_tcb, NIMBLE_CORE);
+    }
+
+    return s_host_task != NULL ? ESP_OK : ESP_FAIL;
+}
+
+static void host_task_wake(void)
+{
+    (void)xSemaphoreTake(s_host_parked, 0); /* a stale park, if any */
+    xTaskNotifyGive(s_host_task);
+}
+
+/* After nimble_port_stop(): the task is past nimble_port_run()'s last
+   NimBLE call once it parks, and only then may the port be torn down.
+   Bounded: the stop procedure already waited for the host task's own
+   acknowledgement of the stop event, so the park follows at once. */
+static void host_task_join(void)
+{
+    if (s_host_task == NULL)
+    {
+        return;
+    }
+
+    if (xSemaphoreTake(s_host_parked, pdMS_TO_TICKS(2000)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "host task did not park after the stop");
+    }
 }
 
 /* ---- stack lifecycle ---------------------------------------------------------------------- */
@@ -403,7 +504,9 @@ esp_err_t blm_gatt_stack_up(const char *dev_name)
 
     /* the internal heap at each step of the bring-up: the memory profile
        moves the first number, the rest is the stack's structure (the
-       controller and host task stacks are internal by IDF's design) */
+       controller task's stack is internal by IDF's design; the host task
+       reads 0 since 2026-11-01, its stack a PSRAM static and its TCB a
+       static of this file, and 4.4 KB before that) */
     size_t ram[6];
 
     ram[0] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -468,7 +571,15 @@ esp_err_t blm_gatt_stack_up(const char *dev_name)
        passkey, across reboots/power-cycles. Round-robin overflow evicts
        the oldest bond once MAX_BONDS (3) is reached instead of failing. */
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+#if !CONFIG_BT_NIMBLE_STATIC_TO_DYNAMIC
+    /* the load reads every table from NVS and sets the store callbacks: it
+       lands in the wrapper of ble_manager_store_nvs.c (a flash job). With
+       CONFIG_BT_NIMBLE_STATIC_TO_DYNAMIC (this build) the host does the
+       same call itself from its own task at every startup
+       (ble_hs_pvcy_set_default_irk), before any pairing can need the
+       store, so the call here would only load the tables twice */
     ble_store_config_init();
+#endif
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -500,13 +611,22 @@ esp_err_t blm_gatt_stack_up(const char *dev_name)
     esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, lvl);
 
     ram[4] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    nimble_port_freertos_init(host_task);
+    err = host_task_create();
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "NimBLE host task not created");
+        nimble_port_deinit();
+        return err;
+    }
+
     ram[5] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGI(TAG, "internal RAM per step: controller init %d, enable %d, host init %d, "
              "services %d, host task %d B (%u free before)",
              (int)ram[0] - (int)ram[1], (int)ram[1] - (int)ram[2],
              (int)ram[2] - (int)ram[3], (int)ram[3] - (int)ram[4],
              (int)ram[4] - (int)ram[5], (unsigned)ram[0]);
+    host_task_wake();
     return ESP_OK;
 }
 
@@ -514,6 +634,7 @@ void blm_gatt_stack_down(void)
 {
     if (nimble_port_stop() == 0)
     {
+        host_task_join(); /* the host task parked: past its last port call */
         nimble_port_deinit();
     }
 

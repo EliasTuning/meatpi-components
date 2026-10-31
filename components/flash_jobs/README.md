@@ -53,13 +53,16 @@ one-shot `se_load` task); fw_update's otadata and record payloads
 pairing store runs on its caller's stack now (settings_manager marshals
 the flash part; was the one-shot `espnl_store` task) and the autopid
 vehicle writer's stack moved to PSRAM (the filesystem marshals; was 6 KB of
-internal `.bss`). Not through it, on purpose: the factory reset's own 8 KB
-internal task (`nvs_flash_init`'s page scan is deeper than the worker's
-stack), the OTA pipe's session writer (an asynchronous queue of chunks:
-the download overlaps the flash writes, which a blocking job would not),
-safe mode's server (the recovery path), the NimBLE bond store (the host
-task keeps its 4 KB internal stack: `internal/TASK_ble_tailscale_margin.md`
-lever 3, gated by `blesec` on a re-cabled rig).
+internal `.bss`); the NimBLE bond store (the persist functions of IDF's
+`ble_store_nvs.c` wrapped at link time in `ble_manager_store_nvs.c`, the
+store's load at the bring-up a job too), so the NimBLE host task lives on
+a PSRAM stack (lever 3 of `internal/TASK_ble_tailscale_margin.md`, gated by
+`blesec`: the pairing and the bond that survives a reboot are the writes).
+Not through it, on purpose: the factory reset's own 8 KB internal task
+(`nvs_flash_init`'s page scan is deeper than the worker's stack), the OTA
+pipe's session writer (an asynchronous queue of chunks: the download
+overlaps the flash writes, which a blocking job would not), safe mode's
+server (the recovery path).
 
 **Failure modes.** A marshalled call when the internal heap cannot give the
 worker its stack: `ESP_ERR_NO_MEM`, the job did not run, one W line per

@@ -48,9 +48,10 @@
  * (the update session), config_backup (the backup key in NVS), the
  * Tailscale client through microlink's flash hook (the device keys, the
  * peer cache: 2026-11-01), the script engine's file read, fw_update's
- * otadata and record payloads. The HTTP server task, the filesystem's
- * writer, the VPN state task and the Tailscale tasks run on PSRAM stacks
- * because of it.
+ * otadata and record payloads, the NimBLE bond store (its persist
+ * functions wrapped by ble_manager: 2026-11-01). The HTTP server task, the
+ * filesystem's writer, the VPN state task, the Tailscale tasks and the
+ * NimBLE host task run on PSRAM stacks because of it.
  *
  * The job's argument may live in PSRAM (the caller's stack included): the
  * flash driver copies through an internal bounce buffer when a source or
