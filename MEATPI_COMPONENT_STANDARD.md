@@ -54,7 +54,7 @@ static StackType_t  s_stack[8192] EXT_RAM_BSS_ATTR;   // stack: PSRAM
 xTaskCreateStatic(comp_task, "comp", 8192, NULL, 5, s_stack, &s_tcb);
 ```
 
-  Required Kconfig (IDF v6.0.2, ESP32-S3): `CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y` (for `EXT_RAM_BSS_ATTR`), `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y` (for PSRAM task stacks), and `CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY=y` if `EXT_RAM_NOINIT_ATTR` is used.
+  Required Kconfig (ESP32-S3): `CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y` (for `EXT_RAM_BSS_ATTR`), `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y` (for PSRAM task stacks; IDF 6.1 renamed it from `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY`, which survives in `sdkconfig` only in the deprecated block: a Kconfig `depends on` the old name evaluates false silently, found 2026-10-31), and `CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY=y` if `EXT_RAM_NOINIT_ATTR` is used.
 
 - **Must stay in internal RAM**: these are the only acceptable reasons to leave PSRAM:
   - **DMA buffers** (TWAI/CAN, SPI, I2S, USB, …). Static: `DMA_ATTR`. Dynamic: `MALLOC_CAP_DMA`.
@@ -372,7 +372,7 @@ applies:
 Rules:
 
 - Anything that *can* be host-tested *must* be: don't require a board to test a parser.
-- Settings: schema + `on_validate` + `on_migrate` get unit tests (valid accepted, invalid rejected with the expected error, every historical version migrates to current). Atomic store, rollback-on-corruption, and the boot-failure fallback (§4.3 steps 4–5) get pytest/target tests.
+- Settings: schema + `on_validate` + `on_migrate` get unit tests (valid accepted, invalid rejected with the expected error, every historical version migrates to current). Atomic store, rollback-on-corruption, and the boot-failure fallback (§4.3 steps 4 to 5) get pytest/target tests.
 - No component logic merges without tests covering it. CI runs host unit tests on every push.
 - **Tests listen for error lines (rev 2.6).** The measured baseline is ZERO `E` lines across every suite, even deliberate-failure scenarios (wrong PSK, dead AP) surface as I/W. On-target runs report `errors=N warnings=N` in their verdict (`serial_capture.py`); the wifi HIL suite fails any test over its error budget (default 0, per-test `ERROR_BUDGET` entries only for paths that genuinely must log at ERROR: tallies persist in `hil_health.log`); the composed-firmware bench (`system_bench.py` step 6) asserts `log_errors == 0`, flash budgets, registry headroom, task-stack headroom ≥ 256 B, and ZERO latched fault codes. A new test that produces error lines is either finding a bug (fix it) or mis-leveled logging (§10).
 
