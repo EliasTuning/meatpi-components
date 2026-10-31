@@ -344,19 +344,10 @@ esp_err_t cert_manager_get(const char *set, cert_manager_part_t part,
     if (entry != NULL && entry->pem[part] == NULL)
     {
         /* not cached (a part that appeared without a rescan): the lazy
-           load is a flash read, forbidden on a PSRAM stack (§2), refuse
-           with a warning instead of the cache_utils.c:126 assert */
-        int marker = 0;
-
-        if (esp_ptr_external_ram(&marker))
-        {
-            ESP_LOGW(TAG, "set '%s' part %s not cached; a PSRAM-stack "
-                          "caller cannot load it",
-                     set, cm_part_filename(part));
-            xSemaphoreGive(s_lock);
-            return ESP_ERR_INVALID_STATE;
-        }
-
+           load is a flash read, which filesystem_read runs on an
+           internal stack whoever the caller is (the flash_jobs worker for
+           a PSRAM-stack caller, 2026-10-31), so the PSRAM-stack guard of
+           2026-09-19 that refused the load here is gone (2026-11-01) */
         load_part(entry, part);
     }
 
