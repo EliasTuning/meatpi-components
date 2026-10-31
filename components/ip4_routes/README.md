@@ -26,6 +26,23 @@ undefined reference to the wrapper (found 2026-10-29). The same
 pattern wraps `esp_panic_handler` (restart_tracker) and
 `twai_hal_read_rx_fifo` (can_manager); re-check it at every IDF bump.
 
+**A directly connected network wins (2026-11-01).** Before the table's
+answer is taken, the hook walks the other netifs that are up: a destination
+inside one's own network stays on that netif, the way lwIP's own walk and
+every IP stack route, and the way Tailscale keeps a LAN local while a subnet
+router advertises that very LAN (its routing-table rule with
+`suppress_prefixlength 0`). Without it a WiCAN at home, on the network its
+home subnet router advertises (the Tailscale subnet routes microlink learns
+from the map since the same day), would send its own LAN's traffic into the
+tunnel; the same held for a WireGuard `routes` entry naming the station's
+network. The default route (`netif_set_default`) never had this problem: a
+connected network was always more specific than it.
+
+**Owners.** vpn_manager's WireGuard glue (the `routes` setting, up to 8) and
+microlink's WireGuard manager (the subnet routes a tailnet's subnet routers
+carry, up to 8 across the peers, `ml_wg_mgr.c` routes_apply); one VPN type
+runs at a time, so the 16-slot table holds either.
+
 ## API (`include/ip4_routes.h`)
 
 | Function | What |

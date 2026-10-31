@@ -156,6 +156,34 @@ void ip4_routes_capacity(size_t *used, size_t *cap)
 struct netif *__real_ip4_route_src_hook(const ip4_addr_t *src,
                                         const ip4_addr_t *dest);
 
+/* A directly connected network wins over the table (2026-11-01): a
+ * destination inside the own network of another netif that is up stays
+ * on that netif, the way every IP stack routes (lwIP's own walk would have
+ * chosen it) and the way Tailscale keeps a LAN local while a subnet
+ * router advertises that very LAN. Without it a WiCAN at home, on the
+ * network its home subnet router advertises, would send its own LAN's
+ * traffic into the tunnel. */
+static bool connected_elsewhere(const ip4_addr_t *dest, const struct netif *route_nif)
+{
+    struct netif *n;
+
+    NETIF_FOREACH(n)
+    {
+        if (n == route_nif || !netif_is_up(n) || !netif_is_link_up(n) ||
+            ip4_addr_isany_val(*netif_ip4_addr(n)))
+        {
+            continue;
+        }
+
+        if (ip4_addr_net_eq(dest, netif_ip4_addr(n), netif_ip4_netmask(n)))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
                                         const ip4_addr_t *dest)
 {
@@ -169,7 +197,8 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
 
         portEXIT_CRITICAL(&s_mux);
 
-        if (nif != NULL && netif_is_up(nif) && netif_is_link_up(nif))
+        if (nif != NULL && netif_is_up(nif) && netif_is_link_up(nif) &&
+            !connected_elsewhere(dest, nif))
         {
             return nif;
         }
