@@ -131,8 +131,11 @@ bench weeks later.
   The composition root raises `boot_errors` (any ESP_LOGE during boot:
   the generic net over every silent degradation), `registry_headroom`
   (a bounded table within 2 of full), `boot_flash_budget` (>64 erases
-  during boot: the settings-manager-rewrote-everything class) and
-  `flash_churn` (erases rising 10 consecutive 60 s windows at runtime).
+  during boot: the settings-manager-rewrote-everything class),
+  `flash_churn` (erases rising 10 consecutive 60 s windows at runtime) and
+  `flash_jobs_refused` (2026-11-01: a flash job of a PSRAM-stack caller
+  refused for want of internal RAM for the flash worker; once per boot,
+  with the count, from the same 60 s watch).
   Components below dev_status in the graph raise nothing themselves
   (dependency cycles); their ESP_LOGE is caught by the boot_errors net.
 - Read/clear: `faults` / `faults -c` CLI, `GET /api/faults`,
