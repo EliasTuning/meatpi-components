@@ -42,6 +42,7 @@
 #include "event_manager.h"
 #include "cmdline_manager.h"
 #include "dev_status_manager.h"
+#include "flash_jobs.h"
 #include "http_server_manager.h"
 #include "log_manager.h"
 #include "partition_migrate.h"
@@ -259,6 +260,24 @@ static esp_err_t status_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(f, "erases", fl.erase_count);
         cJSON_AddNumberToObject(f, "erase_bytes", fl.erase_bytes);
     }
+
+    /* the flash worker (2026-11-01): how often PSRAM-stack callers needed
+       it, whether one is alive at this reading (the heap probe says so per
+       row), the lowest watermark a worker reported, and the refusals (no
+       internal RAM for a worker: main latches a fault on them) */
+    flash_jobs_stats_t fj;
+
+    flash_jobs_stats(&fj);
+
+    cJSON *fjo = cJSON_AddObjectToObject(health, "flash_jobs");
+
+    cJSON_AddNumberToObject(fjo, "inline", fj.inline_runs);
+    cJSON_AddNumberToObject(fjo, "marshalled", fj.marshalled);
+    cJSON_AddNumberToObject(fjo, "spawns", fj.spawns);
+    cJSON_AddNumberToObject(fjo, "exits", fj.exits);
+    cJSON_AddNumberToObject(fjo, "refusals", fj.refusals);
+    cJSON_AddNumberToObject(fjo, "stack_hw_min", fj.stack_hw_min);
+    cJSON_AddBoolToObject(fjo, "worker_alive", fj.worker_alive);
 
     cJSON *caps = cJSON_AddObjectToObject(health, "caps");
     size_t used;
