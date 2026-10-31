@@ -43,6 +43,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "flash_jobs.h"
 #include "ota_manager.h"
 #include "restart_tracker.h"
 
@@ -139,32 +140,30 @@ esp_err_t fwu_store_erase(void)
 
 /* ---- the internal-stack helper ---------------------------------------------------- */
 
+/* The payloads run on an internal stack whoever the caller is (the
+ * fw_update task lives on a PSRAM stack; otadata and the NVS record are
+ * flash): through the shared flash worker since 2026-11-01 (it was a
+ * one-shot 4 KB internal task of this file's own, `fwu_flash`). The gate
+ * keeps one payload at a time, with the callers' wait; the job itself runs
+ * to completion (flash_jobs_run blocks until it returns). */
 typedef struct
 {
     void (*fn)(void *);
     void *arg;
-    SemaphoreHandle_t done;
 } run_ctx_t;
 
-static void run_task(void *p)
+static esp_err_t run_job(void *p)
 {
     run_ctx_t *ctx = p;
 
     ctx->fn(ctx->arg);
-    /* standard section 2: an ephemeral task shows its headroom before it
-       goes (DEBUG: the helper runs per operation, a few times per boot) */
-    ESP_LOGD(TAG, "fwu_flash stack_hw=%u B",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    xSemaphoreGive(ctx->done);
-    vTaskDelete(NULL);
+    return ESP_OK;
 }
 
 esp_err_t fwu_run_internal(void (*fn)(void *), void *arg, uint32_t wait_ms)
 {
-    static StaticSemaphore_t done_buf; /* internal: FreeRTOS object */
-    static SemaphoreHandle_t done;
     static SemaphoreHandle_t gate;     /* one helper at a time */
-    static StaticSemaphore_t gate_buf;
+    static StaticSemaphore_t gate_buf; /* internal: FreeRTOS object */
     run_ctx_t ctx = { .fn = fn, .arg = arg };
 
     if (fn == NULL)
@@ -175,7 +174,6 @@ esp_err_t fwu_run_internal(void (*fn)(void *), void *arg, uint32_t wait_ms)
     if (gate == NULL)
     {
         gate = xSemaphoreCreateMutexStatic(&gate_buf);
-        done = xSemaphoreCreateBinaryStatic(&done_buf);
     }
 
     if (xSemaphoreTake(gate, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
@@ -183,18 +181,7 @@ esp_err_t fwu_run_internal(void (*fn)(void *), void *arg, uint32_t wait_ms)
         return ESP_ERR_TIMEOUT;
     }
 
-    (void)xSemaphoreTake(done, 0);
-    ctx.done = done;
-
-    /* internal: the default heap, so the NVS / otadata write is legal */
-    if (xTaskCreate(run_task, "fwu_flash", 4096, &ctx, 6, NULL) != pdPASS)
-    {
-        xSemaphoreGive(gate);
-        return ESP_ERR_NO_MEM;
-    }
-
-    esp_err_t err = (xSemaphoreTake(done, pdMS_TO_TICKS(wait_ms)) == pdTRUE)
-                        ? ESP_OK : ESP_ERR_TIMEOUT;
+    esp_err_t err = flash_jobs_run(run_job, &ctx);
 
     xSemaphoreGive(gate);
     return err;

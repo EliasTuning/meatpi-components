@@ -22,7 +22,7 @@ idf_component_register(
     # espressif/cjson dependency (idf_component.yml). No dependency on
     # espnetlink_link, wifi_manager or usb_host_manager: the uplink word
     # comes from the composition root.
-    PRIV_REQUIRES app_update esp_app_format esp_bootloader_format nvs_flash
+    PRIV_REQUIRES app_update esp_app_format esp_bootloader_format nvs_flash flash_jobs
                   esp_timer esp_http_server console esp_hw_support mbedtls heap
                   log_manager settings_manager cmdline_manager
                   http_server_manager http_client_manager ota_manager
