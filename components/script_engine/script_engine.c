@@ -36,7 +36,6 @@
 
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
-#include "esp_memory_utils.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -45,6 +44,7 @@
 #include "be_debug.h"          /* be_tracestack: the traceback into the run output */
 #include "berry.h"
 #include "filesystem.h"
+#include "flash_jobs.h"
 #include "log_manager.h"
 
 #include "script_engine_doc.h"
@@ -308,24 +308,22 @@ static esp_err_t load_script(const char *name, char **out_src)
     return ESP_OK;
 }
 
-/* One-shot internal-stack loader: the marshal for PSRAM-stack callers
- * (the event dispatcher). Transient 4 KB internal alloc; script-run
- * frequency is human-scale, task churn is irrelevant. */
+/* The script file is read through stdio on the flash filesystem, a flash
+ * read: it runs on an internal stack whoever the caller is (the event
+ * dispatcher calls from a PSRAM stack), through the shared flash worker
+ * since 2026-11-01 (it was a one-shot 4 KB internal task of this file's
+ * own, `se_load`). The job's argument lives on the caller's stack. */
 typedef struct
 {
-    const char       *name;
-    char             *src;
-    esp_err_t         err;
-    SemaphoreHandle_t done;
+    const char *name;
+    char       *src;
 } se_loader_req_t;
 
-static void loader_task(void *arg)
+static esp_err_t loader_job(void *arg)
 {
     se_loader_req_t *req = arg;
 
-    req->err = load_script(req->name, &req->src);
-    xSemaphoreGive(req->done);
-    vTaskDelete(NULL);
+    return load_script(req->name, &req->src);
 }
 
 esp_err_t script_engine_run_file(const char *name, char *out, size_t cap)
@@ -335,33 +333,9 @@ esp_err_t script_engine_run_file(const char *name, char *out, size_t cap)
         return ESP_ERR_INVALID_ARG;
     }
 
-    char *src = NULL;
-    esp_err_t err;
-    int probe = 0;                 /* only its ADDRESS matters (stack loc) */
-
-    if (!esp_ptr_external_ram(&probe))
-    {
-        err = load_script(name, &src);        /* internal stack: inline */
-    }
-    else
-    {
-        StaticSemaphore_t done_buf;
-        se_loader_req_t req =
-        {
-            .name = name,
-            .done = xSemaphoreCreateBinaryStatic(&done_buf),
-        };
-
-        if (xTaskCreate(loader_task, "se_load", 4096, &req, 5, NULL)
-            != pdPASS)
-        {
-            return ESP_ERR_NO_MEM;
-        }
-
-        xSemaphoreTake(req.done, portMAX_DELAY);
-        err = req.err;
-        src = req.src;
-    }
+    se_loader_req_t req = { .name = name, .src = NULL };
+    esp_err_t err = flash_jobs_run(loader_job, &req);
+    char *src = req.src;
 
     if (err != ESP_OK)
     {
