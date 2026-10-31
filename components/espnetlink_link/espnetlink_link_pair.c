@@ -28,12 +28,14 @@
  *        Every write is change-guarded (§11) so the boot-time re-read of
  *        an unchanged key costs zero flash writes and no reboot.
  *
- * settings_manager_set() walks LittleFS on the CALLER's stack (flash
- * reads with the cache disabled): a PSRAM-stack caller trips
+ * settings_manager_set() used to walk LittleFS on the CALLER's stack (flash
+ * reads with the cache disabled): a PSRAM-stack caller tripped
  * esp_task_stack_is_sane_cache_disabled (bench 2026-08-24, first pairing
- * attempt). The §2 corollary applies, so the store always runs on a
- * short-lived internal-RAM worker task and the caller (link task, HTTP or
- * CLI handler) blocks until it is done.
+ * attempt), so the store ran on a short-lived internal-RAM worker task of
+ * its own. Since 2026-10-31 the Settings Manager runs its storage on the
+ * shared flash worker whoever the caller is, and since 2026-11-01 the
+ * store runs on the caller's stack (link task, HTTP or CLI handler), one
+ * store at a time behind a mutex.
  */
 #include <stdio.h>
 #include <string.h>
@@ -270,30 +272,22 @@ static esp_err_t store_impl(store_job_t *job)
     return ESP_OK;
 }
 
-/* ---- internal-stack worker (§2 corollary) ------------------------------ */
+/* ---- one store at a time ------------------------------------------------ */
 
-#define STORE_STACK_BYTES 6144   /* cJSON print + LittleFS open/rename */
-
+/* Until 2026-11-01 the store ran on a one-shot 6 KB internal task of its
+ * own (`espnl_store`: the §2 corollary, LittleFS with the cache off). The
+ * Settings Manager runs its storage on an internal stack itself now
+ * (flash_jobs, 2026-10-31), so the store runs on the caller's own stack
+ * (PSRAM or not) and only its flash part is marshalled; the mutex keeps
+ * one store at a time, as before. */
 static SemaphoreHandle_t s_store_lock;   /* one store at a time */
-static SemaphoreHandle_t s_store_done;
 static StaticSemaphore_t s_store_lock_buf;
-static StaticSemaphore_t s_store_done_buf;
-
-static void store_task(void *arg)
-{
-    store_job_t *job = arg;
-
-    job->err = store_impl(job);
-    xSemaphoreGive(s_store_done);
-    vTaskDelete(NULL);
-}
 
 void espnl_pair_init(void)
 {
     if (s_store_lock == NULL)
     {
         s_store_lock = xSemaphoreCreateMutexStatic(&s_store_lock_buf);
-        s_store_done = xSemaphoreCreateBinaryStatic(&s_store_done_buf);
     }
 }
 
@@ -320,16 +314,7 @@ esp_err_t espnl_pair_store(const char *ssid, const char *password,
     };
 
     xSemaphoreTake(s_store_lock, portMAX_DELAY);
-
-    /* internal-RAM stack (default heap): LittleFS runs with the cache off */
-    if (xTaskCreate(store_task, "espnl_store", STORE_STACK_BYTES, &job, 5,
-                    NULL) != pdPASS)
-    {
-        xSemaphoreGive(s_store_lock);
-        ESP_LOGE(TAG, "pair: store task alloc failed");
-        return ESP_ERR_NO_MEM;
-    }
-    xSemaphoreTake(s_store_done, portMAX_DELAY);
+    job.err = store_impl(&job);
     xSemaphoreGive(s_store_lock);
 
     if (slot_out != NULL)
