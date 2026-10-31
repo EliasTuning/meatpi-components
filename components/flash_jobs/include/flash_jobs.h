@@ -36,16 +36,21 @@
  * `fn(arg)` and returns its result: in line when the caller's own stack is
  * internal (the main task at boot, the console, the worker itself inside a
  * job), otherwise on the worker task, with the caller blocked until the job
- * returns. The worker is created at the first marshalled job (6 KB of
- * internal heap) and leaves after 5 s without one, so a device that is not
- * writing pays nothing at idle. One job runs at a time; a job that calls
- * `flash_jobs_run()` again runs that call in line.
+ * returns. The worker is created at the first marshalled job (4 KB of
+ * internal heap since 2026-11-01, 6 KB before) and leaves after 5 s without
+ * one, so a device that is not writing pays nothing at idle. One job runs
+ * at a time; a job that calls `flash_jobs_run()` again runs that call in
+ * line.
  *
  * Users: settings_manager (every settings file), filesystem (every `/data`
  * operation of a PSRAM-stack caller and the async pipe's chunks),
  * restart_tracker and dev_status_manager (their NVS records), ota_manager
- * (the update session), config_backup (the backup key in NVS). The HTTP
- * server task runs on a PSRAM stack because of them.
+ * (the update session), config_backup (the backup key in NVS), the
+ * Tailscale client through microlink's flash hook (the device keys, the
+ * peer cache: 2026-11-01), the script engine's file read, fw_update's
+ * otadata and record payloads. The HTTP server task, the filesystem's
+ * writer, the VPN state task and the Tailscale tasks run on PSRAM stacks
+ * because of it.
  *
  * The job's argument may live in PSRAM (the caller's stack included): the
  * flash driver copies through an internal bounce buffer when a source or

@@ -38,12 +38,17 @@ extern "C" {
 
 /* The worker's stack: the deepest jobs are a settings file write through
    LittleFS (an open, a write, a sync and a rename, each through the
-   partition layer) and the end of an OTA session (the image verified
-   through the partition reads). The filesystem's writer ran the same jobs
-   on 5 KB with about a kilobyte spare (2026-10-13); the OTA pipe's writer
-   on 5 KB too. 6 KB leaves the standard's kilobyte and the watermark is
-   logged at every exit (stats.stack_hw_min) for the next trim. */
-#define FLASH_JOBS_STACK_BYTES 6144
+   partition layer), the end of an OTA session (the image verified
+   through the partition reads), the peer cache of the Tailscale client (a
+   blob of up to 5.8 KB into NVS) and a script file read through stdio.
+   It was 6 KB on 2026-10-31; the whole bench battery of that night (the
+   settings saves, the uploads, the OTA session, the crash reports, the
+   backup copies) used 2.5 KB of it at most (stack_hw_min 3576), so 4 KB
+   leaves the standard's kilobyte (2026-11-01); the watermark is logged at
+   every exit (stats.stack_hw_min, `system -m`, /api/status health) for the
+   next look. An internal stack's overflow is caught by FreeRTOS
+   (CONFIG_FREERTOS_CHECK_STACKOVERFLOW), never silent. */
+#define FLASH_JOBS_STACK_BYTES 4096
 
 /* How long a worker waits for the next job before it leaves. The web UI's
    Submit writes a handful of settings files within a second or two; the
