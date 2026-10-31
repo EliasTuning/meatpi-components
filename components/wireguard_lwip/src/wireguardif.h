@@ -117,6 +117,13 @@ err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *peer, u
 // Remove the given peer from the network interface
 err_t wireguardif_remove_peer(struct netif *netif, u8_t peer_index);
 
+// WiCAN (2026-11-01): add an allowed network to an existing peer (a subnet
+// route a Tailscale peer carries: outbound packets for it go to this peer,
+// inbound packets from it are accepted). ERR_MEM when the peer's table
+// (WIREGUARD_MAX_SRC_IPS) is full, ERR_ARG for an unknown peer.
+err_t wireguardif_peer_add_allowed_ip(struct netif *netif, u8_t peer_index,
+                                      const ip_addr_t *ip, const ip_addr_t *mask);
+
 // Update the "connect" IP of the given peer
 err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, u16_t port);
 

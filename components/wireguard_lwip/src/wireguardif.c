@@ -1055,6 +1055,19 @@ err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip
 }
 
 
+// WiCAN (2026-11-01): a subnet route for an existing peer (see wireguardif.h)
+err_t wireguardif_peer_add_allowed_ip(struct netif *netif, u8_t peer_index,
+                                      const ip_addr_t *ip, const ip_addr_t *mask) {
+	LWIP_ASSERT("netif != NULL", (netif != NULL));
+	LWIP_ASSERT("state != NULL", (netif->state != NULL));
+	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+	struct wireguard_peer *peer = peer_lookup_by_peer_index(device, peer_index);
+	if (!peer || !ip || !mask) {
+		return ERR_ARG;
+	}
+	return peer_add_ip(peer, *ip, *mask) ? ERR_OK : ERR_MEM;
+}
+
 err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *p, u8_t *peer_index) {
 	LWIP_ASSERT("netif != NULL", (netif != NULL));
 	LWIP_ASSERT("state != NULL", (netif->state != NULL));

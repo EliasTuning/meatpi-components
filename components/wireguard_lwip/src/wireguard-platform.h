@@ -40,7 +40,12 @@
 // Peers are allocated statically inside the device structure to avoid malloc
 // Increased from 1 to support multiple Tailscale peers (10 peers for larger networks)
 #define WIREGUARD_MAX_PEERS 16
-#define WIREGUARD_MAX_SRC_IPS 2
+// WiCAN (2026-11-01): a peer's own address plus up to four subnet routes it
+// carries (a Tailscale subnet router's approved networks, microlink
+// ML_MAX_PEER_ROUTES); was 2. The device struct lives in PSRAM (lwIP's
+// mem_calloc is the system allocator here), so the growth costs no
+// internal RAM.
+#define WIREGUARD_MAX_SRC_IPS 5
 
 // Per device limit on accepting (valid) initiation requests - per peer
 #define MAX_INITIATIONS_PER_SECOND	(2)
