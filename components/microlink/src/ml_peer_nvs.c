@@ -55,16 +55,42 @@ static nvs_handle_t s_nvs = 0;
 static bool s_initialized = false;
 static peer_nvs_table_t *s_table = NULL;  /* PSRAM-allocated working copy */
 
-static void load_table(void) {
-    if (!s_table) {
-        s_table = ml_psram_calloc(1, sizeof(peer_nvs_table_t));
-        if (!s_table) return;
-    }
+/* WiCAN (2026-11-01): every NVS access below is a flash job run through
+ * ml_flash_run() (the host's internal-stack worker when there is one), so
+ * the wg_mgr task, the caller of save and remove, can live on a PSRAM
+ * stack. The table itself is RAM; only the open, the blob read and the
+ * blob writes touch the flash. */
+
+/* the open and the blob read: a job */
+static esp_err_t open_and_load_job(void *arg) {
+    (void)arg;
+    esp_err_t err = nvs_open(PEER_NVS_NAMESPACE, NVS_READWRITE, &s_nvs);
+    if (err != ESP_OK) return err;
 
     size_t len = sizeof(peer_nvs_table_t);
     if (nvs_get_blob(s_nvs, PEER_NVS_BLOB_KEY, s_table, &len) != ESP_OK) {
         memset(s_table, 0, sizeof(peer_nvs_table_t));
     }
+    return ESP_OK;
+}
+
+/* the blob write and its commit: a job (the argument is the blob size) */
+static esp_err_t write_job(void *arg) {
+    size_t blob_size = *(size_t *)arg;
+    esp_err_t err = nvs_set_blob(s_nvs, PEER_NVS_BLOB_KEY, s_table, blob_size);
+    if (err == ESP_OK) {
+        nvs_commit(s_nvs);
+    }
+    return err;
+}
+
+static esp_err_t erase_job(void *arg) {
+    (void)arg;
+    esp_err_t err = nvs_erase_all(s_nvs);
+    if (err == ESP_OK) {
+        nvs_commit(s_nvs);
+    }
+    return err;
 }
 
 static esp_err_t flush_table(void) {
@@ -86,10 +112,9 @@ static esp_err_t flush_table(void) {
         return ESP_OK;
     }
 
-    esp_err_t err = nvs_set_blob(s_nvs, PEER_NVS_BLOB_KEY, s_table, blob_size);
+    esp_err_t err = ml_flash_run(write_job, &blob_size);
     if (err == ESP_OK) {
         s_last_crc = crc;
-        nvs_commit(s_nvs);
     }
     return err;
 }
@@ -97,17 +122,21 @@ static esp_err_t flush_table(void) {
 esp_err_t ml_peer_nvs_init(void) {
     if (s_initialized) return ESP_OK;
 
-    esp_err_t err = nvs_open(PEER_NVS_NAMESPACE, NVS_READWRITE, &s_nvs);
+    if (!s_table) {
+        s_table = ml_psram_calloc(1, sizeof(peer_nvs_table_t));
+        if (!s_table) return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = ml_flash_run(open_and_load_job, NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "NVS open failed: %d (peer cache disabled)", err);
         return err;
     }
 
     s_initialized = true;
-    load_table();
 
     ESP_LOGI(TAG, "Peer NVS initialized: %d cached peers (max %d)",
-             s_table ? s_table->count : 0, ML_NVS_MAX_PEERS);
+             s_table->count, ML_NVS_MAX_PEERS);
 
     return ESP_OK;
 }
@@ -280,9 +309,8 @@ esp_err_t ml_peer_nvs_remove(const uint8_t public_key[32]) {
 esp_err_t ml_peer_nvs_clear(void) {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
 
-    esp_err_t err = nvs_erase_all(s_nvs);
+    esp_err_t err = ml_flash_run(erase_job, NULL);
     if (err == ESP_OK) {
-        nvs_commit(s_nvs);
         if (s_table) memset(s_table, 0, sizeof(peer_nvs_table_t));
         ESP_LOGI(TAG, "Peer NVS cleared");
     }

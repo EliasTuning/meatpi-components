@@ -40,6 +40,26 @@ static const char *TAG = "microlink";
 #include "x25519.h"
 
 /* ============================================================================
+ * WiCAN (2026-11-01): the flash hook
+ *
+ * Every NVS access of the client (the device keys below, the peer cache in
+ * ml_peer_nvs.c) runs through ml_flash_run(): the host's hook when the
+ * config carried one (WiCAN hands it its internal-stack flash worker, so
+ * the client's tasks run on PSRAM stacks), in line otherwise (upstream
+ * behaviour: the caller's own stack). The hook is set at init and read by
+ * any task afterwards; a plain pointer is enough (written once before the
+ * tasks exist).
+ * ========================================================================== */
+
+static esp_err_t (*s_flash_run)(esp_err_t (*fn)(void *), void *arg);
+
+esp_err_t ml_flash_run(ml_flash_fn_t fn, void *arg) {
+    if (!fn) return ESP_ERR_INVALID_ARG;
+    if (s_flash_run) return s_flash_run(fn, arg);
+    return fn(arg);
+}
+
+/* ============================================================================
  * Key Management (loaded once at init, read-only after)
  * ========================================================================== */
 
@@ -51,7 +71,11 @@ static void generate_keypair(uint8_t *private_key, uint8_t *public_key) {
     x25519_base(public_key, private_key, 1);
 }
 
-static esp_err_t load_or_generate_keys(microlink_t *ml) {
+/* The NVS part of the key load: a flash job (ml_flash_run), the context
+ * is the argument. The keys land in the PSRAM context: NVS copies them
+ * through its own buffers, so the placement does not matter. */
+static esp_err_t keys_job(void *arg) {
+    microlink_t *ml = arg;
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (err != ESP_OK) {
@@ -114,6 +138,10 @@ static esp_err_t load_or_generate_keys(microlink_t *ml) {
     return ESP_OK;
 }
 
+static esp_err_t load_or_generate_keys(microlink_t *ml) {
+    return ml_flash_run(keys_job, ml);
+}
+
 /* ============================================================================
  * cJSON PSRAM Hooks
  * ========================================================================== */
@@ -128,11 +156,14 @@ static void *cjson_psram_malloc(size_t size) {
  * Creates a static task with its stack in PSRAM and its TCB in internal
  * RAM. For microlink's TLS/socket/crypto tasks (net_io/derp_tx/coord)
  * that never touch flash, moving 34 KB of stacks off the scarce
- * internal heap. Self-deletion via vTaskDelete(NULL) is safe for static
- * tasks (FreeRTOS just marks them done); the PSRAM stacks are freed by
- * ml_free_psram_task_stacks() in microlink_destroy after the join.
+ * internal heap, and since 2026-11-01 for wg_mgr too (its peer-cache
+ * writes run through the flash hook, so nothing on its stack touches the
+ * flash any more: 7 KB more off the internal heap). Self-deletion via
+ * vTaskDelete(NULL) is safe for static tasks (FreeRTOS just marks them
+ * done); the PSRAM stacks are freed by ml_free_psram_task_stacks() in
+ * microlink_destroy after the join.
  * ========================================================================== */
-#define ML_PSRAM_TASKS 3
+#define ML_PSRAM_TASKS 4
 static StaticTask_t s_ml_tcb[ML_PSRAM_TASKS];   /* internal: FreeRTOS TCB */
 static StackType_t *s_ml_stack[ML_PSRAM_TASKS]; /* PSRAM stack buffers    */
 /* WiCAN (2026-10-02): the stacks may only be freed after a REAL join of the
@@ -183,12 +214,13 @@ static void ml_free_psram_task_stacks(void) {
     }
 }
 
-/* Wait until the three static (PSRAM-stack) tasks have self-deleted. Their
+/* Wait until the four static (PSRAM-stack) tasks have self-deleted. Their
  * TCBs are ours (static), so eTaskGetState() stays valid after the delete.
  * Bounded: a task stuck longer than the worst blocking call we know of (a
  * failing DNS lookup) is reported and its stack is kept. */
 static bool ml_join_static_tasks(microlink_t *ml) {
-    TaskHandle_t tasks[ML_PSRAM_TASKS] = { ml->net_io_task, ml->derp_tx_task, ml->coord_task };
+    TaskHandle_t tasks[ML_PSRAM_TASKS] = { ml->net_io_task, ml->derp_tx_task, ml->coord_task,
+                                           ml->wg_mgr_task };
     uint32_t waited_ms = 0;
 
     for (;;) {
@@ -218,18 +250,24 @@ static bool ml_join_static_tasks(microlink_t *ml) {
  * Factory Reset
  * ========================================================================== */
 
-esp_err_t microlink_factory_reset(void) {
-    esp_err_t err;
-
-    /* Erase key namespace */
+/* the key namespace's erase as a flash job (in line unless a hook was set:
+ * the factory reset runs before init, from an internal-stack task) */
+static esp_err_t keys_erase_job(void *arg) {
+    (void)arg;
     nvs_handle_t nvs;
-    err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (err == ESP_OK) {
         nvs_erase_all(nvs);
         nvs_commit(nvs);
         nvs_close(nvs);
         ESP_LOGI(TAG, "Factory reset: keys erased");
     }
+    return err;
+}
+
+esp_err_t microlink_factory_reset(void) {
+    /* Erase key namespace */
+    (void)ml_flash_run(keys_erase_job, NULL);
 
     /* Erase cached peers */
     ml_peer_nvs_init();
@@ -290,6 +328,9 @@ microlink_t *microlink_init(const microlink_config_t *config) {
             ESP_LOGI(TAG, "Priority peer from Kconfig: %s", CONFIG_ML_PRIORITY_PEER_IP);
         }
     }
+
+    /* WiCAN: the flash hook, before the first NVS access */
+    s_flash_run = config->flash_run;
 
     /* Load or generate persistent keys */
     if (load_or_generate_keys(ml) != ESP_OK) {
@@ -487,11 +528,11 @@ skip_bsd_socket:
      * WiCAN (internal-RAM budget): net_io/derp_tx/coord run PSRAM
      * stacks (34 KB moved off internal), they do TLS/sockets/crypto
      * only, never flash, so the §2 corollary allows it. Their TCBs stay
-     * internal (the scheduler touches TCBs). wg_mgr KEEPS an internal
-     * stack: it writes the peer cache to NVS (flash), which a PSRAM
-     * stack forbids. Self-deleting static tasks are safe: the memory
-     * is ours; the PSRAM stacks are freed in microlink_destroy. */
-    BaseType_t ret;
+     * internal (the scheduler touches TCBs). wg_mgr runs a PSRAM stack
+     * too since 2026-11-01: its peer-cache writes go through the flash
+     * hook (ml_flash_run), so nothing on its stack touches the flash.
+     * Self-deleting static tasks are safe: the memory is ours; the PSRAM
+     * stacks are freed in microlink_destroy after a real join. */
     ram[1] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
     if (!ml_start_psram_task(ml_net_io_task, "ml_net_io",
@@ -518,10 +559,10 @@ skip_bsd_socket:
     }
     ram[4] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
-    /* wg_mgr: INTERNAL stack (NVS peer-cache writes) */
-    ret = xTaskCreatePinnedToCore(ml_wg_mgr_task, "ml_wg_mgr", ML_TASK_WG_MGR_STACK,
-                                   ml, ML_TASK_WG_MGR_PRIO, &ml->wg_mgr_task, ML_TASK_WG_MGR_CORE);
-    if (ret != pdPASS) {
+    /* wg_mgr: a PSRAM stack as well (the flash hook carries its NVS work) */
+    if (!ml_start_psram_task(ml_wg_mgr_task, "ml_wg_mgr",
+                             ML_TASK_WG_MGR_STACK, ml, ML_TASK_WG_MGR_PRIO,
+                             &ml->wg_mgr_task, ML_TASK_WG_MGR_CORE, 3)) {
         ESP_LOGE(TAG, "Failed to create wg_mgr task");
         return ESP_FAIL;
     }
@@ -560,10 +601,10 @@ esp_err_t microlink_stop(microlink_t *ml) {
      * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
      * vTaskDelete() on them again: that causes a crash in uxListRemove
      * because the task's list node is already invalid. WiCAN (2026-10-02):
-     * a REAL join of the static tasks (their stacks are freed by destroy),
-     * then a moment for the idle task to reap the dynamic wg_mgr task. */
+     * a REAL join of the static tasks (their stacks are freed by destroy);
+     * since 2026-11-01 wg_mgr is one of them, so nothing dynamic is left
+     * for the idle task to reap. */
     s_ml_tasks_joined = ml_join_static_tasks(ml);
-    vTaskDelay(pdMS_TO_TICKS(300));
 
     ml->net_io_task = NULL;
     ml->derp_tx_task = NULL;
@@ -678,6 +719,19 @@ esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_pe
     info->online = p->active;
     info->direct_path = p->has_direct_path;
     return ESP_OK;
+}
+
+int microlink_get_routes(const microlink_t *ml, microlink_route_t *out, int max) {
+    if (!ml || !out || max <= 0) return 0;
+    /* a snapshot of the wg_mgr task's table (a count then the rows, the
+     * same relaxed read the peer surfaces make) */
+    int n = ml->route_count;
+    if (n > max) n = max;
+    if (n > ML_MAX_ROUTES) n = ML_MAX_ROUTES;
+    for (int i = 0; i < n; i++) {
+        out[i] = ml->routes[i];
+    }
+    return n;
 }
 
 /* ============================================================================

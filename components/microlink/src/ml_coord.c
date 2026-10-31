@@ -1230,6 +1230,42 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
             }
         }
 
+        /* WiCAN (2026-11-01): subnet routes. AllowedIPs lists the peer's
+         * own addresses (its /32 and /128) and every network it advertises
+         * as a subnet router that the control server approved. Everything
+         * but its own address is a route to install (up to
+         * ML_MAX_PEER_ROUTES): IPv6 entries and the default route of an
+         * exit node (0.0.0.0/0) are left out; a phone accepts these by
+         * default, which is what a WiCAN reaching a home MQTT broker
+         * behind a subnet router needs. */
+        cJSON *allowed = cJSON_GetObjectItem(peer, "AllowedIPs");
+        if (allowed && cJSON_IsArray(allowed)) {
+            cJSON *cidr;
+            cJSON_ArrayForEach(cidr, allowed) {
+                if (!cidr->valuestring || strchr(cidr->valuestring, ':')) continue;
+                unsigned a, b, c, d, bits;
+                if (sscanf(cidr->valuestring, "%u.%u.%u.%u/%u", &a, &b, &c, &d, &bits) != 5 ||
+                    a > 255 || b > 255 || c > 255 || d > 255 || bits > 32) {
+                    continue;
+                }
+                uint32_t ip = (a << 24) | (b << 16) | (c << 8) | d;
+                uint32_t mask = bits ? (0xFFFFFFFFu << (32 - bits)) : 0;
+                if (bits == 32 && ip == update->vpn_ip) continue;   /* its own address */
+                if (bits == 0) {
+                    ESP_LOGI(TAG, "  %s offers an exit node: not taken", update->hostname);
+                    continue;
+                }
+                if (update->route_count >= ML_MAX_PEER_ROUTES) {
+                    ESP_LOGW(TAG, "  %s: more than %d subnet routes, %s dropped",
+                             update->hostname, ML_MAX_PEER_ROUTES, cidr->valuestring);
+                    continue;
+                }
+                update->routes[update->route_count].network = ip & mask;
+                update->routes[update->route_count].mask = mask;
+                update->route_count++;
+            }
+        }
+
         /* DERP region: try modern HomeDERP (int) first, then legacy DERP string */
         cJSON *peer_home_derp = cJSON_GetObjectItem(peer, "HomeDERP");
         if (peer_home_derp && cJSON_IsNumber(peer_home_derp) && peer_home_derp->valueint > 0) {

@@ -54,9 +54,16 @@ extern "C" {
 #define ML_TASK_COORD_PRIO      5
 #define ML_TASK_COORD_CORE      1
 
-#define ML_TASK_WG_MGR_STACK    (7 * 1024) /* WiCAN: was 8K; internal is the scarce pool and the measured watermark leaves >2K headroom (bench 2026-07-07) */
+#define ML_TASK_WG_MGR_STACK    (7 * 1024) /* WiCAN: was 8K; the measured watermark leaves >2K headroom (bench 2026-07-07); PSRAM since 2026-11-01 (the NVS writes run through the flash hook) */
 #define ML_TASK_WG_MGR_PRIO     7
 #define ML_TASK_WG_MGR_CORE     1
+
+/* WiCAN (2026-11-01): subnet routes learned from the map (a peer's
+ * AllowedIPs beyond its own address: the networks it advertises as a
+ * subnet router, approved on the control server). Per peer, and the
+ * total the lwIP destination table takes for the tunnel. */
+#define ML_MAX_PEER_ROUTES      4
+#define ML_MAX_ROUTES           8
 
 /* Queue depths */
 #define ML_DERP_TX_QUEUE_DEPTH  16
@@ -239,6 +246,12 @@ typedef struct {
         bool is_ipv6;
     } endpoints[ML_MAX_ENDPOINTS];
     int endpoint_count;
+    /* WiCAN (2026-11-01): the peer's approved subnet routes (host order) */
+    struct {
+        uint32_t network;
+        uint32_t mask;
+    } routes[ML_MAX_PEER_ROUTES];
+    int route_count;
 } ml_peer_update_t;
 
 /* ============================================================================
@@ -279,6 +292,15 @@ typedef struct {
 
     /* On-demand handshake: tried once on first DISCO direct path discovery */
     bool tried_initial_handshake;
+
+    /* WiCAN (2026-11-01): the subnet routes this peer carries (host
+     * order): its WireGuard allowed networks beyond its own address, and
+     * the tunnel's lwIP destination routes (ml_wg_mgr.c routes_apply) */
+    struct {
+        uint32_t network;
+        uint32_t mask;
+    } routes[ML_MAX_PEER_ROUTES];
+    int route_count;
 } ml_peer_t;
 
 /* ============================================================================
@@ -399,6 +421,12 @@ struct microlink_s {
     /* Peers (owned exclusively by wg_mgr task) */
     ml_peer_t peers[ML_MAX_PEERS];
     int peer_count;
+
+    /* WiCAN (2026-11-01): the subnet routes installed for the tunnel, every
+     * peer's together (owned by the wg_mgr task; a snapshot for the status
+     * surfaces, like the peers) */
+    microlink_route_t routes[ML_MAX_ROUTES];
+    int route_count;
 
     /* STUN results (written by coord, read by coord only) */
     uint32_t stun_public_ip;
@@ -578,6 +606,13 @@ esp_err_t ml_peer_nvs_save(const ml_peer_t *peer);
 int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers);
 esp_err_t ml_peer_nvs_remove(const uint8_t public_key[32]);
 esp_err_t ml_peer_nvs_clear(void);
+
+/* WiCAN (2026-11-01): every flash access of the client goes through here
+ * (microlink.c): the host's hook (microlink_config_t.flash_run, set at
+ * init) when there is one, in line otherwise. The job's argument may live
+ * anywhere; the caller is blocked until the job returns. */
+typedef esp_err_t (*ml_flash_fn_t)(void *arg);
+esp_err_t ml_flash_run(ml_flash_fn_t fn, void *arg);
 
 #ifdef CONFIG_ML_ZERO_COPY_WG
 /* ml_zerocopy.c */

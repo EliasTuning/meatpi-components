@@ -28,6 +28,7 @@
 #include "wireguardif.h"
 #include "wireguard.h"
 #include "mbedtls/base64.h"
+#include "ip4_routes.h"   /* WiCAN: the tunnel's lwIP destination routes */
 #include <string.h>
 #include <errno.h>
 
@@ -68,6 +69,77 @@ typedef struct {
     int peer_index;
     bool active;
 } disco_probe_t;
+
+/* ============================================================================
+ * WiCAN (2026-11-01): subnet routes
+ *
+ * A peer that advertises a network as a subnet router (approved on the
+ * control server) carries it in its AllowedIPs; coord hands them over in
+ * the peer update. Two things make such a network reachable: the peer's
+ * WireGuard entry must allow it (outbound lookup and inbound source check,
+ * wireguardif_peer_add_allowed_ip) and lwIP must send the packets into the
+ * tunnel netif (ip4_routes, the destination table in front of lwIP's netif
+ * walk; a directly connected network always wins there, so a WiCAN at home
+ * on the very LAN a router advertises keeps talking to it directly, the
+ * way a phone does). routes_apply() rebuilds the tunnel's table from every
+ * active peer after an add or a remove (wg_mgr task only).
+ * ========================================================================== */
+static void routes_apply(microlink_t *ml) {
+    ip4_routes_entry_t entries[ML_MAX_ROUTES];
+    int n = 0;
+    bool dropped = false;
+
+    for (int i = 0; i < ml->peer_count; i++) {
+        const ml_peer_t *p = &ml->peers[i];
+        if (!p->active) continue;
+        for (int r = 0; r < p->route_count; r++) {
+            if (n >= ML_MAX_ROUTES) {
+                dropped = true;
+                break;
+            }
+            entries[n].network = p->routes[r].network;
+            entries[n].mask = p->routes[r].mask;
+            ml->routes[n].network = p->routes[r].network;
+            ml->routes[n].mask = p->routes[r].mask;
+            ml->routes[n].via_vpn_ip = p->vpn_ip;
+            n++;
+        }
+    }
+    ml->route_count = n;
+
+    if (dropped) {
+        ESP_LOGW(TAG, "more than %d subnet routes on the tailnet: the rest are not installed",
+                 ML_MAX_ROUTES);
+    }
+
+    if (!ml->wg_netif) return;
+    if (n == 0) {
+        ip4_routes_clear(ml->wg_netif);
+    } else if (ip4_routes_set(ml->wg_netif, entries, (size_t)n) != ESP_OK) {
+        ESP_LOGW(TAG, "subnet routes not installed (the route table is full)");
+    }
+}
+
+/* the peer's routes into its WireGuard entry (after wireguardif_add_peer) */
+static void routes_allow(struct netif *netif, u8_t wg_idx, const ml_peer_t *p) {
+    for (int r = 0; r < p->route_count; r++) {
+        ip_addr_t ip, mask;
+        /* the _val forms: the pointer forms test the address of a local,
+         * which GCC 15 refuses (-Werror=address) */
+        ip_addr_set_ip4_u32_val(ip, lwip_htonl(p->routes[r].network));
+        ip_addr_set_ip4_u32_val(mask, lwip_htonl(p->routes[r].mask));
+        err_t err = wireguardif_peer_add_allowed_ip(netif, wg_idx, &ip, &mask);
+        char net[16];
+        microlink_ip_to_str(p->routes[r].network, net);
+        if (err == ERR_OK) {
+            ESP_LOGI(TAG, "subnet route %s/%d via %s", net,
+                     __builtin_popcount(p->routes[r].mask), p->hostname);
+        } else {
+            ESP_LOGW(TAG, "subnet route %s/%d via %s refused by WireGuard (%d)", net,
+                     __builtin_popcount(p->routes[r].mask), p->hostname, err);
+        }
+    }
+}
 
 #define MAX_PENDING_PROBES 32
 static disco_probe_t pending_probes[MAX_PENDING_PROBES];
@@ -451,6 +523,15 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         p->endpoints[i].is_ipv6 = update->endpoints[i].is_ipv6;
     }
 
+    /* WiCAN: the subnet routes it carries (installed below, once the
+     * WireGuard entry exists) */
+    p->route_count = 0;
+    for (int i = 0; i < update->route_count && i < ML_MAX_PEER_ROUTES; i++) {
+        p->routes[i].network = update->routes[i].network;
+        p->routes[i].mask = update->routes[i].mask;
+        p->route_count++;
+    }
+
     /* Initialize DISCO rate limiting state */
     p->last_ping_sent_ms = 0;
     p->last_pong_recv_ms = 0;
@@ -537,10 +618,14 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
              * Instead, we wait for the peer to initiate when they need to reach us.
              * The WG session is established on-demand, matching Tailscale's model. */
             ESP_LOGI(TAG, "WG peer ready (passive), waiting for peer-initiated handshake");
+
+            /* WiCAN: its subnet routes, into WireGuard and into lwIP */
+            routes_allow(netif, wg_peer_idx, p);
         } else {
             ESP_LOGW(TAG, "wireguardif_add_peer failed: %d", wg_err);
             p->wg_peer_index = -1;
         }
+        routes_apply(ml);
     }
 
     /* Persist to NVS for fast boot next time */
@@ -603,11 +688,15 @@ static void remove_peer_at(microlink_t *ml, int idx) {
     ESP_LOGI(TAG, "Peer removed: %s (%s)", ml->peers[idx].hostname, ip_str);
 
     ml->peers[idx].active = false;
+    ml->peers[idx].route_count = 0;
 
     /* Compact peer_count */
     while (ml->peer_count > 0 && !ml->peers[ml->peer_count - 1].active) {
         ml->peer_count--;
     }
+
+    /* WiCAN: its subnet routes leave the lwIP table with it */
+    routes_apply(ml);
 }
 
 static void remove_peer(microlink_t *ml, const ml_peer_update_t *update) {
@@ -1668,6 +1757,8 @@ void ml_wg_mgr_task(void *arg) {
     /* Shutdown WireGuard interface */
     if (ml->wg_netif) {
         struct netif *netif = (struct netif *)ml->wg_netif;
+        ip4_routes_clear(netif);    /* WiCAN: before the netif goes */
+        ml->route_count = 0;
         wireguardif_shutdown(netif);
         netif_set_link_down(netif);
         netif_set_down(netif);

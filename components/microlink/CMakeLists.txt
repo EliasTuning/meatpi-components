@@ -47,8 +47,11 @@ idf_component_register(
         "src"
         "${_ml_mbedtls_priv}"
     REQUIRES ${REQUIRES}
+    # WiCAN (2026-11-01): ip4_routes carries the subnet routes a peer
+    # advertises into lwIP's route lookup (ml_wg_mgr.c routes_apply)
     PRIV_REQUIRES
         wireguard_lwip
+        ip4_routes
 )
 
 # WiCAN (2026-10-31, issue 1024): the TLS chain parser's tolerance for a

@@ -145,6 +145,27 @@ DERP stack are validated through `vpn_manager` on the bench
     header, `Noise handshake failed`, `TCP connect failed, retrying`,
     the two DNS lines) log at W, not E: the coord task retries them
     itself (rule 5 of the change rules, zero E lines on a retry path).
+17. **The flash hook, and the WireGuard manager on a PSRAM stack**
+    (2026-11-01): `microlink_config_t.flash_run` (NULL = upstream
+    behaviour, the access in line) carries every NVS access of the client
+    (the device keys of `microlink_init`, `ml_peer_nvs.c`'s open, read,
+    write and erase, the factory reset's erase) through
+    `ml_flash_run()`; WiCAN hands it its internal-stack flash worker
+    (`flash_jobs_run`, vpn_manager_ts.c), so `ml_wg_mgr` runs on a PSRAM
+    stack like the three other tasks (`ml_start_psram_task`, joined
+    before its stack is freed; `ML_PSRAM_TASKS` 4) and the 7 KB internal
+    stack it kept for the peer cache is gone, as is vpn_manager's 6 KB
+    state-task stack (lever 2 of `internal/TASK_ble_tailscale_margin.md`).
+18. **Subnet routes** (2026-11-01): `ml_coord.c` reads each peer's
+    `AllowedIPs` beyond its own address (IPv4 only, an exit node's
+    `0.0.0.0/0` logged and left out, up to `ML_MAX_PEER_ROUTES` 4 per
+    peer) into the peer update; `ml_wg_mgr.c` allows them on the peer's
+    WireGuard entry (`wireguardif_peer_add_allowed_ip`, new in the
+    vendored wireguard_lwip, whose `WIREGUARD_MAX_SRC_IPS` is 5 now) and
+    installs every active peer's routes into `ip4_routes` (`routes_apply`,
+    up to `ML_MAX_ROUTES` 8, cleared with the netif); `microlink_get_routes`
+    is the snapshot for `/api/vpn`. Upstream never read `AllowedIPs`, so a
+    network behind a subnet router was unreachable from the client.
 
 ## Upstream layout kept
 

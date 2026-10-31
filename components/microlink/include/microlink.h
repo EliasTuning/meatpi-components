@@ -51,6 +51,17 @@ typedef struct {
     uint32_t disco_heartbeat_ms;    /* DISCO keepalive interval (default: 3000) */
     uint32_t stun_interval_ms;      /* STUN re-probe interval (default: 23000) */
     uint32_t ctrl_watchdog_ms;      /* Control plane watchdog timeout (default: 120000) */
+
+    /* WiCAN (2026-11-01): the hook every flash access of the client runs
+     * through: the device keys at init and the peer cache (NVS). NULL runs
+     * the access in line on the caller's own stack (upstream behaviour);
+     * the host sets it to its internal-stack flash worker (flash_jobs_run)
+     * so every microlink task, the WireGuard manager included, can run on
+     * a PSRAM stack (a task on a PSRAM stack must not touch the flash:
+     * IDF asserts it on every cache-off window). The hook runs fn(arg)
+     * and hands its result back; fn may read and write arg wherever it
+     * lives. */
+    esp_err_t (*flash_run)(esp_err_t (*fn)(void *arg), void *arg);
 } microlink_config_t;
 
 /* Peer info (read-only snapshot) */
@@ -61,6 +72,15 @@ typedef struct {
     bool online;
     bool direct_path;           /* true if communicating via direct UDP */
 } microlink_peer_info_t;
+
+/* WiCAN (2026-11-01): a subnet route learned from the map: a network a
+ * peer advertises as a subnet router and the control server approved
+ * (the peer's AllowedIPs beyond its own address). Host byte order. */
+typedef struct {
+    uint32_t network;           /* host bits cleared */
+    uint32_t mask;              /* contiguous */
+    uint32_t via_vpn_ip;        /* the subnet router's tailnet address */
+} microlink_route_t;
 
 /* Connection state */
 typedef enum {
@@ -87,6 +107,8 @@ typedef void (*microlink_data_cb_t)(microlink_t *ml, uint32_t src_ip, const uint
  * - Machine key, WireGuard key, DISCO key (NVS namespace "microlink")
  * - Cached peer data (NVS namespace "ml_peers")
  * After reset, next microlink_init() will generate fresh keys.
+ * WiCAN: runs before any init set a flash hook, so it touches the flash
+ * in line: call it from a task with an internal-RAM stack.
  */
 esp_err_t microlink_factory_reset(void);
 
@@ -160,6 +182,15 @@ int microlink_get_peer_count(const microlink_t *ml);
  * @return ESP_OK if valid index
  */
 esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_peer_info_t *info);
+
+/**
+ * @brief WiCAN (2026-11-01): the subnet routes learned from the map and
+ *        installed (the subnet router's WireGuard allowed networks and the
+ *        lwIP destination table), a snapshot
+ * @param out Table of @p max entries
+ * @return the number of entries written (0 while the tunnel is down)
+ */
+int microlink_get_routes(const microlink_t *ml, microlink_route_t *out, int max);
 
 /**
  * @brief Send UDP data to a peer by VPN IP
