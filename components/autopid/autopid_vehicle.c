@@ -68,8 +68,11 @@ static volatile bool s_switch_pending;
 static volatile bool s_writer_busy;
 static char          s_switch_prev[AP_VEH_KEY_LEN];   /* under the lock      */
 static StaticTask_t  s_writer_tcb;                    /* internal: FreeRTOS  */
-static StackType_t   s_writer_stack[6144];            /* INTERNAL: fs + the
-                                                         config reload       */
+/* PSRAM since 2026-11-01 (it was 6 KB of internal .bss, allocated for the
+   firmware's life): every flash access of the writer goes through the
+   filesystem component, which runs the flash part of a PSRAM-stack
+   caller's operation on the shared flash worker (2026-10-31) */
+static StackType_t   s_writer_stack[6144] EXT_RAM_BSS_ATTR;
 
 /* ---- shared store internals ------------------------------------------------------ */
 
