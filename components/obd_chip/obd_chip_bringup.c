@@ -169,6 +169,7 @@ static void chip_provision(const obd_config_t *cfg)
     obd_stslcs_t st;
     char cmd[48];
     bool reset_needed = false;
+    bool pp0f_written = false;
 
     if (!bare_probe("STSLCS\r", resp, sizeof(resp), 1500))
     {
@@ -203,6 +204,7 @@ static void chip_provision(const obd_config_t *cfg)
         bare_probe("STSLVl off,off\r", resp, sizeof(resp), 1000);
         bare_probe("STSLU off, off\r", resp, sizeof(resp), 1000);
         vTaskDelay(pdMS_TO_TICKS(10));
+        pp0f_written = true;
 
         /* PP 0F = the Activity Monitor options (MIC DS PP area, default
            D5): 95 clears bit 6, "allow wake from Low Power on a shift from
@@ -218,6 +220,42 @@ static void chip_provision(const obd_config_t *cfg)
         bare_probe("STSLUIT 1200\r", resp, sizeof(resp), 1000);
         vTaskDelay(pdMS_TO_TICKS(10));
         reset_needed = true;
+    }
+
+    /* PP 0F guarded by its own read-back (Ali, 2026-11-02): the compare
+       above sees STSLCS, which does not report the Activity Monitor
+       options, so a chip image or a tool that put PP 0F back to the
+       vendor's D5 (the chip waking itself on bus activity while the ESP32
+       sleeps) would stay that way. ATPPS is the one read the chip offers;
+       the pair goes out only when the value or its enable differs (the
+       boot-path change guard of the standard's section 11). An intact chip
+       costs one read of 12 lines and no write; a chip firmware rewrite
+       keeps the PP area (bench 2026-11-02), so the write is for the image
+       or tool that does not. */
+    if (!pp0f_written)
+    {
+        uint8_t pp0f = 0;
+        bool pp0f_on = false;
+
+        if (!bare_probe("ATPPS\r", resp, sizeof(resp), 1500))
+        {
+            ESP_LOGW(TAG, "ATPPS: no answer; PP 0F not checked");
+        }
+        else if (!obd_parse_pp(resp, 0x0F, &pp0f, &pp0f_on))
+        {
+            ESP_LOGW(TAG, "ATPPS: no PP 0F in the answer ('%.24s'); not "
+                          "checked", resp);
+        }
+        else if (pp0f != 0x95 || !pp0f_on)
+        {
+            ESP_LOGW(TAG, "PP 0F reads %02X %s (expected 95 on): restoring",
+                     pp0f, pp0f_on ? "on" : "off");
+            bare_probe("ATPP 0F SV 95\r", resp, sizeof(resp), 1000);
+            bare_probe("ATPP 0F ON\r", resp, sizeof(resp), 1000);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            obd_core_pp_restore_note();
+            reset_needed = true;
+        }
     }
 
     if (reset_needed)
@@ -264,8 +302,17 @@ static void chip_provision(const obd_config_t *cfg)
  * from a device whose firmware believed the chip was fresh).
  *
  * So: one throw-away command first (whatever is in front of it ends with
- * it, as a `?`), then `ATZ`, and the answer must carry the banner. Twice;
- * the caller pulses the reset pin when that fails.
+ * it, as a `?`), then the reset word, and the answer must carry the banner.
+ * Twice; the caller pulses the reset pin when that fails.
+ *
+ * The word is `ATWS` since 2026-11-02 (what 4.x sent in place of every
+ * `ATZ`): the same complete reset (the session and every RAM setting gone,
+ * the baud kept) without the LED test, about 40 ms instead of 1.3 s, and
+ * without the junk bytes the MIC3624 puts ahead of its `ATZ` banner (5 of
+ * 16 tries on the bench, a NUL among them: the "soft reset not confirmed"
+ * of every third software restart since 2026-10-19, and a reset pulse plus
+ * 1.5 s on top of a chip that had reset fine). The extract behind
+ * bare_probe skips such bytes now as well.
  */
 static bool chip_soft_reset(char *resp, size_t resp_len)
 {
@@ -273,7 +320,7 @@ static bool chip_soft_reset(char *resp, size_t resp_len)
     {
         (void)bare_probe("ATI\r", resp, resp_len, 500);
 
-        if (bare_probe("ATZ\r", resp, resp_len, 2500) &&
+        if (bare_probe("ATWS\r", resp, resp_len, 2500) &&
             strstr(resp, "ELM") != NULL)
         {
             return true;
@@ -302,7 +349,7 @@ esp_err_t obd_bringup_run(int *active_baud)
 
     if (obd_pin_ready())
     {
-        ESP_LOGI(TAG, "chip awake; soft ATZ instead of hardware reset");
+        ESP_LOGI(TAG, "chip awake; warm start (ATWS) instead of hardware reset");
 
         if (!chip_soft_reset(resp, sizeof(resp)))
         {

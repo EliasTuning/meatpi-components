@@ -165,11 +165,23 @@ disabled). `ATPC` or a real reset stops it; a freshly reset chip is quiet
 until its next request, whatever its default protocol is.
 
 `chip_soft_reset()`: one throw-away `ATI` (whatever sits in front ends with
-it), then `ATZ`, and the answer must carry the banner (`ELM`). Twice, then
-the reset pin as before. Bring-up is 2147 ms on every boot now (it runs on
-its own task, so the boot line does not move). Check after a restart:
-`ATDPN` through the ELM port reads the default protocol, and the
-`bring-up done in` log line reads about 2.1 s.
+it), then the reset word, and the answer must carry the banner (`ELM`).
+Twice, then the reset pin as before. The word is `ATWS` since 2026-11-02
+(what 4.x sent in place of every `ATZ`): the same complete reset without
+the LED test, about 40 ms instead of 1.3 s, and without the junk bytes the
+MIC3624 puts ahead of its `ATZ` banner (`00`, `00 F0 FD 00 00`, `BF 80 04`
+in 5 of 16 tries on the bench, `test-reports/logs/atz_soft_reset_2026-11-02`
+in the firmware repo; a NUL among them ended the C string before `ELM`, so
+about every third software restart since 2026-10-19 logged "soft reset not
+confirmed" and paid a reset pulse plus 1.5 s for a chip that had reset
+fine). `obd_parse_extract` skips bytes outside printable ASCII at the start
+of an answer and behind the echo now as well (host test
+`test_extract_skips_reset_junk`). Check after a software restart: the log
+reads `chip awake; warm start (ATWS)` and `bring-up done in` about 1.1 s
+(1079 ms on the bench DUT, 2147 ms with `ATZ`, about 5 s on a boot that
+fell to the reset pulse), `ATDPN` through the ELM port reads the stored
+protocol (the warm start dropped the session); bench `test.ps1 obdbringup`
+in the firmware repo (PASS 2026-11-02, 36 checks).
 
 Related chip fact, corrected 2026-11-01 (issue #1023, the second dead chip):
 the chip's memory function (`ATM1` / `ATM0`) is ON after every reset (the
@@ -347,6 +359,17 @@ Monitor options with bit 6 off, not the baud; legacy's
 then `ATZ` + re-bring-up (baud restore + `ATE0`). A matching chip skips
 everything: verified live: provisioning ran once after flashing, the
 next boots go straight to `started`.
+
+PP 0F has its own read-back since 2026-11-02 (Ali: a chip image or a tool
+could put it back to the vendor's D5, and STSLCS does not report it): the
+bring-up reads `ATPPS` once (12 lines, a read) and writes the pair back
+only when the value is not 95 or its enable is off (`obd_parse_pp`, pure,
+host-tested), counted in `obd_chip_stats_t.pp_restores` with one W line
+naming what it read; an intact chip costs the read. A chip firmware
+rewrite keeps the PP area (bench 2026-11-02: .24 to .22 to .24, every
+parameter, STSLCS and the PowerEn switch as found), so with the stock
+images the write never happens; `test.ps1 obdbringup` injects the fault
+(`ATPP 0F OFF` through the wire probe) and watches the restore.
 
 **Framing lesson (found live by STSLCS):** the `>` prompt terminates a
 response only at LINE START, `STSLCS` data contains mid-line `>`
@@ -535,9 +558,9 @@ driver re-sends it at the three places that between them cover every reset:
 
 `obd_chip_protocol_save()` saves with or without the switch. Counted in
 `obd_chip_stats_t.memory_off` (the acknowledged `ATM0` words, all three
-places), `.app_resets` (reset words intercepted) and `.hidden_bytes`, on
-`GET /api/obd_chip` under `eeprom_guard`, printed by the `obd_chip` console
-command. Host tests: `test_protocol_switch_classification`,
+places), `.app_resets` (reset words intercepted), `.hidden_bytes` and
+`.pp_restores` (the PP 0F read-back above), on `GET /api/obd_chip` under
+`eeprom_guard`, printed by the `obd_chip` console command. Host tests: `test_protocol_switch_classification`,
 `test_reset_word_classification`; bench: `test.ps1 attpstore` in the
 firmware repo (the engine's switch and the bring-up's `ATM0` read back
 through an `ATZ`, the app's reset answered once and fast with nothing

@@ -68,11 +68,20 @@ size_t obd_parse_feed(obd_resp_acc_t *acc, const char *data, size_t n);
 
 /**
  * Post-process a finished accumulator into a caller buffer: strip the echo
- * of @p cmd (chips boot with echo on), the terminating prompt, and leading/
- * trailing CR/LF. Returns the response length.
+ * of @p cmd (chips boot with echo on), the terminating prompt, leading/
+ * trailing CR/LF and the bytes outside printable ASCII a reset's UART glitch
+ * puts ahead of the banner (bench 2026-11-02). Returns the response length.
  */
 size_t obd_parse_extract(const obd_resp_acc_t *acc, const char *cmd,
                          char *out, size_t out_len);
+
+/**
+ * One programmable parameter out of an `ATPPS` summary ("0C:23 N  0D:0D F",
+ * 12 lines of 4): @p value its stored byte, @p on whether the chip applies
+ * it (N = on, F = off, the ELM327's own letters). False when @p pp is not
+ * in the text. Pure, host-tested (the PP 0F guard of the bring-up).
+ */
+bool obd_parse_pp(const char *atpps, uint8_t pp, uint8_t *value, bool *on);
 
 /** '?' alone / "UNABLE TO CONNECT" / "CAN ERROR"-style chip errors. */
 bool obd_parse_is_chip_error(const char *resp);
@@ -225,9 +234,14 @@ void obd_core_guard_note(obd_guard_t v, const char *cmd, size_t len);
  *  `eeprom_guard.memory_off` (issue #1023, 2026-11-01). */
 void obd_core_memory_off_note(void);
 
+/** One PP 0F the bring-up found off or not 95 and wrote back (Ali,
+ *  2026-11-02): GET /api/obd_chip `eeprom_guard.pp_restores`. */
+void obd_core_pp_restore_note(void);
+
 /** The fan-out's and the raw TX path's counters (obd_chip_fanout.c), for
  *  obd_chip_get_stats(): the RX accounting, the EEPROM guard, the ATM0
- *  words, the app resets intercepted and the bytes hidden behind them. */
+ *  words, the app resets intercepted, the bytes hidden behind them and
+ *  the PP 0F restores. */
 typedef struct
 {
     uint32_t rx_bytes;
@@ -238,6 +252,7 @@ typedef struct
     uint32_t memory_off;
     uint32_t app_resets;
     uint32_t hidden_bytes;
+    uint32_t pp_restores;
 } obd_fanout_stats_t;
 
 void obd_core_fanout_stats(obd_fanout_stats_t *out);

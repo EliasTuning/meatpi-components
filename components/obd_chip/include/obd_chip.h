@@ -509,6 +509,9 @@ typedef struct
                                    path: ATZ sent as ATWS, a hidden ATM0
                                    behind the answer                     */
     uint32_t    hidden_bytes;   /* those ATM0 answers, kept from the apps */
+    uint32_t    pp_restores;    /* PP 0F found off or not 95 at a bring-up
+                                   and written back (2026-11-02): 0 on an
+                                   intact chip                            */
 } obd_chip_stats_t;
 
 typedef struct

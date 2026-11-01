@@ -75,6 +75,7 @@ static uint16_t s_rx_max_chunk;
 static uint32_t s_guard_rewrites;
 static uint32_t s_guard_blocked;
 static uint32_t s_memory_off; /* ATM0 sent and acknowledged (issue #1023) */
+static uint32_t s_pp_restores; /* PP 0F written back by the bring-up        */
 
 /* An app's reset word on the bridge path (issue #1023, 2026-11-01, Ali):
  * the chip comes out of ATZ / ATWS / ATD with its memory function ON, and
@@ -356,6 +357,7 @@ void obd_core_fanout_stats(obd_fanout_stats_t *out)
     out->memory_off = s_memory_off;
     out->app_resets = s_app_resets;
     out->hidden_bytes = s_hidden_bytes;
+    out->pp_restores = s_pp_restores;
 }
 
 void obd_core_guard_note(obd_guard_t v, const char *cmd, size_t len)
@@ -389,6 +391,11 @@ void obd_core_guard_note(obd_guard_t v, const char *cmd, size_t len)
 void obd_core_memory_off_note(void)
 {
     s_memory_off++;
+}
+
+void obd_core_pp_restore_note(void)
+{
+    s_pp_restores++;
 }
 
 /* ---- TX ------------------------------------------------------------------------- */

@@ -139,6 +139,7 @@ esp_err_t obd_chip_get_stats(obd_chip_stats_t *out)
     out->memory_off = fs.memory_off;
     out->app_resets = fs.app_resets;
     out->hidden_bytes = fs.hidden_bytes;
+    out->pp_restores = fs.pp_restores;
     obd_uart_get_stats(&out->tx_bytes, &out->rx_overflows,
                        &out->rx_buffered);
     return ESP_OK;

@@ -14,11 +14,10 @@
 static obd_resp_acc_t s_acc;
 static char s_out[OBD_RESP_MAX];
 
-/** Feed @p data split into @p chunk-sized pieces; returns extract length. */
-static size_t run_split(const char *cmd, const char *data, size_t chunk)
+/** Feed @p len bytes of @p data split into @p chunk-sized pieces (a NUL
+ *  inside the data is a byte like any other); returns extract length. */
+static size_t run_bytes(const char *cmd, const char *data, size_t len, size_t chunk)
 {
-    size_t len = strlen(data);
-
     obd_parse_reset(&s_acc);
 
     for (size_t off = 0; off < len && !s_acc.done; off += chunk)
@@ -30,6 +29,12 @@ static size_t run_split(const char *cmd, const char *data, size_t chunk)
 
     TEST_ASSERT_TRUE(s_acc.done);
     return obd_parse_extract(&s_acc, cmd, s_out, sizeof(s_out));
+}
+
+/** Feed @p data split into @p chunk-sized pieces; returns extract length. */
+static size_t run_split(const char *cmd, const char *data, size_t chunk)
+{
+    return run_bytes(cmd, data, strlen(data), chunk);
 }
 
 void test_simple_response(void)
@@ -406,4 +411,77 @@ void test_reset_word_classification(void)
     TEST_ASSERT_EQUAL(OBD_RESET_ATZ, obd_parse_reset_word(raw, 4));
     TEST_ASSERT_EQUAL(OBD_RESET_NONE, obd_parse_reset_word(raw, strlen(raw)));
     TEST_ASSERT_EQUAL(OBD_RESET_NONE, obd_parse_reset_word(NULL, 3));
+}
+
+/* the MIC3624's ATZ answers of 2026-11-02 (test-reports/logs/atz_soft_reset_
+   2026-11-02): junk ahead of the banner, echo off and on, a NUL among it */
+void test_extract_skips_reset_junk(void)
+{
+    static const char nul_first[] = "\0\r\rELM327 v2.3\r\r>";
+    static const char echo_then_junk[] = "ATZ\r\0\xF0\xFD\0\0\r\rELM327 v2.3\r\r>";
+    static const char high_bytes[] = "\xBF\x80\x04\r\rELM327 v2.3\r\r>";
+    static const char mixed[] = "\x06\0\0\xF8\r\rELM327 v2.3\r\r>";
+
+    for (size_t chunk = 1; chunk <= 8; chunk++)
+    {
+        run_bytes("ATZ", nul_first, sizeof(nul_first) - 1, chunk);
+        TEST_ASSERT_EQUAL_STRING("ELM327 v2.3", s_out);
+        run_bytes("ATZ", echo_then_junk, sizeof(echo_then_junk) - 1, chunk);
+        TEST_ASSERT_EQUAL_STRING("ELM327 v2.3", s_out);
+        run_bytes("ATWS", high_bytes, sizeof(high_bytes) - 1, chunk);
+        TEST_ASSERT_EQUAL_STRING("ELM327 v2.3", s_out);
+        run_bytes("ATZ", mixed, sizeof(mixed) - 1, chunk);
+        TEST_ASSERT_EQUAL_STRING("ELM327 v2.3", s_out);
+    }
+
+    /* a clean answer is untouched, and a tab inside a line stays */
+    run_split("ATZ", "\r\rELM327 v2.3\r\r>", 64);
+    TEST_ASSERT_EQUAL_STRING("ELM327 v2.3", s_out);
+    run_split("0100", "41 00\tBE\r\r>", 64);
+    TEST_ASSERT_EQUAL_STRING("41 00\tBE", s_out);
+}
+
+/* the bench chip's ATPPS as GET /api/obd_chip/report returned it (2026-11-01) */
+void test_pp_parse(void)
+{
+    static const char atpps[] =
+        "00:FF F  01:FF F  02:FF F  03:19 F\n"
+        "04:01 F  05:FF F  06:F1 F  07:09 F\n"
+        "08:FF F  09:00 F  0A:0A F  0B:FF F\n"
+        "0C:23 N  0D:0D F  0E:7A N  0F:95 N\n"
+        "10:0D F  11:00 F  12:FF F  13:55 F\n"
+        "34:E0 F  35:0F F  36:FF F  37:FF F";
+    uint8_t v = 0;
+    bool on = false;
+
+    TEST_ASSERT_TRUE(obd_parse_pp(atpps, 0x0F, &v, &on));
+    TEST_ASSERT_EQUAL_HEX8(0x95, v);
+    TEST_ASSERT_TRUE(on);
+    TEST_ASSERT_TRUE(obd_parse_pp(atpps, 0x0E, &v, &on));
+    TEST_ASSERT_EQUAL_HEX8(0x7A, v);
+    TEST_ASSERT_TRUE(on);
+    TEST_ASSERT_TRUE(obd_parse_pp(atpps, 0x10, &v, &on));
+    TEST_ASSERT_EQUAL_HEX8(0x0D, v);
+    TEST_ASSERT_FALSE(on);
+    TEST_ASSERT_TRUE(obd_parse_pp(atpps, 0x00, &v, &on)); /* the first token */
+    TEST_ASSERT_EQUAL_HEX8(0xFF, v);
+    TEST_ASSERT_TRUE(obd_parse_pp(atpps, 0x37, &v, &on)); /* the last one */
+    TEST_ASSERT_EQUAL_HEX8(0xFF, v);
+    TEST_ASSERT_FALSE(obd_parse_pp(atpps, 0x38, &v, &on)); /* not in the text */
+
+    /* the fault the bench injects (ATPP 0F OFF), the vendor default, a chip
+       that answered something else, and the CR line ends of the raw wire */
+    TEST_ASSERT_TRUE(obd_parse_pp("0E:7A N  0F:95 F", 0x0F, &v, &on));
+    TEST_ASSERT_EQUAL_HEX8(0x95, v);
+    TEST_ASSERT_FALSE(on);
+    TEST_ASSERT_TRUE(obd_parse_pp("0F:D5 N", 0x0F, &v, &on));
+    TEST_ASSERT_EQUAL_HEX8(0xD5, v);
+    TEST_ASSERT_TRUE(on);
+    TEST_ASSERT_TRUE(obd_parse_pp("0C:23 N\r0F:95 N\r", 0x0F, &v, &on));
+    TEST_ASSERT_EQUAL_HEX8(0x95, v);
+    TEST_ASSERT_FALSE(obd_parse_pp("?", 0x0F, &v, &on));
+    TEST_ASSERT_FALSE(obd_parse_pp("0F:9", 0x0F, &v, &on));
+    TEST_ASSERT_FALSE(obd_parse_pp("0F:95", 0x0F, &v, &on));
+    TEST_ASSERT_FALSE(obd_parse_pp("10F:95 N", 0x0F, &v, &on)); /* not a token */
+    TEST_ASSERT_FALSE(obd_parse_pp(NULL, 0x0F, &v, &on));
 }

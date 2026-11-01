@@ -30,6 +30,8 @@
 #include "obd_chip_guard.h"
 
 #include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void obd_parse_reset(obd_resp_acc_t *acc)
@@ -127,6 +129,20 @@ static size_t echo_length(const char *buf, size_t len, const char *cmd)
     return e;
 }
 
+/**
+ * A byte the chip never means: a CR/LF, or a byte outside printable ASCII.
+ * The MIC3624's answer to a full reset (`ATZ`) begins with such bytes now
+ * and then (bench 2026-11-02: `00`, `00 F0 FD 00 00`, `BF 80 04`,
+ * `06 00 00 F8` ahead of the banner in 5 of 16 tries, the chip's UART
+ * re-initialising through the reset); a NUL among them ended the C string
+ * before "ELM" and the bring-up counted a chip that had reset fine as "not
+ * confirmed". Skipped at the start of an answer and again behind the echo.
+ */
+static bool is_noise(unsigned char c)
+{
+    return c == '\r' || c == '\n' || c < 0x20 || c >= 0x7F;
+}
+
 size_t obd_parse_extract(const obd_resp_acc_t *acc, const char *cmd,
                          char *out, size_t out_len)
 {
@@ -138,13 +154,19 @@ size_t obd_parse_extract(const obd_resp_acc_t *acc, const char *cmd,
     size_t start = 0;
     size_t end = acc->len;
 
-    /* drop leading noise CR/LF, then the command echo if present */
-    while (start < end && (acc->buf[start] == '\r' || acc->buf[start] == '\n'))
+    /* drop leading noise, then the command echo if present, then the
+       noise a reset puts behind its echo (is_noise above) */
+    while (start < end && is_noise((unsigned char)acc->buf[start]))
     {
         start++;
     }
 
     start += echo_length(acc->buf + start, end - start, cmd);
+
+    while (start < end && is_noise((unsigned char)acc->buf[start]))
+    {
+        start++;
+    }
 
     /* drop the terminating prompt and trailing whitespace */
     if (end > start && acc->buf[end - 1] == '>')
@@ -584,4 +606,54 @@ obd_guard_t obd_chip_guard_check(const char *buf, size_t len)
 {
     /* apply=false never writes; the cast only satisfies the shared scanner */
     return guard_scan((char *)buf, len, false);
+}
+
+/* ---- ATPPS (the programmable parameter summary) --------------------------------- */
+
+bool obd_parse_pp(const char *atpps, uint8_t pp, uint8_t *value, bool *on)
+{
+    if (atpps == NULL || value == NULL || on == NULL)
+    {
+        return false;
+    }
+
+    char key[4];
+
+    snprintf(key, sizeof(key), "%02X:", (unsigned)pp);
+
+    for (const char *p = strstr(atpps, key); p != NULL; p = strstr(p + 1, key))
+    {
+        /* a token start ("0F:95 N"), not the tail of a longer one */
+        if (p != atpps && !isspace((unsigned char)p[-1]))
+        {
+            continue;
+        }
+
+        const char *v = p + 3;
+
+        if (!isxdigit((unsigned char)v[0]) || !isxdigit((unsigned char)v[1]))
+        {
+            continue;
+        }
+
+        const char *f = v + 2;
+
+        while (*f == ' ')
+        {
+            f++;
+        }
+
+        if (*f != 'N' && *f != 'F')
+        {
+            continue;
+        }
+
+        char hex[3] = { v[0], v[1], '\0' };
+
+        *value = (uint8_t)strtoul(hex, NULL, 16);
+        *on = (*f == 'N');
+        return true;
+    }
+
+    return false;
 }

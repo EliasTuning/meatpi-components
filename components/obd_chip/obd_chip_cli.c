@@ -110,12 +110,13 @@ static void print_status(void)
                    obd_settings_config()->auto_update ? "on" : "off",
                    obd_fw_current_versions());
     cmdline_printf("eeprom:  guard rewrites %lu, blocked %lu, protocol saves "
-                   "%lu, ATM0 sent %lu, app resets %lu\n",
+                   "%lu, ATM0 sent %lu, app resets %lu, PP 0F restores %lu\n",
                    (unsigned long)st.guard_rewrites,
                    (unsigned long)st.guard_blocked,
                    (unsigned long)st.protocol_saves,
                    (unsigned long)st.memory_off,
-                   (unsigned long)st.app_resets);
+                   (unsigned long)st.app_resets,
+                   (unsigned long)st.pp_restores);
 
     if (fw.running)
     {

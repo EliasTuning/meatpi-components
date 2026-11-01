@@ -3,7 +3,7 @@
 Pure framing/classification and the chip firmware version policy only (`obd_chip_parse.c`, `obd_chip_fw_version.c`: no UART/GPIO). Run via
 `.\test.ps1 host`.
 
-## What is covered (19 tests)
+## What is covered (21 tests)
 
 | Case | What it proves |
 |---|---|
@@ -25,6 +25,6 @@ Pure framing/classification and the chip firmware version policy only (`obd_chip
 ## Expected result
 
 ```
-19 Tests 0 Failures 0 Ignored
+21 Tests 0 Failures 0 Ignored
 OK
 ```
