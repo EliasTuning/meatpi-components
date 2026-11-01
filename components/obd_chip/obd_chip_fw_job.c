@@ -45,7 +45,6 @@ static const char *TAG = "obd_chip"; /* one TAG per component (§10) */
 typedef struct
 {
     char path[72]; /* "" = the packaged image */
-    bool force;
 } fw_job_t;
 
 static fw_job_t      s_job;
@@ -55,9 +54,11 @@ static void fw_job_task(void *arg)
 {
     (void)arg;
 
+    /* the user's rule: the chip is written only when the image is newer
+       than what it runs (2026-11-01, Ali: no forced rewrite) */
     esp_err_t err = (s_job.path[0] != '\0')
-                        ? obd_chip_firmware_update(s_job.path, s_job.force)
-                        : obd_chip_firmware_update_builtin(s_job.force);
+                        ? obd_chip_firmware_update(s_job.path)
+                        : obd_chip_firmware_update_builtin(OBD_FW_RULE_NEWER);
 
     if (err == ESP_OK && obd_fw_last_flashed())
     {
@@ -80,16 +81,24 @@ static void fw_job_task(void *arg)
     vTaskDelete(NULL);
 }
 
-esp_err_t obd_chip_firmware_update_start(const char *fs_path, bool force)
+esp_err_t obd_chip_firmware_update_start(const char *fs_path)
 {
     if (s_job_running || obd_chip_update_in_progress())
     {
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (fs_path != NULL && strlen(fs_path) >= sizeof(s_job.path))
+    if (fs_path != NULL)
     {
-        return ESP_ERR_INVALID_ARG;
+        unsigned v[3];
+
+        /* the file's name carries the image's version: refused here, in
+           the caller's context, rather than by the job after a 202 */
+        if (strlen(fs_path) >= sizeof(s_job.path) ||
+            !obd_fw_version_parse(fs_path, v))
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
     }
 
     s_job.path[0] = '\0';
@@ -99,7 +108,6 @@ esp_err_t obd_chip_firmware_update_start(const char *fs_path, bool force)
         strlcpy(s_job.path, fs_path, sizeof(s_job.path));
     }
 
-    s_job.force = force;
     s_job_running = true;
 
     /* internal stack: UART driver path (the bring-up task's rule) */

@@ -146,9 +146,18 @@ bool   obd_fw_line_is_end_marker(const char *line); /* "FFF1..." */
  *  V2.3.24). Pure, host-tested (issue #1023, 2026-10-28). */
 bool        obd_fw_version_is_current(const char *vtvers);
 const char *obd_fw_current_versions(void); /* "V2.3.22, V2.3.24", for logs */
-/* a version answer that is not the packaged one (a chip left on V2.3.22
-   under a packaged V2.3.24): accepted at start-up, flagged to the user */
-bool        obd_fw_version_is_outdated(const char *vtvers, const char *packaged);
+/* The version numbers (2026-11-01, Ali: no forced rewrite; a chip is
+   written only when the image is newer). `parse` finds the first
+   "V<major>.<minor>.<patch>" in a VTVERS answer, the packaged constant or
+   a file's path; `cmp` orders two parsed versions field by field; `token`
+   writes the version alone ("V2.3.24", for the page and the API; 0 and ""
+   when there is none); `is_outdated` = the chip's version is below the
+   image's (false for silence, '?' or an image without a version). Pure,
+   host-tested. */
+bool        obd_fw_version_parse(const char *s, unsigned out[3]);
+int         obd_fw_version_cmp(const unsigned a[3], const unsigned b[3]);
+size_t      obd_fw_version_token(const char *s, char *out, size_t out_len);
+bool        obd_fw_version_is_outdated(const char *vtvers, const char *image);
 
 /** True when the last update run streamed an image and finalized it (the
  *  chip was hardware-reset: the caller brings it up again). */

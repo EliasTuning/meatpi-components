@@ -24,9 +24,11 @@
  * @file obd_chip_cli.c
  * @brief The `obd_chip` console command (standard §6b, registered from the
  *        settings apply behind `cli`, 2026-10-28): the chip's state and
- *        firmware version, the packaged image and its policy, a forced
- *        update as a background job, and the wire tools (probe, scan, the
- *        hardware baud detection, listen) for a chip that will not come up.
+ *        firmware version, the packaged image and its policy, the update
+ *        as a background job (written only when the image is newer than
+ *        the chip's firmware: no forced rewrite since 2026-11-01, Ali),
+ *        and the wire tools (probe, scan, the hardware baud detection,
+ *        listen) for a chip that will not come up.
  *        Issue #1023: a stuck MIC3624 could neither be diagnosed nor
  *        reflashed from the device. The tools run through the one runner
  *        in obd_chip_probe.c that the HTTP route shares; this file prints.
@@ -71,7 +73,7 @@ static void print_status(void)
         if (obd_fw_version_is_outdated(ver, obd_chip_builtin_fw_version()))
         {
             cmdline_printf("warning: the chip's firmware is older than the "
-                           "packaged %s: obd_chip update --force rewrites it "
+                           "packaged %s: obd_chip update writes it "
                            "(or System > Maintenance)\n",
                            obd_chip_builtin_fw_version());
         }
@@ -134,31 +136,43 @@ static void print_status(void)
 
 static int do_update(int argc, char **argv)
 {
-    bool force = false;
     const char *path = NULL;
 
     for (int i = 2; i < argc; i++)
     {
         if (strcmp(argv[i], "--force") == 0)
         {
-            force = true;
+            /* gone (2026-11-01, Ali): no path writes a chip at or above
+               the image's version */
+            cmdline_printf("the forced rewrite is gone: the chip is written "
+                           "only when the image is newer than its firmware\n");
+            return 1;
         }
-        else if (strcmp(argv[i], "--file") == 0 && i + 1 < argc)
+
+        if (strcmp(argv[i], "--file") == 0 && i + 1 < argc)
         {
             path = argv[++i];
         }
         else
         {
-            cmdline_printf("usage: obd_chip update [--force] [--file <path>]\n");
+            cmdline_printf("usage: obd_chip update [--file <path>]\n");
             return 1;
         }
     }
 
-    esp_err_t err = obd_chip_firmware_update_start(path, force);
+    esp_err_t err = obd_chip_firmware_update_start(path);
 
     if (err == ESP_ERR_INVALID_STATE)
     {
         cmdline_printf("an update is already running\n");
+        return 1;
+    }
+
+    if (err == ESP_ERR_INVALID_ARG)
+    {
+        cmdline_printf("the file's name must carry its version "
+                       "(V2.3.24.txt): the chip is written only when the "
+                       "image is newer than its firmware\n");
         return 1;
     }
 
@@ -169,10 +183,10 @@ static int do_update(int argc, char **argv)
         return 1;
     }
 
-    cmdline_printf("update started from %s%s: about 20 s, the chip is busy "
-                   "meanwhile; `obd_chip` shows the progress\n",
-                   (path != NULL) ? path : "the packaged image",
-                   force ? " (forced)" : "");
+    cmdline_printf("update started from %s: about 20 s when the chip's "
+                   "firmware is older than the image, else nothing to do; "
+                   "`obd_chip` shows the progress\n",
+                   (path != NULL) ? path : "the packaged image");
     return 0;
 }
 
@@ -466,7 +480,7 @@ static int cmd_obd_chip(int argc, char **argv)
     }
 
     cmdline_printf("usage: obd_chip | obd_chip report | obd_chip update "
-                   "[--force] [--file <path>] | obd_chip probe [baud] "
+                   "[--file <path>] | obd_chip probe [baud] "
                    "[scan|auto [seconds]] [command] | obd_chip listen "
                    "<seconds> [baud]\n");
     return 1;
@@ -479,7 +493,7 @@ esp_err_t obd_chip_register_cli(void)
         .command = "obd_chip",
         .help = "OBD chip (MIC3624): state, configuration report, firmware "
                 "update, probe, listen",
-        .hint = "Usage: obd_chip | obd_chip report | obd_chip update [--force] "
+        .hint = "Usage: obd_chip | obd_chip report | obd_chip update "
                 "[--file <path>] | obd_chip probe [baud] [scan|auto [seconds]] [command] | "
                 "obd_chip listen <seconds> [baud]",
         .func = cmd_obd_chip,

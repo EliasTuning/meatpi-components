@@ -293,16 +293,17 @@ static void bringup_task(void *arg)
                  esp_err_to_name(err));
     }
 
-    /* legacy-parity auto-update (Ali 2026-07-26): a chip not at the
-       packaged fw version is flashed to it. Runs AFTER the DONE bit
-       (the update path waits on it, ordering matters) and ALSO after a
-       FAILED bring-up: a chip stuck in download mode fails bring-up and
-       completing the download is its recovery path. A dead wire aborts
-       on the VTVERS timeout inside. At the packaged version this costs
-       one VTVERS round-trip. */
+    /* legacy-parity auto-update (Ali 2026-07-26): a chip below the
+       accepted versions (V2.3.22, V2.3.24: the v4.52p list) is flashed
+       to the packaged image, never the same version or a newer chip.
+       Runs AFTER the DONE bit (the update path waits on it, ordering
+       matters) and ALSO after a FAILED bring-up: a chip stuck in download
+       mode fails bring-up and completing the download is its recovery
+       path. A dead wire aborts on the VTVERS timeout inside. At an
+       accepted version this costs one VTVERS round-trip. */
     if (obd_settings_config()->auto_update)
     {
-        esp_err_t up = obd_chip_firmware_update_builtin(false);
+        esp_err_t up = obd_chip_firmware_update_builtin(OBD_FW_RULE_STARTUP);
 
         if (up != ESP_OK && up != ESP_ERR_TIMEOUT)
         {

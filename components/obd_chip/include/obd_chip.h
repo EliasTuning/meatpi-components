@@ -272,25 +272,45 @@ bool obd_chip_status_ok(void);
 esp_err_t obd_chip_get_version(char *buf, size_t buf_len, TickType_t timeout);
 
 /**
- * Update the chip firmware from a vendor .txt file on the filesystem
- * (logical path, e.g. "/data/obd_fw/V2.3.22.txt"). Claims EXCLUSIVE for the
- * whole procedure (minutes). Follows the verified legacy flow:
- * VTVERS check -> VTDLMIC3422 -> VTDLDT per line -> FFF1 -> VTDLED -> chip
- * hardware reset. `force` skips the version check.
+ * Which chip an update leaves alone (2026-11-01, Ali: no forced rewrite
+ * anywhere). Under either rule a chip at the image's version or above it
+ * is never written, a chip stuck in download mode ('?', or bytes without
+ * a prompt at either baud) is recovered by completing the download, and a
+ * wire silent at both bauds aborts.
  */
-esp_err_t obd_chip_firmware_update(const char *fs_path, bool force);
+typedef enum
+{
+    /** The bring-up's automatic update: a chip on an accepted version
+     *  (V2.3.22 or V2.3.24, the v4.52p list) is left alone and a chip
+     *  below the list gets the packaged image. A chip left on V2.3.22 is
+     *  flagged (`fw.outdated`) and waits for the user's update. */
+    OBD_FW_RULE_STARTUP,
+    /** The user's update (the Maintenance card, the API, the console):
+     *  written only when the image's version is above the chip's. */
+    OBD_FW_RULE_NEWER,
+} obd_fw_rule_t;
+
+/**
+ * Update the chip firmware from a vendor .txt file on the filesystem
+ * (logical path, e.g. "/data/obd_fw/V2.3.24.txt": the file's NAME carries
+ * the image's version, ESP_ERR_INVALID_ARG without one). The user's rule
+ * (OBD_FW_RULE_NEWER): the chip is written only when that version is
+ * above the one it reports. Claims EXCLUSIVE for the whole procedure
+ * (about 20 s). Follows the verified legacy flow: VTVERS check ->
+ * VTDLMIC3422 -> VTDLDT per line -> FFF1 -> VTDLED -> chip hardware reset.
+ */
+esp_err_t obd_chip_firmware_update(const char *fs_path);
 
 /**
  * Same procedure from the PACKAGED image (EMBED_TXTFILES, V2.3.24 since
- * 2026-10-28: the auto-update source). The `auto_update` setting (default
- * true, legacy parity) runs this with force=false after every bring-up:
- * a chip at a CURRENT version (V2.3.22 or V2.3.24, the v4.52p policy:
- * v6 used to downgrade a .24 chip to .22) answers one VTVERS and skips;
- * an older version, or a chip stuck in download mode ('?', or bytes
- * without a prompt at either baud): is flashed. Only a wire silent at
- * both bauds aborts, unless forced (issue #1023).
+ * 2026-10-28). The `auto_update` setting (default true, legacy parity)
+ * runs this with OBD_FW_RULE_STARTUP after every bring-up: a chip at a
+ * CURRENT version (V2.3.22 or V2.3.24, the v4.52p policy: v6 used to
+ * downgrade a .24 chip to .22) answers one VTVERS and skips; an older
+ * version, or a chip stuck in download mode: is flashed. The user's
+ * entries run it with OBD_FW_RULE_NEWER (issue #1023).
  */
-esp_err_t obd_chip_firmware_update_builtin(bool force);
+esp_err_t obd_chip_firmware_update_builtin(obd_fw_rule_t rule);
 
 /** The packaged image's version string ("V2.3.24"). */
 const char *obd_chip_builtin_fw_version(void);
@@ -313,10 +333,12 @@ typedef struct
 
 void obd_chip_fw_status(obd_chip_fw_status_t *out);
 
-/** Run the update on its own task (the console / HTTP entry, 2026-10-28):
- *  @p fs_path NULL = the packaged image. ESP_ERR_INVALID_STATE while one
- *  runs. A reflashed chip comes back through a fresh bring-up afterwards. */
-esp_err_t obd_chip_firmware_update_start(const char *fs_path, bool force);
+/** Run the user's update (OBD_FW_RULE_NEWER) on its own task (the console
+ *  / HTTP entry, 2026-10-28): @p fs_path NULL = the packaged image, else a
+ *  file whose name carries its version (ESP_ERR_INVALID_ARG without one).
+ *  ESP_ERR_INVALID_STATE while one runs. A reflashed chip comes back
+ *  through a fresh bring-up afterwards. */
+esp_err_t obd_chip_firmware_update_start(const char *fs_path);
 
 /** Bare-wire diagnostic (the `obd_chip probe` command, issue #1023): send
  *  @p cmd (with its CR) at @p baud (0 = as is) and collect what comes back

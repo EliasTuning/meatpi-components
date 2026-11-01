@@ -31,9 +31,9 @@
  *        cJSON dependency needed for it. Since 2026-10-28 (issue #1023) it
  *        also carries the chip firmware update's state (`fw`), and
  *        POST /api/obd_chip/update starts one (the packaged image or a
- *        file, `force` to reflash a chip at a current version): the one
- *        way to recover a chip stuck in its bootloader without a console.
- *        The GET never touches the wire.
+ *        file; since 2026-11-01 there is no `force`: the chip is written
+ *        only when the image is newer than what it runs, Ali). The GET
+ *        never touches the wire.
  */
 #include <stdio.h>
 #include <string.h>
@@ -154,9 +154,12 @@ static esp_err_t reply(httpd_req_t *req, const char *status, const char *json)
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
-/** POST /api/obd_chip/update  {"force":bool, "path":"/data/..."} (both
- *  optional; no body = the packaged image, not forced). 202 when the job
- *  started, 409 while one runs, 404 for a missing file, 400 otherwise. */
+/** POST /api/obd_chip/update  {"path":"/data/V2.3.24.txt"} (optional; no
+ *  body = the packaged image). The chip is written only when the image's
+ *  version is above the one it reports: a `force` key is refused (400),
+ *  the forced rewrite is gone (2026-11-01, Ali). 202 when the job started,
+ *  409 while one runs, 404 for a missing file, 400 otherwise (a file whose
+ *  name carries no version among them). */
 static esp_err_t obd_chip_update_handler(httpd_req_t *req)
 {
     char body[OC_HTTP_BODY_MAX + 1];
@@ -181,7 +184,6 @@ static esp_err_t obd_chip_update_handler(httpd_req_t *req)
 
     body[len] = '\0';
 
-    bool force = false;
     char path[72] = "";
 
     if (len > 0)
@@ -193,7 +195,14 @@ static esp_err_t obd_chip_update_handler(httpd_req_t *req)
             return reply(req, "400 Bad Request", "{\"error\":\"invalid JSON\"}");
         }
 
-        force = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "force"));
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "force")))
+        {
+            cJSON_Delete(root);
+            return reply(req, "400 Bad Request",
+                         "{\"error\":\"force is not supported: the chip is "
+                         "written only when the image is newer than its "
+                         "firmware\"}");
+        }
 
         const cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "path");
 
@@ -211,17 +220,38 @@ static esp_err_t obd_chip_update_handler(httpd_req_t *req)
         cJSON_Delete(root);
     }
 
-    if (path[0] != '\0' && !filesystem_exists(path))
+    if (path[0] != '\0')
     {
-        return reply(req, "404 Not Found", "{\"error\":\"no such file\"}");
+        unsigned v[3];
+
+        /* the file's name carries the image's version: a name without one
+           is refused before the file is even looked up */
+        if (!obd_fw_version_parse(path, v))
+        {
+            return reply(req, "400 Bad Request",
+                         "{\"error\":\"the file's name must carry its version "
+                         "(V2.3.24.txt)\"}");
+        }
+
+        if (!filesystem_exists(path))
+        {
+            return reply(req, "404 Not Found", "{\"error\":\"no such file\"}");
+        }
     }
 
     esp_err_t err = obd_chip_firmware_update_start(
-        (path[0] != '\0') ? path : NULL, force);
+        (path[0] != '\0') ? path : NULL);
 
     if (err == ESP_ERR_INVALID_STATE)
     {
         return reply(req, "409 Conflict", "{\"error\":\"update already running\"}");
+    }
+
+    if (err == ESP_ERR_INVALID_ARG)
+    {
+        return reply(req, "400 Bad Request",
+                     "{\"error\":\"the file's name must carry its version "
+                     "(V2.3.24.txt)\"}");
     }
 
     if (err != ESP_OK)
@@ -233,9 +263,8 @@ static esp_err_t obd_chip_update_handler(httpd_req_t *req)
 
     char out[160];
 
-    snprintf(out, sizeof(out),
-             "{\"started\":true,\"source\":\"%s\",\"force\":%s}",
-             (path[0] != '\0') ? path : "builtin", force ? "true" : "false");
+    snprintf(out, sizeof(out), "{\"started\":true,\"source\":\"%s\"}",
+             (path[0] != '\0') ? path : "builtin");
     return reply(req, "202 Accepted", out);
 }
 

@@ -389,8 +389,8 @@ esp_err_t obd_bringup_run(int *active_baud)
                the packaged image: the card on System > Maintenance and
                `obd_chip` say the same (Ali, 2026-10-28) */
             ESP_LOGW(TAG, "chip firmware %.*s is older than the packaged %s: "
-                     "rewrite it from System > Maintenance or with "
-                     "obd_chip update --force",
+                     "update it from System > Maintenance or with "
+                     "obd_chip update",
                      (int)strcspn(resp, "\r\n>"), resp,
                      obd_chip_builtin_fw_version());
         }

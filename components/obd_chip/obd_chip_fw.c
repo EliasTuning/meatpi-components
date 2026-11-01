@@ -46,11 +46,14 @@
  * (a chip stuck in download mode sits at 2 Mbaud while a failed bring-up
  * leaves the UART at 115200), logs what came back, and, like legacy v4.52p,
  * still tries the download-mode entry when bytes arrived without a prompt:
- * only a wire silent at both bauds aborts (`force` overrides even that).
- * The packaged image is V2.3.24 and a chip at V2.3.22 is left alone (the
- * v4.52p policy): v6 used to downgrade a chip v4.52p had taken to V2.3.24.
- * The update runs as a job for the console and HTTP, reports its progress,
- * and the sleep entry waits for it.
+ * only a wire silent at both bauds aborts. The packaged image is V2.3.24
+ * and the start-up leaves a chip at V2.3.22 alone (the v4.52p policy): v6
+ * used to downgrade a chip v4.52p had taken to V2.3.24. Since 2026-11-01
+ * (Ali) there is no forced rewrite: under either rule (obd_fw_rule_t) a
+ * chip is written only when the image's version is above the one it
+ * reports, never the same version and never a downgrade; the user's update
+ * lifts a .22 chip to .24. The update runs as a job for the console and
+ * HTTP, reports its progress, and the sleep entry waits for it.
  */
 #include "obd_chip.h"
 
@@ -75,7 +78,7 @@ static const char *TAG = "obd_chip"; /* one TAG per component (§10) */
 #define FW_TARGET_ID   "MIC3624"
 
 /* keep in lockstep with EMBED_TXTFILES in CMakeLists.txt and the accepted
- * list in obd_chip_parse.c (obd_fw_version_is_current) */
+ * list in obd_chip_fw_version.c (obd_fw_version_is_current) */
 #define OBD_FW_BUILTIN_VERSION "V2.3.24"
 
 /* ---- wire diagnostics (issue #1023) ------------------------------------------ */
@@ -335,11 +338,11 @@ static uint32_t fw_count_records(const char *buf, size_t len)
  * at, then at the other one. Writes @p resp (the answer, prompt or not),
  * @p prompt (a '>' arrived: the UART stays at that baud), @p normal (the
  * chip named itself) and @p vt_err (the VTVERS verdict). ESP_ERR_TIMEOUT
- * only for a wire silent at both bauds (unless forced), the UART back
- * where it was; ESP_OK otherwise: the caller goes on.
+ * only for a wire silent at both bauds, the UART back where it was;
+ * ESP_OK otherwise: the caller goes on.
  */
-static esp_err_t fw_gate(bool force, char *resp, size_t resp_len,
-                         bool *prompt, bool *normal, esp_err_t *vt_err)
+static esp_err_t fw_gate(char *resp, size_t resp_len, bool *prompt,
+                         bool *normal, esp_err_t *vt_err)
 {
     const int first = obd_uart_get_baud();
     const int bauds[2] = { first, other_baud(first) };
@@ -376,19 +379,19 @@ static esp_err_t fw_gate(bool force, char *resp, size_t resp_len,
         return ESP_OK;
     }
 
-    if (bytes == 0 && !force)
+    if (bytes == 0)
     {
         ESP_LOGW(TAG, "no answer on the wire at %d or %d baud (VTVERS "
-                 "timeout, nothing received), not flashing; use force to "
-                 "override", bauds[0], bauds[1]);
+                 "timeout, nothing received), not flashing", bauds[0],
+                 bauds[1]);
         obd_uart_set_baud(first);
         return ESP_ERR_TIMEOUT;
     }
 
-    /* bytes without a prompt (a bootloader, a reboot loop) or forced:
-       legacy v4.52p went on to the download-mode entry here */
-    ESP_LOGW(TAG, "chip answers without a prompt%s: trying the download-mode "
-             "entry to recover it", force ? " (forced)" : "");
+    /* bytes without a prompt (a bootloader, a reboot loop): legacy v4.52p
+       went on to the download-mode entry here */
+    ESP_LOGW(TAG, "chip answers without a prompt: trying the download-mode "
+             "entry to recover it");
     return ESP_OK;
 }
 
@@ -418,11 +421,10 @@ static esp_err_t fw_enter_download(bool prompt_seen, char *resp,
 
 /** The engine, source-agnostic: @p fw_buf holds the whole vendor image
  *  text, @p ver its "V2.3.24"-style version (the file's name, or the
- *  packaged constant), @p packaged selects the current-version policy
- *  (a file skips only a chip at exactly its version), @p src a label
- *  for the logs. */
+ *  packaged constant), @p rule which chip is left alone (obd_fw_rule_t:
+ *  a chip at or above @p ver always is), @p src a label for the logs. */
 static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
-                               const char *ver, bool packaged, bool force,
+                               const char *ver, obd_fw_rule_t rule,
                                const char *src)
 {
     static char line[FW_LINE_MAX];
@@ -453,12 +455,13 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
     /* 1. identity + version gate. Legacy semantics: '?' means the chip is
        not in its normal state (typically stuck in download mode after an
        interrupted update) and COMPLETING a download is the recovery path,
-       so proceed. Only a healthy chip at a current version skips. */
+       so proceed. A healthy chip is written only when the image's version
+       is above its own. */
     bool prompt;
     bool normal;
     esp_err_t vt_err;
 
-    err = fw_gate(force, resp, sizeof(resp), &prompt, &normal, &vt_err);
+    err = fw_gate(resp, sizeof(resp), &prompt, &normal, &vt_err);
 
     if (err != ESP_OK)
     {
@@ -467,27 +470,39 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
 
     if (normal)
     {
+        char chip_ver[16];
+
         obd_chip_version_note(resp);
         ESP_LOGI(TAG, "chip reports: %s", resp);
 
-        bool current = packaged ? obd_fw_version_is_current(resp)
-                                : (ver[0] != '\0' && strstr(resp, ver) != NULL);
-
-        if (!force && current)
+        if (obd_fw_version_token(resp, chip_ver, sizeof(chip_ver)) == 0)
         {
-            if (packaged)
-            {
-                ESP_LOGI(TAG, "chip firmware is current (packaged %s; %s "
-                         "are current): nothing to do", ver,
-                         obd_fw_current_versions());
-            }
-            else
-            {
-                ESP_LOGI(TAG, "already at %s: nothing to do", ver);
-            }
+            strlcpy(chip_ver, "(no version)", sizeof(chip_ver));
+        }
 
+        /* never the same version, never a downgrade, whatever the rule
+           (2026-11-01, Ali: the forced rewrite is gone); a chip whose
+           answer carries no version is left alone too */
+        if (!obd_fw_version_is_outdated(resp, ver))
+        {
+            ESP_LOGI(TAG, "chip firmware %s is not older than the image's %s "
+                     "(%s): nothing to do", chip_ver, ver, src);
             return status_end(ESP_OK, false);
         }
+
+        /* the start-up keeps the v4.52p accept list: a chip on V2.3.22
+           under the packaged V2.3.24 is left alone here (the bring-up
+           flags it) and the user's update lifts it */
+        if (rule == OBD_FW_RULE_STARTUP && obd_fw_version_is_current(resp))
+        {
+            ESP_LOGI(TAG, "chip firmware %s is accepted at start-up (%s are): "
+                     "nothing to do; the user's update lifts it to %s",
+                     chip_ver, obd_fw_current_versions(), ver);
+            return status_end(ESP_OK, false);
+        }
+
+        ESP_LOGI(TAG, "chip firmware %s is older than %s: updating", chip_ver,
+                 ver);
     }
     else if (prompt)
     {
@@ -591,11 +606,23 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
     return status_end(err, err == ESP_OK);
 }
 
-esp_err_t obd_chip_firmware_update(const char *fs_path, bool force)
+esp_err_t obd_chip_firmware_update(const char *fs_path)
 {
     /* whole file into PSRAM: vendor images are ~500 KB of text */
     static char *s_fw_buf;
     static size_t s_fw_cap;
+
+    /* the image's version is the file's name (the established contract):
+       without one there is nothing to compare the chip against, and a
+       chip is written only when the image is newer */
+    char ver[16];
+
+    if (fs_path == NULL || obd_fw_version_token(fs_path, ver, sizeof(ver)) == 0)
+    {
+        ESP_LOGW(TAG, "fw file '%s': no version in its name (V2.3.24.txt), "
+                 "not flashing", (fs_path != NULL) ? fs_path : "");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     size_t fw_size = 0;
     esp_err_t err = filesystem_size(fs_path, &fw_size);
@@ -635,21 +662,12 @@ esp_err_t obd_chip_firmware_update(const char *fs_path, bool force)
         return err;
     }
 
-    /* version gate string from the filename (the established contract) */
-    char ver[16] = "";
-    const char *v = strstr(fs_path, "V2.");
-
-    if (v != NULL)
-    {
-        snprintf(ver, sizeof(ver), "%.7s", v);
-    }
-
-    return fw_update_run(s_fw_buf, got, ver, false, force, fs_path);
+    return fw_update_run(s_fw_buf, got, ver, OBD_FW_RULE_NEWER, fs_path);
 }
 
 /* The packaged image (EMBED_TXTFILES appends a NUL). Bumping the
  * packaged version = new file in CMakeLists + this constant + the
- * current list in obd_chip_parse.c. */
+ * current list in obd_chip_fw_version.c. */
 extern const char _binary_V2_3_24_txt_start[];
 extern const char _binary_V2_3_24_txt_end[];
 
@@ -658,13 +676,13 @@ const char *obd_chip_builtin_fw_version(void)
     return OBD_FW_BUILTIN_VERSION;
 }
 
-esp_err_t obd_chip_firmware_update_builtin(bool force)
+esp_err_t obd_chip_firmware_update_builtin(obd_fw_rule_t rule)
 {
     size_t len = (size_t)(_binary_V2_3_24_txt_end -
                           _binary_V2_3_24_txt_start);
 
     return fw_update_run(_binary_V2_3_24_txt_start, len,
-                         OBD_FW_BUILTIN_VERSION, true, force, "builtin "
+                         OBD_FW_BUILTIN_VERSION, rule, "builtin "
                          OBD_FW_BUILTIN_VERSION);
 }
 

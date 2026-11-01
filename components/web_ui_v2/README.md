@@ -708,24 +708,34 @@ Over `GET /api/obd_chip`, `POST /api/obd_chip/update`, `POST/GET
 /api/can/selftest` (`components/HTTP_API.md`):
 
 - **OBD chip**: the state row (ready at N baud or not up, the chip's
-  firmware from the cached VTVERS, the packaged image, the last rewrite),
-  refreshed every 3 s; a warn banner while the chip is down, with what
-  the bring-up received at each speed (`bringup.wire`), or while the chip's
-  firmware is older than the packaged one (`fw.outdated`: a chip left on
-  V2.3.22 is accepted at start-up and flagged here, with both versions
-  named, until it is rewritten; Ali, 2026-10-28); a help line
-  saying what the button does; the rewrite progress bar while
-  `fw.update` runs; "Read the chip configuration" (the report route into a
-  read-only block with Select all, the text a bug report needs: identity,
-  voltage, protocol, the programmable parameters, the sleep settings;
-  409 = the chip is down, shown as a banner); the wire tools folded
+  firmware as its version alone, `firmware V2.3.24`, green at the
+  packaged version and amber below it: the chip's own words, `MIC3624
+  V2.3.24`, stay in the API's `fw.chip` and in the configuration report,
+  Ali 2026-11-01; the packaged image as `device carries V2.3.24`; a
+  `last update: <error>` chip only after a failed run), refreshed every
+  3 s; a warn banner while the chip is down, with what the bring-up
+  received at each speed (`bringup.wire`) and a pointer at the wire tools;
+  or, while the chip's firmware is older than the packaged one
+  (`fw.outdated`: a chip left on V2.3.22 is accepted at start-up and
+  flagged here, Ali 2026-10-28), the banner "A newer chip firmware is
+  available" naming both versions with the **Update to V2.3.24** button
+  at its right edge (`btn pri`), behind `confirmModal` (Cancel / Continue)
+  and then `POST /api/obd_chip/update` with an empty body: the device
+  writes the chip only when its image is newer, there is no forced
+  rewrite any more (Ali, 2026-11-01: the Rewrite button, its danger
+  styling, the help paragraph about it and `force:true` are gone, and the
+  button exists only while there is something to update to); the update
+  progress bar while `fw.update` runs; "Read the chip configuration" at
+  the right edge of its help line (the report route into a read-only
+  block with Select all, the text a bug report needs: identity, voltage,
+  protocol, the programmable parameters, the sleep settings; 409 = the
+  chip is down, shown as a banner); the wire tools folded at the bottom
   (Speed, Send word, Listen seconds; Probe, Scan all speeds, Detect
   speed, Listen; every byte the chip sent as text and hex in a console
   box kept in localStorage `wican-diag-wire`; the chip's own log lines
-  from the ring under it); the action at the right edge, **Rewrite the
-  chip firmware**, behind `confirmModal` (Cancel / Continue) and then
-  `force:true`: it rewrites the chip whatever version it reports, the
-  recovery for a chip stuck in its download mode or answering nothing.
+  from the ring under it). Every text-plus-action row is the
+  `actionRow` grid (`minmax(0,1fr) auto`): the text wraps, the button
+  never drops under it.
 - **CAN self-test**: one help line, the verdict chip, one Run button
   that POSTs and polls, and the result as the same copyable block as the
   chip configuration: the console's `can_selftest` text (the verdict, the

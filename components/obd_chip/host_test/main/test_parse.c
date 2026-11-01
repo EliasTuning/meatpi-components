@@ -182,19 +182,66 @@ void test_fw_version_policy(void)
     /* the log string names both; the packaged V2.3.24 is among them */
     TEST_ASSERT_NOT_NULL(strstr(obd_fw_current_versions(), "V2.3.22"));
     TEST_ASSERT_NOT_NULL(strstr(obd_fw_current_versions(), "V2.3.24"));
-    /* the warning (Ali, 2026-10-28): a chip that answered with a version
-       other than the packaged one is outdated (V2.3.22 is accepted at
-       start-up, the user is told to rewrite it); the packaged version,
-       silence, '?' and an empty packaged name are not */
+    /* the version numbers (2026-11-01, Ali: no forced rewrite): the first
+       V<a>.<b>.<c> in a VTVERS answer, the packaged constant or a file's
+       path; a 'V' without three numbers behind it (VTVERS) is skipped, the
+       chip's upper-case form only */
+    unsigned v[3];
+    char tok[16];
+
+    TEST_ASSERT_TRUE(obd_fw_version_parse("MIC3624 V2.3.24\r\r>", v));
+    TEST_ASSERT_EQUAL(2, v[0]);
+    TEST_ASSERT_EQUAL(3, v[1]);
+    TEST_ASSERT_EQUAL(24, v[2]);
+    TEST_ASSERT_TRUE(obd_fw_version_parse("/data/obd_fw/V2.3.99.txt", v));
+    TEST_ASSERT_EQUAL(99, v[2]);
+    TEST_ASSERT_TRUE(obd_fw_version_parse("VTVERS V2.3.2", v));
+    TEST_ASSERT_EQUAL(2, v[2]);
+    TEST_ASSERT_FALSE(obd_fw_version_parse("MIC3624", v));
+    TEST_ASSERT_FALSE(obd_fw_version_parse("V2.3", v));
+    TEST_ASSERT_FALSE(obd_fw_version_parse("v2.3.24", v));
+    TEST_ASSERT_FALSE(obd_fw_version_parse("?", v));
+    TEST_ASSERT_FALSE(obd_fw_version_parse("", v));
+    TEST_ASSERT_FALSE(obd_fw_version_parse(NULL, v));
+    /* the version alone, for the page and the logs */
+    TEST_ASSERT_EQUAL(7, obd_fw_version_token("MIC3624 V2.3.24\r\r>", tok, sizeof(tok)));
+    TEST_ASSERT_EQUAL_STRING("V2.3.24", tok);
+    TEST_ASSERT_EQUAL(0, obd_fw_version_token("?", tok, sizeof(tok)));
+    TEST_ASSERT_EQUAL_STRING("", tok);
+    TEST_ASSERT_EQUAL(0, obd_fw_version_token("MIC3624 V2.3.24", tok, 4));
+    TEST_ASSERT_EQUAL_STRING("", tok);
+    /* the order is numeric, field by field */
+    {
+        const unsigned a[3] = { 2, 3, 9 };
+        const unsigned b[3] = { 2, 3, 24 };
+        const unsigned c[3] = { 2, 4, 0 };
+
+        TEST_ASSERT_TRUE(obd_fw_version_cmp(a, b) < 0);
+        TEST_ASSERT_TRUE(obd_fw_version_cmp(b, a) > 0);
+        TEST_ASSERT_EQUAL(0, obd_fw_version_cmp(b, b));
+        TEST_ASSERT_TRUE(obd_fw_version_cmp(b, c) < 0);
+    }
+    /* outdated = the chip's version is below the image's: the one rule
+       every user update follows (never the same version, never a
+       downgrade); a chip left on V2.3.22 under the packaged V2.3.24 is
+       (Ali, 2026-10-28: flagged, and the user's update lifts it); the
+       image's own version, a newer chip, silence, '?' and an image without
+       a version are not */
     TEST_ASSERT_TRUE(obd_fw_version_is_outdated("MIC3624 V2.3.22", "V2.3.24"));
     TEST_ASSERT_TRUE(obd_fw_version_is_outdated("MIC3624 V2.3.22\r\r>", "V2.3.24"));
     TEST_ASSERT_TRUE(obd_fw_version_is_outdated("MIC3624 V2.3.18", "V2.3.24"));
+    TEST_ASSERT_TRUE(obd_fw_version_is_outdated("MIC3624 V2.3.9", "V2.3.24"));
+    TEST_ASSERT_TRUE(obd_fw_version_is_outdated("MIC3624 V2.3.24", "/data/V2.3.99.txt"));
     TEST_ASSERT_FALSE(obd_fw_version_is_outdated("MIC3624 V2.3.24", "V2.3.24"));
     TEST_ASSERT_FALSE(obd_fw_version_is_outdated("MIC3624 V2.3.24\r\r>", "V2.3.24"));
+    TEST_ASSERT_FALSE(obd_fw_version_is_outdated("MIC3624 V2.3.26", "V2.3.24"));
+    TEST_ASSERT_FALSE(obd_fw_version_is_outdated("MIC3624 V2.3.24", "/data/V2.3.22.txt"));
     TEST_ASSERT_FALSE(obd_fw_version_is_outdated("?", "V2.3.24"));
     TEST_ASSERT_FALSE(obd_fw_version_is_outdated("", "V2.3.24"));
     TEST_ASSERT_FALSE(obd_fw_version_is_outdated(NULL, "V2.3.24"));
     TEST_ASSERT_FALSE(obd_fw_version_is_outdated("MIC3624 V2.3.22", ""));
+    TEST_ASSERT_FALSE(obd_fw_version_is_outdated("MIC3624 V2.3.22", "/data/image.txt"));
+    TEST_ASSERT_FALSE(obd_fw_version_is_outdated("MIC3624 V2.3.22", NULL));
 }
 
 /* ---- EEPROM guard (obd_chip_guard.h) ------------------------------------------ */
