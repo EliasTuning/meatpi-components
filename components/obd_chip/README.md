@@ -340,8 +340,10 @@ MIC3624 capture) and, ONLY when something differs, rewrite the chip's
 stored sleep config: ensure NATIVE control mode (`ATPP 0E SV 7A`+`ON`),
 program the VL thresholds/time from settings with every autonomous
 control left **OFF** (`STSLVLW`/`STSLVLS`/`STSLVl off,off`/
-`STSLU off, off`: byte-exact legacy strings), persist the 2 M power-on
-baud (`ATPP 0F SV 95`+`ON`, only when `baud=2000000`), `STSLUIT 1200`,
+`STSLU off, off`: byte-exact legacy strings), stop the chip waking itself
+on bus activity while the ESP32 sleeps (`ATPP 0F SV 95`+`ON`: the Activity
+Monitor options with bit 6 off, not the baud; legacy's
+`elm327_disable_wake_commands`), `STSLUIT 1200`,
 then `ATZ` + re-bring-up (baud restore + `ATE0`). A matching chip skips
 everything: verified live: provisioning ran once after flashing, the
 next boots go straight to `started`.

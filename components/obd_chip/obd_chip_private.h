@@ -248,8 +248,8 @@ extern const char obd_chip_gate_owner[1];
 
 /** Chip UART speed: FIXED, deliberately not a setting (meatpi 2026-09-07:
  *  exposing it invited a user changing it, breaking the chip and claiming
- *  warranty). The chip powers on at 115200 until `STWBR`/`ATPP 0F` persist
- *  this as its default; bring-up walks 2 M -> 115200 and switches (`STSBR`). */
+ *  warranty). The chip powers on at 115200 until `STWBR` persists this as
+ *  its default; bring-up walks 2 M -> 115200 and switches (`STSBR`). */
 #define OBD_CHIP_BAUD 2000000
 
 /** The chip's factory power-on baud: the bring-up's fallback, and the

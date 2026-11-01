@@ -158,8 +158,10 @@ static void wire_note(const char *what, int baud)
  * "follow legacy init"): read STSLCS; ensure sleep control is NATIVE
  * (ATPP 0E) and the stored VL thresholds/time match settings, with all
  * autonomous controls left OFF (the future sleep_manager arms them);
- * persist the 2M default baud (ATPP 0F SV 95). Any change ends in ATZ +
- * re-bring-up. Runs on the bare UART, echo already off. Log-and-degrade.
+ * keep the chip from waking itself on bus activity while the ESP32 sleeps
+ * (ATPP 0F SV 95: the Activity Monitor options with bit 6 off). Any change
+ * ends in ATZ + re-bring-up. Runs on the bare UART, echo already off.
+ * Log-and-degrade.
  */
 static void chip_provision(const obd_config_t *cfg)
 {
@@ -202,9 +204,13 @@ static void chip_provision(const obd_config_t *cfg)
         bare_probe("STSLU off, off\r", resp, sizeof(resp), 1000);
         vTaskDelay(pdMS_TO_TICKS(10));
 
-        /* persist 2M as the chip's power-on baud (legacy PP value 0x95;
-           the baud is fixed at OBD_CHIP_BAUD since 2026-09-07) */
-        _Static_assert(OBD_CHIP_BAUD == 2000000, "PP 0F SV 95 encodes 2 Mbaud");
+        /* PP 0F = the Activity Monitor options (MIC DS PP area, default
+           D5): 95 clears bit 6, "allow wake from Low Power on a shift from
+           no activity to activity", so the chip cannot wake itself on bus
+           traffic while the ESP32 sleeps (legacy obd_init and its
+           elm327_disable_wake_commands). Not the baud: the 2 M power-on
+           baud is STWBR's, at the 115200 fallback above. A chip firmware
+           rewrite keeps the PP area (bench 2026-11-02). */
         bare_probe("ATPP 0F SV 95\r", resp, sizeof(resp), 1000);
         bare_probe("ATPP 0F ON\r", resp, sizeof(resp), 1000);
         vTaskDelay(pdMS_TO_TICKS(10));
