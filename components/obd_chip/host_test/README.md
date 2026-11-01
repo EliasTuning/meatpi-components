@@ -3,7 +3,7 @@
 Pure framing/classification only (`obd_chip_parse.c`: no UART/GPIO). Run via
 `.\test.ps1 host`.
 
-## What is covered (17 tests)
+## What is covered (19 tests)
 
 | Case | What it proves |
 |---|---|
@@ -19,10 +19,12 @@ Pure framing/classification only (`obd_chip_parse.c`: no UART/GPIO). Run via
 | fw iterator + end marker | CR/LF stripping, empty-line skip, `FFF1` detection |
 | fw version policy | (issue #1023) a chip at V2.3.22 or V2.3.24 is current (the v4.52p list), V2.3.18/V2.3.10, `?`, empty and NULL are not; the log string names both |
 | eeprom guard, STSLCS (5 cases) | see `test_parse.c` / `test_stslcs.c` |
+| protocol switch classification | (issue #1023, 2026-11-01) the words the request engine sends `ATM0` ahead of: `ATTP6` / `attp7` / `AT TP 8` / `ATTPA6` / `ATSP00` / `ATTPC`, `STP33` / `stp 34`, `VTP234`, a chain's first element; not `ATM0`, the resets, `ATDPN`, `ATSH`, `ATST`, the STN/vendor reads (`STPR`, `STPBR`, `STPC`, `VTPRON`), data, junk; the guard's `ATSP7` -> `ATTP7` and the classification agree |
+| reset word classification | (issue #1023, 2026-11-01, Ali's ATZ-as-ATWS) a chunk that is exactly an app's `ATZ` / `ATWS` / `ATD` (any case and spacing, line ends and blanks around it) is one; a chunk with a second command behind it, `ATDPN` / `ATDP` / `ATD0` / `ATD1` / `ATWS1`, other words, junk and NULL are not; only the first `len` bytes count |
 
 ## Expected result
 
 ```
-17 Tests 0 Failures 0 Ignored
+19 Tests 0 Failures 0 Ignored
 OK
 ```

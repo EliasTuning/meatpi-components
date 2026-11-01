@@ -167,6 +167,17 @@ so either would wear it out (legacy semantics). Monitor commands
 (`ATMA`/`ATMR`/`ATMT`) and `ATM0` pass through untouched. Write ATSP
 in configs/profiles freely; the chip only ever sees ATTP.
 
+Since 2026-11-01 (issue #1023) the chip driver also sends `ATM0` ahead
+of every `ATTP` (and `STP` / `VTP`) it is asked for, inside the same
+transaction: the chip's memory function is ON after every reset and
+wrote every protocol flip that a request answered on into its
+EEPROM-backed protocol store, `ATTP` or not (the VW MEB profile: seven
+writes per poll cycle, the store rated for 10k). The prelude, the
+restore and every row init go through `obd_chip_request()`, so nothing
+in this component changed; the transcript of test-a-PID shows the
+switches as before and `GET /api/obd_chip` `eeprom_guard.memory_off`
+counts the `ATM0` words sent ahead of them.
+
 ## Bus guard (2026-10-03)
 
 The OBD chip transmits at the bitrate of the protocol it is told to use. A

@@ -274,3 +274,89 @@ void test_eeprom_guard(void)
     TEST_ASSERT_EQUAL(OBD_GUARD_BLOCKED, obd_chip_guard_check(raw, strlen(raw)));
     TEST_ASSERT_EQUAL(OBD_GUARD_PASS, obd_chip_guard_cmd(NULL, 0));
 }
+
+/* ---- protocol switches (issue #1023, bench 2026-11-01) ---------------------- */
+
+void test_protocol_switch_classification(void)
+{
+    /* the words the request engine sends ATM0 ahead of: the ELM forms as
+       the guard leaves them (ATSP already ATTP) and as a profile writes
+       them, the STN and vendor forms, spaces and case as the chip reads
+       them, a chain's first element */
+    const char *yes[] = { "ATTP6", "attp7", "AT TP 8", "ATTP6\r", "ATTPA6",
+                          "ATSP6", "atsp 7", "ATSP00", "ATSPA6", "ATTPC",
+                          "ATTP0", "STP33", "stp 34", "STP11\r", "VTP234",
+                          "VTP33", "ATTP7;ATSH7DF" };
+    /* not: the memory words, the resets, the reads, the other AT words,
+       the STN/vendor reads and settings, data, junk */
+    const char *no[] = { "ATM0", "ATM1", "ATZ", "ATD", "ATWS", "ATDPN", "ATDP",
+                         "ATSH7DF", "ATST96", "ATSTFF", "ATCRA7E8", "ATTP",
+                         "ATSP", "ATTP6X", "ATTPG", "ATTP678", "STPR", "STPRS",
+                         "STPBR", "STPBRR", "STPC", "STPO", "STPX", "STP3",
+                         "STP123", "VTPRON", "VTPROT", "VTPBRD", "VTP1234",
+                         "VTVERS", "0100", "22F190", "ATPPS", "", "x",
+                         "ATSH7DF;ATTP7" };
+
+    for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); i++)
+    {
+        TEST_ASSERT_TRUE_MESSAGE(obd_parse_sets_protocol(yes[i]), yes[i]);
+    }
+
+    for (size_t i = 0; i < sizeof(no) / sizeof(no[0]); i++)
+    {
+        TEST_ASSERT_FALSE_MESSAGE(obd_parse_sets_protocol(no[i]), no[i]);
+    }
+
+    TEST_ASSERT_FALSE(obd_parse_sets_protocol(NULL));
+
+    /* the guard's rewrite and the classification agree on a profile's word:
+       ATSP7 goes out as ATTP7 and gets its ATM0 either way */
+    char buf[8];
+
+    strcpy(buf, "ATSP7");
+    TEST_ASSERT_EQUAL(OBD_GUARD_REWRITTEN, obd_chip_guard_cmd(buf, strlen(buf)));
+    TEST_ASSERT_EQUAL_STRING("ATTP7", buf);
+    TEST_ASSERT_TRUE(obd_parse_sets_protocol(buf));
+}
+
+/* ---- an app's reset word (issue #1023, 2026-11-01) --------------------------- */
+
+static void expect_reset(const char *in, obd_reset_t want)
+{
+    TEST_ASSERT_EQUAL_MESSAGE(want, obd_parse_reset_word(in, strlen(in)), in);
+}
+
+void test_reset_word_classification(void)
+{
+    /* the chunk an app sends: the word alone, its line end, blanks and a
+       stray line end around it, any case and spacing */
+    expect_reset("ATZ\r", OBD_RESET_ATZ);
+    expect_reset("ATZ", OBD_RESET_ATZ);
+    expect_reset("atz\r\n", OBD_RESET_ATZ);
+    expect_reset("AT Z\r", OBD_RESET_ATZ);
+    expect_reset("\r\nATZ\r", OBD_RESET_ATZ);
+    expect_reset(" ATZ \r", OBD_RESET_ATZ);
+    expect_reset("ATWS\r", OBD_RESET_ATWS);
+    expect_reset("at ws\r", OBD_RESET_ATWS);
+    expect_reset("ATD\r", OBD_RESET_ATD);
+    expect_reset("atd", OBD_RESET_ATD);
+
+    /* not: a chunk with a second command (lost in the reset anyway), the
+       reads and settings that start the same way, other words, junk */
+    const char *no[] = { "ATZ\rATE0\r", "ATZ;ATE0", "ATZX\r", "ATDPN\r", "ATDP",
+                         "ATD0\r", "ATD1", "ATWS1", "ATWSX", "ATE0\r", "ATI\r",
+                         "0100\r", "ATZ 0100\r", "AT\r", "A", "", "\r", " \r\n",
+                         "ATSP6\r", "ATM0\r", "VTZ\r", "STZ" };
+
+    for (size_t i = 0; i < sizeof(no) / sizeof(no[0]); i++)
+    {
+        expect_reset(no[i], OBD_RESET_NONE);
+    }
+
+    /* raw chunk semantics: only the first len bytes count */
+    const char *raw = "ATZ\rATE0\r";
+
+    TEST_ASSERT_EQUAL(OBD_RESET_ATZ, obd_parse_reset_word(raw, 4));
+    TEST_ASSERT_EQUAL(OBD_RESET_NONE, obd_parse_reset_word(raw, strlen(raw)));
+    TEST_ASSERT_EQUAL(OBD_RESET_NONE, obd_parse_reset_word(NULL, 3));
+}

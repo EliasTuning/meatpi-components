@@ -112,7 +112,7 @@ zero-copy only with numbers.
 ## Async bring-up (2026-07-26: Ali's boot-time ruling)
 
 `obd_chip_start()` no longer blocks boot: the wake → conditional reset →
-baud negotiation → `ATE0` → legacy provisioning → RX-task sequence
+baud negotiation → `ATE0` → legacy provisioning → `ATM0` → RX-task sequence
 (~2 s typical, the biggest single step of the 4.1 s boot) runs on a
 one-shot `obd_bringup` task (4 KB internal (same rule as the RX task)
 prio 5, self-deleting, exit `stack_hw` logged per the stack-audit
@@ -171,12 +171,22 @@ its own task, so the boot line does not move). Check after a restart:
 `ATDPN` through the ELM port reads the default protocol, and the
 `bring-up done in` log line reads about 2.1 s.
 
-Related chip fact: with its memory function at the power-on default the chip
-stores the last protocol that answered in its own EEPROM (`ATDPN` reads
-`A6` when a search found it, `6` when a pinned `ATTP6` did). It writes only
-when the value changes, and the firmware pins one protocol per car, so this
-is one write per change of car; the EEPROM guard (ATSP / ATM1) does not
-cover it.
+Related chip fact, corrected 2026-11-01 (issue #1023, the second dead chip):
+the chip's memory function (`ATM1` / `ATM0`) is ON after every reset (the
+vendor's pin 51 strap; no programmable parameter persists the switch), and
+with it on the chip writes every protocol SWITCH that a request then answers
+on into its non-volatile protocol store, RAM-only `ATTP` or not: `ATDPN`
+after an `ATZ` reads the last protocol that answered (`A6` from a search,
+`6` from a pinned `ATTP6`), and the value survived a power cycle on the
+bench. A profile that flips protocols between rows (the VW MEB family:
+`ATSP7` rows beside `ATSP6` rows) wrote the store on every flip, 2,500 to
+25,000 times per driving hour on v6, against a 10,000-cycle rating; legacy's
+AutoPID sent `atm0` at every start and never wrote it. The EEPROM guard's
+`ATSP` -> `ATTP` rewrite does not prevent it (the trigger is the connection,
+not the command), so the driver sends `ATM0` itself: "The memory function"
+under the EEPROM guard below. `obd_chip_protocol_save()` (a real `ATSP`) is
+the one deliberate write and saves with or without the switch. The bring-up's
+`started:` line reads `memory off` since then.
 
 ## Bridge-endpoint ABI (TASK_obd_chip_manager_new §2/§3.6: stable)
 
@@ -456,6 +466,65 @@ a refused command in `cmd`/`init`; the UDS AT transport sends `ATTP` itself.
 Exempt by construction: boot provisioning (`bare_probe`: STSL*, `ATPP 0E/0F`,
 `STWBR`, once, behind a matching check) and the firmware update flow, which
 write the UART directly.
+
+### The memory function (issue #1023, 2026-11-01)
+
+The guard above stops the EEPROM-writing COMMANDS. The chip has one more
+writer the commands do not show: with its memory function on, a protocol
+switch that a request then answers on is memorised in the non-volatile
+protocol store, `ATTP` or not (bench 2026-11-01, the firmware repo's
+`internal/TASK_obd_chip_protocol_store.md`: the legs, the datasheet, the
+design). The function is ON after every reset and `ATM0` is RAM-only, so the
+driver re-sends it at the three places that between them cover every reset:
+
+- **the bring-up**, after the provisioning (which may `ATZ`), before the
+  identity `ATI`: every reset this sequence performs (a boot, a wake, a
+  nap's pulse, the post-update fresh start). The `started:` line reads
+  `memory off`; a chip that did not answer `OK` gets one W line, and the
+  next protocol switch covers it;
+- **the request engine**, ahead of every protocol switch:
+  `obd_chip_request()` runs an `ATM0` transaction first when
+  `obd_parse_sets_protocol()` names the word (`ATSPh` / `ATTPh` with the
+  `A` and `00` forms, STN `STPhh`, vendor `VTPhhh`; not the reads `STPR`,
+  `STPBR`, `ATDPN`), the pair inside one transaction hold when the caller
+  holds none. That covers AutoPID's prelude, its restore and every row
+  init, the standard scan's `ATTP0` and its protocol walk, the profile
+  probe, the UDS tool, J2534's `ATTP2` and the CAN self-test, whatever
+  reset came before (an app's `ATZ`, the self-test's `ATD`, the chip's own
+  brown-out). One word and one `OK`, about 1 ms at 2 Mbaud; the MEB profile
+  pays seven per poll cycle.
+
+- **the bridge path** (`obd_chip_send`), behind an app's reset (Ali,
+  2026-11-01): a chunk that is exactly `ATZ`, `ATWS` or `ATD`
+  (`obd_parse_reset_word()`, pure) goes out as a warm start (`ATZ` as
+  `ATWS`: the same `ELM327 v2.3` banner, about 40 ms on the wire instead
+  of 1.2 s; what 4.x did with every `ATZ`), and when the answer's prompt
+  passes through the fan-out the RX task writes `ATM0` at once and hides
+  its echo and `OK` from every subscriber up to the next prompt, the
+  obd_gate held across both. The app sees exactly the reply it asked for,
+  once, and its session runs with the memory function off: its own
+  protocol choice after the reset no longer writes the store (bench: the
+  `attpstore` canary, which wrote on the build before). The `ATM0` cannot
+  go in the same chunk as the reset: the chip's reset eats what follows
+  it (bench: `ATWS\rATM0\r` back to back answered the banner alone), so
+  a chunk with a second command behind the reset is passed as it is.
+  Failsafes: a reset the chip never answered disarms after 3 s; an
+  `ATM0` whose prompt never came lets the bytes through again after 1 s
+  with one W line. The guard's own `?` reply to a refused word goes to
+  the subscribers directly, outside that window. The registry, the
+  fan-out and `obd_chip_send` live in `obd_chip_fanout.c` since this
+  change (the 700-line rule); `obd_chip.c` keeps the lifecycle, the
+  bring-up task and the stats.
+
+`obd_chip_protocol_save()` saves with or without the switch. Counted in
+`obd_chip_stats_t.memory_off` (the acknowledged `ATM0` words, all three
+places), `.app_resets` (reset words intercepted) and `.hidden_bytes`, on
+`GET /api/obd_chip` under `eeprom_guard`, printed by the `obd_chip` console
+command. Host tests: `test_protocol_switch_classification`,
+`test_reset_word_classification`; bench: `test.ps1 attpstore` in the
+firmware repo (the engine's switch and the bring-up's `ATM0` read back
+through an `ATZ`, the app's reset answered once and fast with nothing
+shifted, the app's own switch after its reset no longer writing).
 
 ### Protocol save (2026-10-01, TASK_quick_setup.md "Protocol policy")
 

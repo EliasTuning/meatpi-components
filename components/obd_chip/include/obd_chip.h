@@ -125,7 +125,13 @@ uint32_t obd_chip_dropped(QueueHandle_t q);
 /**
  * Serialized raw write to the chip. Interleaved writers cannot corrupt each
  * other mid-buffer; a single 4 KB ISO-TP (VT) payload is one call. Blocked
- * while EXCLUSIVE is held (returns ESP_ERR_INVALID_STATE).
+ * while EXCLUSIVE is held (returns ESP_ERR_INVALID_STATE). The EEPROM guard
+ * runs on the bytes (obd_chip_guard.h), and a chunk that is exactly an
+ * app's reset word (`ATZ`, `ATWS`, `ATD`; issue #1023, 2026-11-01) goes
+ * out as a warm start (`ATZ` as `ATWS`: the same banner without the 1 s
+ * LED test) with an `ATM0` written behind its answer and that answer kept
+ * from every subscriber: the app sees exactly the reply it asked for, and
+ * the chip's memory function is off for the rest of the session.
  */
 esp_err_t obd_chip_send(const uint8_t *data, size_t len);
 
@@ -166,6 +172,19 @@ void     obd_chip_settings_changed(void);
  * ESP_ERR_TIMEOUT if the prompt never arrives. Unsolicited traffic that
  * interleaves with the response is tolerated (it is part of the response
  * window by design: the caller sees exactly what the chip printed).
+ *
+ * A protocol switch (`ATTP`, the `ATSP` the guard rewrites, STN `STP`,
+ * vendor `VTP`) is preceded by an `ATM0` transaction of its own (issue
+ * #1023, bench 2026-11-01): the chip's memory function is ON after every
+ * reset and writes the switch into its EEPROM-backed protocol store as soon
+ * as a request answers on the new protocol; a profile that flips protocols
+ * between rows wrote it on every poll. The pair runs inside one transaction
+ * hold when the caller holds none. The raw bridge path (obd_chip_send)
+ * covers its side differently: an app's ATZ / ATWS / ATD is answered as a
+ * warm start (ATZ sent as ATWS) with an ATM0 behind it whose answer the
+ * fan-out hides, so an app's session runs with the memory function off too
+ * and nothing it sends is answered twice. Counted in
+ * obd_chip_stats_t.memory_off and .app_resets.
  */
 esp_err_t obd_chip_request(const char *cmd, char *resp, size_t resp_len,
                            TickType_t timeout);
@@ -460,6 +479,14 @@ typedef struct
     uint32_t    guard_blocked;  /* EEPROM guard: ATPP/ATSD/ATCV/STWBR refused */
     uint32_t    protocol_saves; /* obd_chip_protocol_save(): real ATSP
                                    writes this boot (0 or 1)             */
+    uint32_t    memory_off;     /* ATM0 the driver sent and the chip took:
+                                   once per bring-up, once ahead of every
+                                   protocol switch on the request path,
+                                   once behind every app reset below    */
+    uint32_t    app_resets;     /* an app's ATZ / ATWS / ATD on the bridge
+                                   path: ATZ sent as ATWS, a hidden ATM0
+                                   behind the answer                     */
+    uint32_t    hidden_bytes;   /* those ATM0 answers, kept from the apps */
 } obd_chip_stats_t;
 
 typedef struct

@@ -22,11 +22,11 @@
 
 /**
  * @file obd_chip.c
- * @brief Lifecycle, subscriber registry (fan-out), and the claim model.
- *
- * Fan-out contract (README): every subscriber gets every chunk; a full queue
- * drops that subscriber's copy (counted, rate-limited WARN) and never stalls
- * the RX task or other subscribers.
+ * @brief Lifecycle, the bring-up task and its gate, the client clock and
+ *        the stats. The subscriber registry, the RX fan-out and the raw TX
+ *        path live in obd_chip_fanout.c (2026-11-01, 700-line rule), the
+ *        claim model in obd_chip_claim.c, the boot sequence in
+ *        obd_chip_bringup.c.
  */
 #include "obd_chip.h"
 
@@ -40,7 +40,6 @@
 #include "freertos/task.h"
 
 #include "log_manager.h"
-#include "obd_gate.h"
 
 #include "obd_chip_private.h"
 
@@ -50,16 +49,6 @@ static const char *TAG = "obd_chip";
  * obd_chip_cmd.c via obd_chip_private.h) */
 const char obd_chip_gate_owner[1];
 
-#define OBD_MAX_SUBSCRIBERS 8
-
-typedef struct
-{
-    QueueHandle_t q;
-    const char   *name;
-    uint32_t      dropped;
-    uint32_t      dropped_logged;
-} obd_sub_t;
-
 /* the claim model (COMMAND / MONITOR / EXCLUSIVE, the transaction hold)
  * lives in obd_chip_claim.c since 2026-10-28 (700-line rule) */
 
@@ -68,23 +57,6 @@ typedef struct
  * autopid to yield the chip while an app drives it (legacy
  * DEV_AUTOPID_ELM327_APP_BIT parity, bench 2026-09-08). */
 static volatile int64_t s_client_touch_us;
-
-/* RX fan-out accounting (GET /api/obd_chip): what the chip printed vs
- * what each subscriber managed to take - the first hop of any "missed
- * frames" question (ATMA floods, 8 KB VT responses). RX-task-only writes. */
-static uint32_t s_rx_bytes;
-static uint32_t s_rx_chunks;
-static uint16_t s_rx_max_chunk;
-
-/* EEPROM guard accounting (obd_chip_guard.h) */
-static uint32_t s_guard_rewrites;
-static uint32_t s_guard_blocked;
-
-/* registry + state: PSRAM .bss (§2) */
-static obd_sub_t s_subs[OBD_MAX_SUBSCRIBERS] EXT_RAM_BSS_ATTR;
-static size_t s_sub_count;
-
-static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED; /* internal: spinlock (the registry) */
 
 static bool s_inited;
 static bool s_started;
@@ -117,161 +89,7 @@ bool obd_core_bringup_wait(uint32_t timeout_ms)
     return (bits & BRINGUP_DONE_BIT) != 0;
 }
 
-/* ---- fan-out ------------------------------------------------------------------ */
-
-void obd_core_fanout(const uint8_t *data, size_t len)
-{
-    obd_chunk_t chunk;
-
-    /* obd_gate: the chip's conversation window ends at the '>' prompt
-       (line start only, response DATA may contain '>' mid-line, see
-       obd_chip_parse.c). Release is idempotent; the max-hold expiry
-       covers monitor-class commands that never print a prompt. */
-    if (obd_gate_enabled())
-    {
-        static uint8_t s_prev = '\n'; /* RX-task-only state */
-
-        for (size_t i = 0; i < len; i++)
-        {
-            if (data[i] == '>' && (s_prev == '\r' || s_prev == '\n'))
-            {
-                obd_gate_release(obd_chip_gate_owner);
-            }
-
-            s_prev = data[i];
-        }
-    }
-
-    chunk.len = (uint16_t)((len > OBD_CHIP_CHUNK_SIZE) ? OBD_CHIP_CHUNK_SIZE
-                                                       : len);
-    memcpy(chunk.data, data, chunk.len);
-
-    s_rx_bytes += chunk.len;
-    s_rx_chunks++;
-
-    if (chunk.len > s_rx_max_chunk)
-    {
-        s_rx_max_chunk = chunk.len;
-    }
-
-    for (size_t i = 0; i < s_sub_count; i++)
-    {
-        if (s_subs[i].q == NULL)
-        {
-            continue;
-        }
-
-        if (xQueueSend(s_subs[i].q, &chunk, 0) != pdTRUE)
-        {
-            s_subs[i].dropped++;
-
-            /* rate limit: one WARN per 100 drops per subscriber (§10) */
-            if (s_subs[i].dropped - s_subs[i].dropped_logged >= 100)
-            {
-                s_subs[i].dropped_logged = s_subs[i].dropped;
-                ESP_LOGW(TAG, "subscriber '%s' dropped %lu chunks",
-                         s_subs[i].name, (unsigned long)s_subs[i].dropped);
-            }
-        }
-    }
-}
-
-esp_err_t obd_chip_subscribe(QueueHandle_t q, const char *name)
-{
-    if (q == NULL)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    esp_err_t err = ESP_ERR_NO_MEM;
-
-    portENTER_CRITICAL(&s_lock);
-
-    for (size_t i = 0; i < OBD_MAX_SUBSCRIBERS; i++)
-    {
-        if (s_subs[i].q == NULL)
-        {
-            s_subs[i].q = q;
-            s_subs[i].name = (name != NULL) ? name : "?";
-            s_subs[i].dropped = 0;
-            s_subs[i].dropped_logged = 0;
-
-            if (i >= s_sub_count)
-            {
-                s_sub_count = i + 1;
-            }
-
-            err = ESP_OK;
-            break;
-        }
-    }
-
-    portEXIT_CRITICAL(&s_lock);
-    return err;
-}
-
-esp_err_t obd_chip_unsubscribe(QueueHandle_t q)
-{
-    esp_err_t err = ESP_ERR_NOT_FOUND;
-
-    portENTER_CRITICAL(&s_lock);
-
-    for (size_t i = 0; i < s_sub_count; i++)
-    {
-        if (s_subs[i].q == q)
-        {
-            s_subs[i].q = NULL;
-            err = ESP_OK;
-            break;
-        }
-    }
-
-    portEXIT_CRITICAL(&s_lock);
-    return err;
-}
-
-uint32_t obd_chip_dropped(QueueHandle_t q)
-{
-    for (size_t i = 0; i < s_sub_count; i++)
-    {
-        if (s_subs[i].q == q)
-        {
-            return s_subs[i].dropped;
-        }
-    }
-
-    return 0;
-}
-
 /* ---- claims: obd_chip_claim.c --------------------------------------------- */
-
-void obd_core_guard_note(obd_guard_t v, const char *cmd, size_t len)
-{
-    char head[40];
-    size_t n = 0;
-
-    for (size_t i = 0; i < len && n < sizeof(head) - 1; i++)
-    {
-        char c = cmd[i];
-
-        head[n++] = (c == '\r' || c == '\n') ? ' ' : c;
-    }
-
-    head[n] = '\0';
-
-    if (v == OBD_GUARD_BLOCKED)
-    {
-        s_guard_blocked++;
-        ESP_LOGW(TAG, "EEPROM guard refused '%s' (ATPP/ATSD/ATCV/STWBR "
-                      "write the chip's EEPROM)", head);
-    }
-    else if (v == OBD_GUARD_REWRITTEN)
-    {
-        s_guard_rewrites++;
-        ESP_LOGD(TAG, "EEPROM guard rewrote '%s' (ATSP->ATTP, ATM1->ATM0)",
-                 head);
-    }
-}
 
 bool obd_chip_is_monitor_cmd(const char *cmd)
 {
@@ -291,72 +109,6 @@ esp_err_t obd_chip_monitor_stop(void)
     return obd_uart_write(&stop, 1);
 }
 
-/* ---- TX ------------------------------------------------------------------------- */
-
-esp_err_t obd_chip_send(const uint8_t *data, size_t len)
-{
-    if (data == NULL || len == 0)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* a write mid-bring-up would interleave with the bare-UART probes:
-       hold early boot-window clients until the chip is negotiated (a
-       zero-cost flag test any time after) */
-    if (!obd_core_bringup_wait(OBD_BRINGUP_WAIT_MS))
-    {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (obd_core_exclusive_held())
-    {
-        return ESP_ERR_INVALID_STATE; /* fw update owns the wire */
-    }
-
-    /* EEPROM guard (obd_chip_guard.h): apps re-send ATSP on every connect
-       and a terminal user can type ATPP, rewrite the two with RAM twins
-       in place, refuse the rest with the ELM "?" the sender expects, so
-       the chip never sees an EEPROM write from a bridge. */
-    uint8_t copy[256];
-    obd_guard_t gv = obd_chip_guard_check((const char *)data, len);
-
-    if (gv == OBD_GUARD_REWRITTEN && len > sizeof(copy))
-    {
-        gv = OBD_GUARD_BLOCKED; /* no scratch for a rewrite that long */
-    }
-
-    if (gv != OBD_GUARD_PASS)
-    {
-        obd_core_guard_note(gv, (const char *)data, len);
-    }
-
-    if (gv == OBD_GUARD_BLOCKED)
-    {
-        static const uint8_t refused[] = "?\r\r>";
-
-        obd_core_fanout(refused, sizeof(refused) - 1);
-        return ESP_OK;
-    }
-
-    if (gv == OBD_GUARD_REWRITTEN)
-    {
-        memcpy(copy, data, len);
-        (void)obd_chip_guard_cmd((char *)copy, len);
-        data = copy;
-    }
-
-    /* obd_gate: a CR submits a command to the chip, that opens a bus
-       conversation, so serialize against the ESP-side ELM engines. May
-       block up to OBD_GATE_WAIT_MS; released when the RX fan-out sees
-       the '>' prompt (or by the max-hold failsafe). */
-    if (memchr(data, '\r', len) != NULL)
-    {
-        (void)obd_gate_acquire(obd_chip_gate_owner, OBD_GATE_WAIT_MS);
-    }
-
-    return obd_uart_write(data, len);
-}
-
 /* ---- observability (GET /api/obd_chip) ----------------------------------------- */
 
 esp_err_t obd_chip_get_stats(obd_chip_stats_t *out)
@@ -374,39 +126,22 @@ esp_err_t obd_chip_get_stats(obd_chip_stats_t *out)
     int claim = obd_core_claim_state();
 
     out->claim = CLAIMS[(claim >= 0 && claim <= 3) ? claim : 0];
-    out->rx_bytes = s_rx_bytes;
-    out->rx_chunks = s_rx_chunks;
-    out->rx_max_chunk = s_rx_max_chunk;
+    obd_fanout_stats_t fs;
+
+    obd_core_fanout_stats(&fs);
+    out->rx_bytes = fs.rx_bytes;
+    out->rx_chunks = fs.rx_chunks;
+    out->rx_max_chunk = fs.rx_max_chunk;
     out->client_idle_ms = obd_chip_client_idle_ms();
-    out->guard_rewrites = s_guard_rewrites;
-    out->guard_blocked = s_guard_blocked;
+    out->guard_rewrites = fs.guard_rewrites;
+    out->guard_blocked = fs.guard_blocked;
     out->protocol_saves = obd_cmd_protocol_saves();
+    out->memory_off = fs.memory_off;
+    out->app_resets = fs.app_resets;
+    out->hidden_bytes = fs.hidden_bytes;
     obd_uart_get_stats(&out->tx_bytes, &out->rx_overflows,
                        &out->rx_buffered);
     return ESP_OK;
-}
-
-size_t obd_chip_get_subscribers(obd_chip_sub_stats_t *out, size_t max)
-{
-    size_t n = 0;
-
-    for (size_t i = 0; i < s_sub_count && n < max; i++)
-    {
-        QueueHandle_t q = s_subs[i].q;
-
-        if (q == NULL)
-        {
-            continue;
-        }
-
-        out[n].name = s_subs[i].name;
-        out[n].dropped = s_subs[i].dropped;
-        out[n].queued = (uint32_t)uxQueueMessagesWaiting(q);
-        out[n].depth = out[n].queued + (uint32_t)uxQueueSpacesAvailable(q);
-        n++;
-    }
-
-    return n;
 }
 
 /* ---- external-client activity clock ------------------------------------------- */

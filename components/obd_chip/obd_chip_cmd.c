@@ -237,10 +237,63 @@ static esp_err_t request_run(const char *cmd, char *resp, size_t resp_len,
     return ESP_OK;
 }
 
+/**
+ * The chip's memory function is ON after every reset (the vendor's pin
+ * strap; no non-volatile switch exists): with it on, a protocol switch that
+ * a request then answers on is written to the chip's non-volatile protocol
+ * store, RAM-only `ATTP` or not (bench 2026-11-01, issue #1023: the Audi
+ * MEB profile flipped 6 <-> 7 seven times per poll cycle, the store rated
+ * for 10k cycles). Legacy's AutoPID sent `atm0` at every start; v6 never
+ * did. So every protocol switch on this path gets its own `ATM0` first,
+ * whatever reset happened in between (the bring-up's, a nap's, an app's
+ * `ATZ`, the chip's own brown-out). One word, one `OK`, about 1 ms.
+ */
+static void memory_off_first(TickType_t timeout)
+{
+    char resp[32];
+    esp_err_t err = request_run("ATM0", resp, sizeof(resp), timeout, true);
+
+    if (err == ESP_OK && strstr(resp, "OK") != NULL)
+    {
+        obd_core_memory_off_note();
+    }
+    else
+    {
+        ESP_LOGD(TAG, "ATM0 ahead of the protocol switch: %s ('%.12s')",
+                 esp_err_to_name(err), (err == ESP_OK) ? resp : "");
+    }
+}
+
 esp_err_t obd_chip_request(const char *cmd, char *resp, size_t resp_len,
                            TickType_t timeout)
 {
-    return request_run(cmd, resp, resp_len, timeout, true);
+    if (!obd_parse_sets_protocol(cmd))
+    {
+        return request_run(cmd, resp, resp_len, timeout, true);
+    }
+
+    /* the bring-up gate first, as a plain request would (the hold below
+       must not be taken while the bare-UART probes run) */
+    if (!obd_core_bringup_wait(pdTICKS_TO_MS(timeout)))
+    {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* the pair inside one hold, so no other requester lands between the
+       ATM0 and the switch; a caller inside its own transaction keeps it
+       (begin() refuses a nested one, and its end() is not ours to call) */
+    bool own_txn = (obd_chip_txn_begin(timeout) == ESP_OK);
+
+    memory_off_first(timeout);
+
+    esp_err_t err = request_run(cmd, resp, resp_len, timeout, true);
+
+    if (own_txn)
+    {
+        obd_chip_txn_end();
+    }
+
+    return err;
 }
 
 esp_err_t obd_chip_protocol_save(char proto)

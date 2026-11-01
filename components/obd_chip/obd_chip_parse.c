@@ -247,6 +247,145 @@ bool obd_parse_is_monitor_cmd(const char *cmd)
     return false;
 }
 
+/* ---- protocol switches (issue #1023, bench 2026-11-01) ----------------------
+ * The chip's memory function (ELM `AT M1` / `AT M0`) is ON after every reset
+ * (the vendor's pin 51 strap; nothing persists the switch). With it on, a
+ * protocol SWITCH that a request then answers on is written to the chip's
+ * non-volatile protocol store, RAM-only `ATTP` or not, and the MIC3624's
+ * EEPROM is rated for 10k cycles. The request engine sends `ATM0` ahead of
+ * every word this names; the words themselves go out as they are. */
+
+bool obd_parse_sets_protocol(const char *cmd)
+{
+    /* as the chip reads it: spaces dropped, any case, up to the CR (a ';'
+       ends it too: the first element of a chain) */
+    char c[10];
+    size_t n = 0;
+
+    if (cmd == NULL)
+    {
+        return false;
+    }
+
+    for (const char *p = cmd;
+         *p != '\0' && *p != '\r' && *p != '\n' && *p != ';'; p++)
+    {
+        if (*p == ' ' || *p == '\t')
+        {
+            continue;
+        }
+
+        if (n >= sizeof(c) - 1)
+        {
+            return false; /* longer than any protocol switch */
+        }
+
+        c[n++] = (char)toupper((unsigned char)*p);
+    }
+
+    c[n] = '\0';
+
+    const char *arg = NULL;
+    size_t min_len = 1;
+    size_t max_len = 2;
+
+    if (n > 4 && c[0] == 'A' && c[1] == 'T' && (c[2] == 'S' || c[2] == 'T') &&
+        c[3] == 'P')
+    {
+        arg = c + 4; /* ATSPh, ATTPh, ATSPAh, ATTPAh, ATSP00 (the search) */
+    }
+    else if (n > 3 && c[0] == 'S' && c[1] == 'T' && c[2] == 'P')
+    {
+        arg = c + 3; /* STPhh: the STN form, two digits (STPC/STPO are not) */
+        min_len = 2;
+    }
+    else if (n > 3 && c[0] == 'V' && c[1] == 'T' && c[2] == 'P')
+    {
+        arg = c + 3; /* VTPhhh: the vendor form */
+        max_len = 3;
+    }
+
+    if (arg == NULL || strlen(arg) < min_len || strlen(arg) > max_len)
+    {
+        return false;
+    }
+
+    for (const char *a = arg; *a != '\0'; a++)
+    {
+        if (!isxdigit((unsigned char)*a))
+        {
+            return false; /* STPR, STPBR, VTPRON, ATTPG: reads and junk */
+        }
+    }
+
+    return true;
+}
+
+obd_reset_t obd_parse_reset_word(const char *buf, size_t len)
+{
+    char c[6];
+    size_t n = 0;
+    size_t i = 0;
+
+    if (buf == NULL)
+    {
+        return OBD_RESET_NONE;
+    }
+
+    /* line ends and blanks ahead of the word */
+    while (i < len && (buf[i] == '\r' || buf[i] == '\n' || buf[i] == ' ' ||
+                       buf[i] == '\t'))
+    {
+        i++;
+    }
+
+    /* the word: blanks dropped, upper case, up to its line end */
+    for (; i < len && buf[i] != '\r' && buf[i] != '\n'; i++)
+    {
+        if (buf[i] == ' ' || buf[i] == '\t')
+        {
+            continue;
+        }
+
+        if (n >= sizeof(c) - 1)
+        {
+            return OBD_RESET_NONE; /* longer than any reset word */
+        }
+
+        c[n++] = (char)toupper((unsigned char)buf[i]);
+    }
+
+    c[n] = '\0';
+
+    /* nothing but line ends and blanks may follow: one command per chunk
+       (a second command behind a reset is lost in the reset anyway) */
+    for (; i < len; i++)
+    {
+        if (buf[i] != '\r' && buf[i] != '\n' && buf[i] != ' ' &&
+            buf[i] != '\t')
+        {
+            return OBD_RESET_NONE;
+        }
+    }
+
+    if (strcmp(c, "ATZ") == 0)
+    {
+        return OBD_RESET_ATZ;
+    }
+
+    if (strcmp(c, "ATWS") == 0)
+    {
+        return OBD_RESET_ATWS;
+    }
+
+    if (strcmp(c, "ATD") == 0)
+    {
+        return OBD_RESET_ATD; /* not ATD0 / ATD1 / ATDP / ATDPN */
+    }
+
+    return OBD_RESET_NONE;
+}
+
 /* ---- firmware file iteration ------------------------------------------------ */
 
 void obd_fw_iter_init(obd_fw_iter_t *it, const char *data, size_t len)

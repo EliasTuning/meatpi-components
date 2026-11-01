@@ -428,6 +428,28 @@ esp_err_t obd_bringup_run(int *active_baud)
        provisioning (task §11-5 answered by meatpi: "follow legacy init") */
     bare_probe("ATE0\r", resp, sizeof(resp), 1000);
     chip_provision(cfg);
+
+    /* the memory function off (issue #1023, bench 2026-11-01): it is ON
+       after every reset (the vendor's pin strap) and then writes every
+       protocol switch a request answers on into the chip's EEPROM-backed
+       protocol store; legacy's AutoPID sent `atm0` at every start, v6 never
+       did. Here, after the provisioning's own ATZ, for every reset this
+       sequence performs; the request engine repeats it ahead of every
+       protocol switch (obd_chip_cmd.c), so a chip that stays silent here
+       is covered at its first switch. */
+    bool mem_off = bare_probe("ATM0\r", resp, sizeof(resp), 1000) &&
+                   strstr(resp, "OK") != NULL;
+
+    if (mem_off)
+    {
+        obd_core_memory_off_note();
+    }
+    else
+    {
+        ESP_LOGW(TAG, "ATM0 not acknowledged ('%.16s'): the chip may store "
+                      "a protocol change until the first switch", resp);
+    }
+
     bare_probe("ATI\r", resp, sizeof(resp), 1500); /* identity for the log */
 
     esp_err_t err = obd_uart_rx_task_start();
@@ -437,7 +459,7 @@ esp_err_t obd_bringup_run(int *active_baud)
         return err;
     }
 
-    ESP_LOGI(TAG, "started: chip '%s' at %d baud (ready=%d)", resp,
-             *active_baud, obd_pin_ready());
+    ESP_LOGI(TAG, "started: chip '%s' at %d baud (ready=%d, memory %s)", resp,
+             *active_baud, obd_pin_ready(), mem_off ? "off" : "on");
     return ESP_OK;
 }

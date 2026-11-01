@@ -80,6 +80,28 @@ bool obd_parse_is_chip_error(const char *resp);
 /** Case/whitespace-insensitive prefix classification of monitor commands. */
 bool obd_parse_is_monitor_cmd(const char *cmd);
 
+/** True when @p cmd selects a protocol: `ATSPh` / `ATTPh` (with the `A`
+ *  and `00` forms), STN `STPhh`, vendor `VTPhhh`; spaces and case as the
+ *  chip reads them, a ';' ends the word. Not the reads (`STPR`, `STPBR`,
+ *  `ATDPN`). The request engine sends `ATM0` ahead of each one (issue
+ *  #1023, bench 2026-11-01). Pure, host-tested. */
+bool obd_parse_sets_protocol(const char *cmd);
+
+/** An app's reset word as the whole chunk (issue #1023, 2026-11-01): `ATZ`,
+ *  `ATWS` or `ATD`, spaces and case as the chip reads them, line ends and
+ *  blanks around it allowed, nothing else in the chunk (a chunk carrying a
+ *  second command is not one). The bridge path sends ATZ as ATWS and puts
+ *  ATM0 behind the answer, hidden. Pure, host-tested. */
+typedef enum
+{
+    OBD_RESET_NONE = 0,
+    OBD_RESET_ATZ,
+    OBD_RESET_ATWS,
+    OBD_RESET_ATD,
+} obd_reset_t;
+
+obd_reset_t obd_parse_reset_word(const char *buf, size_t len);
+
 /* ---- STSLCS sleep-config (obd_chip_stslcs.c, pure, host-testable) -----------
  * Ported from legacy main/obd.c: the sscanf patterns are the accepted
  * chip-output grammar. */
@@ -188,6 +210,28 @@ void      obd_core_release(void);
  *  `eeprom_guard`): called by every TX path that ran the guard with a
  *  non-PASS verdict; @p cmd/@p len is the text as the caller received it. */
 void obd_core_guard_note(obd_guard_t v, const char *cmd, size_t len);
+
+/** One `ATM0` the driver sent and the chip acknowledged (the bring-up's,
+ *  or the request engine's ahead of a protocol switch): GET /api/obd_chip
+ *  `eeprom_guard.memory_off` (issue #1023, 2026-11-01). */
+void obd_core_memory_off_note(void);
+
+/** The fan-out's and the raw TX path's counters (obd_chip_fanout.c), for
+ *  obd_chip_get_stats(): the RX accounting, the EEPROM guard, the ATM0
+ *  words, the app resets intercepted and the bytes hidden behind them. */
+typedef struct
+{
+    uint32_t rx_bytes;
+    uint32_t rx_chunks;
+    uint16_t rx_max_chunk;
+    uint32_t guard_rewrites;
+    uint32_t guard_blocked;
+    uint32_t memory_off;
+    uint32_t app_resets;
+    uint32_t hidden_bytes;
+} obd_fanout_stats_t;
+
+void obd_core_fanout_stats(obd_fanout_stats_t *out);
 
 /** obd_gate owner identity for the MIC chip (address only, defined in
  *  obd_chip.c, shared with the request engine in obd_chip_cmd.c). */

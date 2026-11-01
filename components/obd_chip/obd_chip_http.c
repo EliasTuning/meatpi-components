@@ -91,7 +91,8 @@ static esp_err_t obd_chip_get_handler(httpd_req_t *req)
                           "{\"ready\":%s,\"claim\":\"%s\","
                           "\"client_idle_ms\":%lu,\"baud\":%d,"
                           "\"eeprom_guard\":{\"rewrites\":%lu,\"blocked\":%lu,"
-                          "\"protocol_saves\":%lu},"
+                          "\"protocol_saves\":%lu,\"memory_off\":%lu,"
+                          "\"app_resets\":%lu,\"hidden_bytes\":%lu},"
                           "\"uart\":{\"rx_bytes\":%lu,\"rx_chunks\":%lu,"
                           "\"rx_max_chunk\":%u,\"rx_overflows\":%lu,"
                           "\"rx_buffered\":%lu,\"tx_bytes\":%lu},"
@@ -108,6 +109,9 @@ static esp_err_t obd_chip_get_handler(httpd_req_t *req)
                           (unsigned long)st.guard_rewrites,
                           (unsigned long)st.guard_blocked,
                           (unsigned long)st.protocol_saves,
+                          (unsigned long)st.memory_off,
+                          (unsigned long)st.app_resets,
+                          (unsigned long)st.hidden_bytes,
                           (unsigned long)st.rx_bytes,
                           (unsigned long)st.rx_chunks,
                           (unsigned)st.rx_max_chunk,
