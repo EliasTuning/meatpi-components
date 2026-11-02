@@ -104,6 +104,49 @@ static bool name_is_multi(const char *name, const char *const *names,
     return false;
 }
 
+bool bm_bridges_use_endpoint(const cJSON *bridges, const char *endpoint)
+{
+    const cJSON *item = NULL;
+
+    cJSON_ArrayForEach(item, bridges)
+    {
+        const cJSON *a = cJSON_GetObjectItemCaseSensitive(item, "a");
+        const cJSON *b = cJSON_GetObjectItemCaseSensitive(item, "b");
+
+        if ((cJSON_IsString(a) && strcmp(a->valuestring, endpoint) == 0) ||
+            (cJSON_IsString(b) && strcmp(b->valuestring, endpoint) == 0))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool bm_bridges_add_ble_default(cJSON *bridges)
+{
+    if (!cJSON_IsArray(bridges) || bm_bridges_use_endpoint(bridges, "ble") ||
+        cJSON_GetArraySize(bridges) >= BRIDGE_MANAGER_MAX_BRIDGES)
+    {
+        return false;
+    }
+
+    cJSON *row = cJSON_CreateObject();
+
+    if (row == NULL)
+    {
+        return false;
+    }
+
+    cJSON_AddStringToObject(row, "name", "br_ble_obd");
+    cJSON_AddStringToObject(row, "a", "obd");
+    cJSON_AddStringToObject(row, "b", "ble");
+    cJSON_AddStringToObject(row, "translator", "raw");
+    cJSON_AddBoolToObject(row, "enabled", true);
+    cJSON_AddItemToArray(bridges, row);
+    return true;
+}
+
 esp_err_t bm_validate_bridges(const cJSON *bridges,
                               const char *const *endpoint_names,
                               const bool *endpoint_multi, int ep_count,

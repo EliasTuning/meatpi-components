@@ -87,6 +87,15 @@ esp_err_t bm_validate_bridges(const cJSON *bridges,
                               const char *const *translator_names,
                               int tr_count, char *err, size_t err_len);
 
+/** Does any row of @p bridges (a settings array) name @p endpoint on either
+ *  end, enabled or not? Pure. */
+bool bm_bridges_use_endpoint(const cJSON *bridges, const char *endpoint);
+
+/** The v1 -> v2 migration (2026-11-02): append the factory Bluetooth bridge
+ *  `br_ble_obd` (obd <-raw-> ble, enabled) to @p bridges when no row uses the
+ *  `ble` end and the table has room. True when a row was added. Pure. */
+bool bm_bridges_add_ble_default(cJSON *bridges);
+
 /* ---- registries (bridge_manager.c) ------------------------------------------ */
 
 struct bridge_endpoint_s;

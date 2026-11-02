@@ -1362,6 +1362,7 @@ const LABELS={
   /* ble_manager */
   passkey:"Pairing passkey",tx_power_dbm:"TX power (dBm)",pairing_at_boot:"Allow pairing at boot",bonding:"Remember paired devices",
   sc_only:"Secure connections only",conn_profile:"Connection profile",
+  "ble_manager.address":"Bluetooth address",security_request:"Ask the phone to pair at connect",
   ble_ram_profile:"Memory profile",ble_max_act:"Controller activities",ble_acl_tx_bufs:"Static ACL TX buffers",
   ble_scan_cache:"Scan duplicate cache",
   /* can_manager (the obd_chip group has no UI at all: meatpi 2026-09-07) */
@@ -1518,6 +1519,8 @@ const HELP={
   ble_acl_tx_bufs:"Packet buffers reserved when Bluetooth starts, about 270 bytes each. Fewer than 12 risks silently lost notifications when memory runs low.",
   ble_scan_cache:"Entries of the scan duplicate filter. 0 turns the scan feature off: this device never scans.",
   bonding:"Keep pairing keys so a phone reconnects without re-entering the passkey.",
+  "ble_manager.address":"Public is the device's fixed hardware address, as firmware 4.x advertised it: presence detection and apps that remember the address work. Private is a random address that changes at every reconnect and every 15 minutes; paired phones still find the device.",
+  security_request:"The device asks the phone to pair the moment it connects, as firmware 4.x did, so an app's first command already goes over a paired link. Switch off only for a Windows app that runs its own pairing dialog.",
   ip_mode:"Automatic (DHCP) works for almost every network.",
   sta_ip_mode:"Automatic (DHCP) works for almost every network.",
 };
@@ -1534,6 +1537,7 @@ const ENUMS={
   device_class:{ncm:"CDC-NCM (Linux / macOS / Windows 11)",rndis:"RNDIS (older Windows)",cdc:"CDC serial"},
   conn_profile:{ios:"iOS",android_fast:"Android (fast)"},pause_mode:{all:"Pause everything",requests_only:"Pause requests only"},
   ble_ram_profile:{full:"Full (BLE 5 options)",lean:"Lean (recommended)",custom:"Custom"},
+  "ble_manager.address":{public:"Public (fixed hardware address)",private:"Private (changes at every reconnect)"},
   "uds_manager.backend":{auto:"Automatic",obd_chip:"OBD chip",isotp:"ISO-TP"},
   "mqtt_manager.connect_on":{wifi:"The WiFi station is connected (home network)",any:"Any network (WiFi, USB Ethernet, dongle)"},
   data_mode:{changed:"Changed values only",full:"All values"},autopid_log:{off:"Off",changed:"When a value changes",all:"Every poll"},
@@ -2522,7 +2526,7 @@ PAGES.settings=async(view,sub)=>{
       const keys=Object.keys((bs&&bs.properties)||{});
       let leanSync=()=>{};
       const rows=await settingsForm("ble_manager",null,{values:bv,schema:bs,
-        advanced:["tx_power_dbm","pairing_at_boot","bonding","sc_only","conn_profile",...BLE_KNOBS],
+        advanced:["tx_power_dbm","pairing_at_boot","bonding","sc_only","security_request","conn_profile",...BLE_KNOBS],
         visible:st=>!st.enabled?["enabled"]:(st.ble_ram_profile==="custom"?null:keys.filter(k=>!BLE_KNOBS.includes(k))),
         onDirty:()=>leanSync()});
       const leanNote=note("","Lean runs legacy advertising on the 1M PHY, one phone at a time. Choose Full for 2M, coded PHY or extended advertising.");
@@ -2530,10 +2534,20 @@ PAGES.settings=async(view,sub)=>{
       const rowOf=k=>rows.find(r=>r.dataset&&r.dataset.key===k);
       const advRow=rowOf("advertising");
       if(advRow)rows.splice(rows.indexOf(advRow)+1,0,leanNote);
+      /* the data pipe needs a connection (2026-11-02, Ali): the factory br_ble_obd
+         carries it; a user who removed it is told here, since an OBD app that pairs
+         would get no answer at all */
+      const bmv=await api("/api/settings/bridge_manager").catch(()=>null);
+      const bleBridged=()=>!!(bmv&&(bmv.bridges||[]).some(b=>b.enabled&&(b.a==="ble"||b.b==="ble")));
+      const bridgeNote=note("warn",["No connection carries the Bluetooth data pipe, so an OBD app that pairs gets no answer. Add one on the ",h("a",{href:"#/settings/connections"},"Connections page")," (OBD chip to Bluetooth (BLE))."]);
+      bridgeNote.dataset.key="ble_bridge_note";
+      const enRow=rowOf("enabled");
+      if(enRow)rows.splice(rows.indexOf(enRow)+1,0,bridgeNote);
       leanSync=()=>{const lean=String(bv.ble_ram_profile||"lean")==="lean";
         if(lean&&(bv.advertising!=="legacy"||bv.phy!=="1m")){bv.advertising="legacy";bv.phy="1m";rows.load();store.stage("ble_manager",bv);}
         for(const k of["advertising","phy"]){const r=rowOf(k);const s=r&&r.querySelector("select");if(s)s.disabled=lean;}
-        leanNote.style.display=(lean&&bv.enabled)?"":"none";};
+        leanNote.style.display=(lean&&bv.enabled)?"":"none";
+        bridgeNote.style.display=(bv.enabled&&bmv&&!bleBridged())?"":"none";};
       leanSync();
       return rows;};
     const[apRows,staRows,bleRows,canRows,mqttRows,imRows,j1939Rows]=await Promise.all([

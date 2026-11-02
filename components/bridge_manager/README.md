@@ -53,7 +53,7 @@ one translator component. No combinatorial code.
   PRODUCING endpoint drops-and-counts (obd fan-out drops, socket rx_drops).
   A bridge can never block its faster side indefinitely.
 
-## Settings (`"bridge_manager"`, version 1)
+## Settings (`"bridge_manager"`, version 2)
 
 `bridges`: bounded array (maxItems `BRIDGE_MANAGER_MAX_BRIDGES`, 6) of
 `{name, a, b, translator (default "raw"), enabled (default false)}`.
@@ -80,8 +80,18 @@ register; a single-stream provider refuses the second subscribe at build
 time and that bridge degrades alone). Defaults (2026-07-18, legacy
 parity): `br_obd = obd <-raw-> ws_obd` (web-UI terminal), `br_tcp_obd =
 obd0 <-raw-> obd` (TCP:35000, the classic ELM327-WiFi-adapter convention
-192.168.0.10:35000) and `br_usb_obd = usb_obd <-raw-> obd` (USB port-B
-serial ELM327), ALL enabled on the obd fan-out. A bridge naming an
+192.168.0.10:35000), `br_usb_obd = usb_obd <-raw-> obd` (USB port-B
+serial ELM327) and, since version 2 (2026-11-02, Ali: as 4.5x behaved),
+`br_ble_obd = obd <-raw-> ble` (the Bluetooth data pipe FFF1/FFF2: on
+4.x Bluetooth on WAS the ELM pipe to the chip, and a v6 user who paired an
+app got a link that answered nothing until this row existed), ALL enabled
+on the obd fan-out. Migration v1 to v2 (`on_migrate`, the pure
+`bm_bridges_add_ble_default`, host-tested): a stored list without any row
+on the `ble` end gets `br_ble_obd` appended once; a list that already
+uses `ble` (a `br_ble_can` row, enabled or not) and a full table are left
+alone (one W line for the full table). A user who removes the row again
+keeps it removed. The `ble` end carries ONE enabled bridge: a CAN-over-BLE
+row disables this one first. A bridge naming an
 endpoint or translator its composition never registered degrades ALONE
 at start: one **W** line (not E: the health net must not latch a fault
 at every boot for a row the user can see and fix), the bridge skipped,

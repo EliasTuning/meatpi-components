@@ -150,6 +150,11 @@ const char *blm_ident_ram_check(blm_ram_profile_t profile, uint8_t adv_mode,
  *  it chose a BLE 5 option (kept), NULL = the schema default otherwise. */
 const char *blm_ident_ram_migrated(uint8_t adv_mode, uint8_t phy_mask);
 
+/** `address` word -> the private (rotating) address? "private" = true,
+ *  "public", NULL and anything unknown = false (the default, 4.x parity). */
+bool blm_ident_address_private(const char *word);
+const char *blm_ident_address_word(bool private_address);
+
 /* ---- settings (ble_manager_settings.c) --------------------------------------- */
 
 typedef struct
@@ -160,6 +165,12 @@ typedef struct
                                   re-pairing); false = per-session only */
     bool     sc_only;          /* v3: require LE Secure Connections;
                                   refuses the legacy-pairing downgrade */
+    bool     address_private;  /* v6: advertise with a rotating resolvable
+                                  private address; false = the public
+                                  hardware address (4.x, the default)  */
+    bool     security_request; /* v6: ask the central to pair at connect
+                                  (4.x); false = wait for its first secured
+                                  access (a Windows app's own ceremony)  */
     uint32_t passkey;
     int      tx_power_dbm;
     uint16_t conn_min_units;   /* requested connection window, 1.25 ms units */
@@ -229,6 +240,11 @@ void      blm_tx_on_indicate_done(int status); /* GAP NOTIFY_TX, indication     
 /** The live link's PHYs (1 = 1M, 2 = 2M, 3 = coded; 0 = not connected /
  *  not NimBLE). */
 void      blm_gatt_phy(uint8_t *tx, uint8_t *rx);
+/** The device's public Bluetooth address as "AA:BB:CC:DD:EE:FF" (the one it
+ *  advertises with under `address` = public, and the identity a bonded phone
+ *  resolves the private address to). ESP_ERR_INVALID_STATE before the stack
+ *  is up. */
+esp_err_t blm_gatt_address(char *buf, size_t len);
 
 /* ---- advertising sets (ble_manager_gatt_adv.c, NimBLE only) ------------------- */
 

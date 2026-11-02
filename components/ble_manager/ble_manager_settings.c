@@ -42,6 +42,19 @@ static const settings_field_t FIELDS[] =
     SETTINGS_INT("passkey", 0, 999999, 123456),
     SETTINGS_INT("tx_power_dbm", -12, 9, 9),
     SETTINGS_BOOL("pairing_at_boot", true),
+    /* v6 (2026-11-02, Ali: behave as firmware 4.5x did). `address` = the
+       address the device advertises with: `public` = the fixed hardware
+       address (the station MAC + 2, what 4.x advertised: Home Assistant
+       presence by MAC, an app that remembers the address), `private` = a
+       resolvable private address that changes at every advertising restart
+       and every 15 minutes (the v6 betas before this). A bond holds the
+       public identity either way, so the switch keeps paired phones.
+       `security_request` = the device asks the phone to pair right at the
+       connect (4.x: esp_ble_set_encryption on connect while pairing was
+       allowed), so an app's first write lands on a secured link; off for a
+       Windows app with its own pairing ceremony (the 2026-09-21 finding). */
+    SETTINGS_STR_ENUM("address", "public,private", "public"),
+    SETTINGS_BOOL("security_request", true),
     /* v2: bonding = keep long-term keys so a paired phone reconnects
        without re-entering the passkey. Disable for a stricter posture:
        the link is still encrypted+MITM-protected per session, but no
@@ -126,6 +139,10 @@ static esp_err_t on_apply(const cJSON *settings)
         cJSON_GetObjectItemCaseSensitive(settings, "bonding"));
     s_cfg.sc_only = !cJSON_IsFalse(
         cJSON_GetObjectItemCaseSensitive(settings, "sc_only"));
+    /* v6: the advertised address and the pairing request at connect */
+    s_cfg.address_private = blm_ident_address_private(get_str(settings, "address"));
+    s_cfg.security_request = !cJSON_IsFalse(
+        cJSON_GetObjectItemCaseSensitive(settings, "security_request"));
     v = cJSON_GetObjectItemCaseSensitive(settings, "passkey");
     s_cfg.passkey = cJSON_IsNumber(v) ? (uint32_t)v->valuedouble : 123456;
     v = cJSON_GetObjectItemCaseSensitive(settings, "tx_power_dbm");
@@ -185,9 +202,13 @@ static esp_err_t on_validate(const cJSON *settings, char *err, size_t err_len)
    `advertising`; every one is covered by its fill-missing default (the
    historic behaviour). v4 -> v5 (2026-10-31) added the memory profile:
    a device that chose a BLE 5 option keeps it on the Full profile, the
-   others take the new default (Lean) through the fill-missing rule. The
-   hook must exist in any case: without it a version bump discards ALL
-   stored settings and resets to defaults (settings_manager_boot §2). */
+   others take the new default (Lean) through the fill-missing rule.
+   v5 -> v6 (2026-11-02) added `address` and `security_request`: every
+   stored object takes the defaults (public, on), the 4.x behaviour, through
+   the fill-missing rule; a device that ran the v6 betas with the private
+   address keeps its bonds (they hold the public identity). The hook must
+   exist in any case: without it a version bump discards ALL stored
+   settings and resets to defaults (settings_manager_boot §2). */
 static esp_err_t on_migrate(uint32_t from_version, cJSON *settings)
 {
     if (from_version < 5 && settings != NULL &&
@@ -211,10 +232,11 @@ esp_err_t blm_settings_register(void)
     static const settings_descriptor_t DESC =
     {
         .name = "ble_manager",
-        .version = 5, /* v5: +ble_ram_profile and its custom knobs (a stored
-                         BLE 5 choice migrates to Full); v4: +phy,
-                         +advertising (BLE 5 as a choice, 4.2 defaults);
-                         v3: +sc_only; v2: +bonding */
+        .version = 6, /* v6: +address, +security_request (4.x parity, fill-
+                         missing defaults); v5: +ble_ram_profile and its
+                         custom knobs (a stored BLE 5 choice migrates to
+                         Full); v4: +phy, +advertising (BLE 5 as a choice,
+                         4.2 defaults); v3: +sc_only; v2: +bonding */
         .fields = FIELDS,
         .field_count = sizeof(FIELDS) / sizeof(FIELDS[0]),
         .on_apply = on_apply,

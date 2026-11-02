@@ -186,8 +186,69 @@ static void test_duplicate_bridge_name_rejected(void)
     TEST_ASSERT_NOT_NULL(strstr(err, "duplicate"));
 }
 
+/* v1 -> v2 (2026-11-02): the Bluetooth bridge appended to a stored list
+   without one; a list that uses `ble` (even disabled) and a full table are
+   left alone */
+static void test_ble_default_added_when_absent(void)
+{
+    cJSON *arr = cJSON_Parse(
+        "[{\"name\":\"br_obd\",\"a\":\"obd\",\"b\":\"ws_obd\",\"enabled\":true}]");
+
+    TEST_ASSERT_TRUE(bm_bridges_add_ble_default(arr));
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(arr));
+    TEST_ASSERT_TRUE(bm_bridges_use_endpoint(arr, "ble"));
+
+    const cJSON *row = cJSON_GetArrayItem(arr, 1);
+
+    TEST_ASSERT_EQUAL_STRING("br_ble_obd",
+        cJSON_GetObjectItemCaseSensitive(row, "name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("obd", cJSON_GetObjectItemCaseSensitive(row, "a")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("ble", cJSON_GetObjectItemCaseSensitive(row, "b")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(row, "enabled")));
+    /* a second call changes nothing */
+    TEST_ASSERT_FALSE(bm_bridges_add_ble_default(arr));
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(arr));
+    cJSON_Delete(arr);
+}
+
+static void test_ble_default_left_alone_when_ble_is_used(void)
+{
+    cJSON *arr = cJSON_Parse(
+        "[{\"name\":\"br_ble_can\",\"a\":\"can\",\"b\":\"ble\",\"enabled\":false}]");
+
+    TEST_ASSERT_FALSE(bm_bridges_add_ble_default(arr));
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(arr));
+    cJSON_Delete(arr);
+}
+
+static void test_ble_default_left_alone_when_full(void)
+{
+    char json[512] = "[";
+
+    for (int i = 0; i < BRIDGE_MANAGER_MAX_BRIDGES; i++)
+    {
+        char row[80];
+
+        snprintf(row, sizeof(row), "%s{\"name\":\"b%d\",\"a\":\"obd\",\"b\":\"tcp%d\"}",
+                 i ? "," : "", i, i);
+        strcat(json, row);
+    }
+
+    strcat(json, "]");
+
+    cJSON *arr = cJSON_Parse(json);
+
+    TEST_ASSERT_NOT_NULL(arr);
+    TEST_ASSERT_FALSE(bm_bridges_add_ble_default(arr));
+    TEST_ASSERT_EQUAL(BRIDGE_MANAGER_MAX_BRIDGES, cJSON_GetArraySize(arr));
+    cJSON_Delete(arr);
+}
+
 void run_config_tests(void)
 {
+    RUN_TEST(test_ble_default_added_when_absent);
+    RUN_TEST(test_ble_default_left_alone_when_ble_is_used);
+    RUN_TEST(test_ble_default_left_alone_when_full);
     RUN_TEST(test_parse_defaults_raw_disabled);
     RUN_TEST(test_valid_bridge_set_accepted);
     RUN_TEST(test_unknown_endpoint_accepted_at_runtime);

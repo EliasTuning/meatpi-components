@@ -38,7 +38,7 @@ idf_component_register(
     # deliberately NOT compiled.)
     # flash_jobs: the NimBLE host task runs on a PSRAM stack, its NVS work
     # on the worker (2026-11-01)
-    PRIV_REQUIRES bt settings_manager log_manager dev_status_manager
+    PRIV_REQUIRES bt settings_manager log_manager dev_status_manager esp_timer
                   http_server_manager esp_http_server espressif__cjson
                   flash_jobs
 )

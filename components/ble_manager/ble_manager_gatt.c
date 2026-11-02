@@ -36,6 +36,7 @@
 #include "esp_bt_defs.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
+#include "esp_mac.h"
 #include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
 #include "esp_log.h"
@@ -771,4 +772,28 @@ void blm_gatt_allow_pairing(bool allow)
     {
         esp_ble_set_encryption(s_last_remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
     }
+}
+
+esp_err_t blm_gatt_address(char *buf, size_t len)
+{
+    /* Bluedroid A/B backend: it advertises with the public address always
+       (own_addr_type BLE_ADDR_TYPE_PUBLIC); the `address` setting's private
+       word is the NimBLE backend's. The public address is the chip's
+       Bluetooth MAC from the efuse, readable with the stack down. */
+    uint8_t mac[6];
+
+    if (buf == NULL || len < 18)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (esp_read_mac(mac, ESP_MAC_BT) != ESP_OK)
+    {
+        buf[0] = '\0';
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    snprintf(buf, len, "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return ESP_OK;
 }

@@ -273,3 +273,17 @@ const char *blm_ident_ram_migrated(uint8_t adv_mode, uint8_t phy_mask)
        defaults take the schema default (Lean) through the fill-missing rule */
     return (adv_mode != BLM_ADV_LEGACY || phy_mask != BLM_PHY_1M) ? "full" : NULL;
 }
+
+/* ---- the advertised address (v6, 2026-11-02) ------------------------------------ */
+
+bool blm_ident_address_private(const char *word)
+{
+    /* public is the default and the 4.x behaviour: only the exact word
+       "private" asks for the rotating resolvable private address */
+    return word != NULL && strcmp(word, "private") == 0;
+}
+
+const char *blm_ident_address_word(bool private_address)
+{
+    return private_address ? "private" : "public";
+}

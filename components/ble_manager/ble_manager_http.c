@@ -73,6 +73,19 @@ static esp_err_t status_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(o, "pairing_enabled", ble_manager_pairing_is_enabled());
     cJSON_AddNumberToObject(o, "max_payload", blm_gatt_max_data());
 
+    /* v6 (2026-11-02): the address the device advertises with and its kind.
+       `address` is the public (hardware) address: the one on air under
+       `public`, the identity a bonded phone resolves to under `private`. */
+    {
+        char addr[18] = "";
+
+        cJSON_AddStringToObject(o, "address_type",
+                                blm_ident_address_word(blm_core_config()->address_private));
+        cJSON_AddStringToObject(o, "address",
+                                blm_gatt_address(addr, sizeof(addr)) == ESP_OK ? addr : "");
+        cJSON_AddBoolToObject(o, "security_request", blm_core_config()->security_request);
+    }
+
     /* BLE 5 as settings (v4): the preference and the live link's PHYs */
     {
         const blm_config_t *cfg = blm_core_config();

@@ -131,8 +131,23 @@ static void test_ram_migrated_keeps_a_ble5_choice(void)
                                                             BLM_PHY_1M | BLM_PHY_2M));
 }
 
+/* v6 (2026-11-02): the advertised address word, public unless "private" */
+static void test_address_words_default_public(void)
+{
+    TEST_ASSERT_FALSE(blm_ident_address_private("public"));
+    TEST_ASSERT_FALSE(blm_ident_address_private(NULL));
+    TEST_ASSERT_FALSE(blm_ident_address_private(""));
+    TEST_ASSERT_FALSE(blm_ident_address_private("Private"));
+    TEST_ASSERT_FALSE(blm_ident_address_private("random"));
+    TEST_ASSERT_TRUE(blm_ident_address_private("private"));
+
+    TEST_ASSERT_EQUAL_STRING("public", blm_ident_address_word(false));
+    TEST_ASSERT_EQUAL_STRING("private", blm_ident_address_word(true));
+}
+
 void run_ram_tests(void)
 {
+    RUN_TEST(test_address_words_default_public);
     RUN_TEST(test_ram_profile_words);
     RUN_TEST(test_ram_config_full_keeps_the_build);
     RUN_TEST(test_ram_config_lean_is_the_measured_set);

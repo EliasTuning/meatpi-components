@@ -5,6 +5,34 @@
 > and J2534 ride on stream channels: `ble_http/BLE_HTTP_PROTOCOL.md`,
 > `j2534_server/J2534_WIRE_PROTOCOL.md` (2026-09-21).
 
+## The advertised address and the pairing request (settings v6, 2026-11-02)
+
+Three field reports of 2026-11-02 (a Home Assistant user whose presence
+automation lost the device, a Discord thread about apps that worked on 4.x
+and got nothing on 6.0) came down to three differences from firmware 4.5x,
+all undone on Ali's word ("behave like 4.5x unless there is a major security
+concern"):
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `address` | enum public / private | `public` | `public` = the fixed hardware address (the station MAC + 2), what 4.x advertised (Bluedroid kept `BLE_ADDR_TYPE_PUBLIC`; its `config_local_privacy` call only resolved the peers' addresses): presence detection by MAC and apps that remember the address work. `private` = the controller's resolvable private address from our IRK, a new one at every advertising restart (so after every disconnect) and every `CONFIG_BT_NIMBLE_RPA_TIMEOUT` (15 min): the v6 betas before this. A bond holds the public identity either way, so the switch keeps paired phones |
+| `security_request` | bool | `true` | the device sends an LL Security Request one second after the connect, if the link is still plain by then and the pairing window is open, as 4.x did (`esp_ble_set_encryption` on connect): the phone pairs now, or encrypts with its bond, and the app's first write lands on a secured link. Off for a Windows app with its own pairing ceremony (WinRT custom pairing cannot join a peripheral-started system pairing, the 2026-09-21 finding that had removed the request; `ble_phy_pc.py` turns it off for its leg). The second matters: a central that pairs or encrypts on its own at the connect (a bonded Android, the simulator's bench central) is secured first and gets no request at all; sent from the connect event itself, or a quarter second in, the request went out while a bonded NimBLE central's LL encryption was still in flight (no SMP procedure on our side to answer `EALREADY`), the central answered it with a second encryption, and that restarted its discovery (the blethru 2M leg, 2026-11-02, twice) |
+
+The third difference is not a setting: the subscribe (a CCCD write on FFF1,
+FFF3, FFF5) needs the paired link again, as the 4.x table had it
+(`ESP_GATT_PERM_WRITE_ENC_MITM` on the CCCD). NimBLE gates a CCCD only
+through the `BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC/AUTHEN` flags of its
+characteristic, which the table did not set, so a plain link subscribed
+FFF1 silently and its write-without-response to FFF2 was dropped before
+the access callback (no error, no log line): an app that only subscribes
+and writes never paired. With the flags the subscribe is answered
+Insufficient Authentication and the phone pairs right there. Measured
+before the change with `tools/testbench/ble/ble_addr_probe_pi.py`
+(`testing/ble_addr_probe.md`); `GET /api/ble` carries `address`,
+`address_type` and `security_request`. The factory bridge for the data
+pipe (`br_ble_obd`, bridge_manager v2) is the fourth piece: on 4.x
+Bluetooth on WAS the ELM pipe to the chip.
+
 ## Bluetooth memory profile (settings v5, 2026-10-31)
 
 Bluetooth on this build costs about 38 KB of internal RAM (the bench unit:

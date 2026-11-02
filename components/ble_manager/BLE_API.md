@@ -25,7 +25,7 @@
 | Advertising interval | 160 ms, general discoverable, connectable |
 | Advertising sets | `advertising` setting (2026-09-21): `legacy` (default) = the 4.2 ADV_IND set above (flags + TX power + the FFF0 UUID; name + `MeatPi` manufacturer data in the scan response), `extended` = one BLE 5 extended PDU carrying flags + UUID + name + `MeatPi` (connectable, primary PHY 1M, secondary PHY per `phy`; 4.2-only scanners do NOT see it), `both` = the two sets at once (the same device shows up as two advertising reports; the legacy set keeps every existing app working) |
 | PHY | `phy` setting: `1m` (default, the 4.2 behaviour), `2m`, `coded`, `auto`. The device asks for the PHY right after connect; the central decides (section 6) |
-| Address | **Resolvable private address** (rotates). Scan by NAME or the advertised service UUID, never by a hard-coded MAC (a bonded central resolves it to the identity address and may then connect directly) |
+| Address | `address` setting (2026-11-02): `public` (default) = the device's **fixed hardware address** (the station MAC + 2), what firmware 4.x advertised: presence detection by MAC and an app that remembers the address work; `private` = a **resolvable private address** that changes at every advertising restart (so after every disconnect) and every 15 min; a bonded central resolves it to the identity address, which is the public one. Scanning by NAME or the advertised service UUID works under both |
 | TX power | `tx_power_dbm` setting (default 9 dBm) |
 
 BLE is **disabled by default** (`ble_manager.enabled = false`): the user
@@ -41,18 +41,34 @@ enumerates the FFF0 service and uses what it finds instead of assuming.
 
 - **LE Secure Connections + MITM**, device role DisplayOnly: the phone
   prompts for a **6-digit passkey**, default `123456`, the `passkey`
-  setting. **The central starts the pairing** on its first encrypted
-  access (every phone does this on the *Insufficient Authentication*
-  answer). Until 2026-09-21 the device also sent an LL Security Request
-  right after connect; it no longer does, because that peripheral-driven
-  start made **Windows** begin a system pairing that a desktop app's own
-  ceremony could not join (WinRT custom pairing failed with no ceremony
-  asked). A Windows app pairs with `DevicePairingKinds.ProvidePin` and
-  answers the request with the passkey (`ble_phy_pc.py` is the reference).
+  setting. **The device asks for the pairing at the connect** (an LL
+  Security Request one second after the connect if the link is still
+  plain by then and the pairing window is open, as firmware 4.x did; the
+  `security_request` setting, default true, 2026-11-02; a central that
+  pairs or encrypts on its own first gets no request): the
+  phone pairs right away, or encrypts with its bond, so an app's first
+  write lands on a secured link. A central that starts first is fine. The
+  request had been removed on 2026-09-21 because a peripheral-driven start
+  makes **Windows** begin a system pairing that a desktop app's own
+  ceremony cannot join (WinRT custom pairing fails with no ceremony
+  asked): such an app sets `security_request` false and pairs with
+  `DevicePairingKinds.ProvidePin`, answering with the passkey
+  (`ble_phy_pc.py` is the reference). With the request off, the central
+  starts the pairing on its first secured access (every phone does this
+  on the *Insufficient Authentication* answer).
 - **Every** characteristic requires an **encrypted + authenticated** link
-  (`ENC` + `AUTHEN` on reads and writes, incl. Device Info): an unpaired
-  connection can discover the layout but read or write nothing (answered
-  *Insufficient Authentication*, which prompts pairing).
+  (`ENC` + `AUTHEN` on reads and writes, incl. Device Info, and since
+  2026-11-02 on the **subscribe** too: the CCCD write of FFF1, FFF3 and
+  FFF5 answers *Insufficient Authentication* on a plain link, as the 4.x
+  table did, so an app that subscribes first pairs at that step). An
+  unpaired connection can discover the layout but read, write or
+  subscribe nothing. Note what a plain link does NOT get: an ATT
+  write-without-response has no error reply, so a command written to
+  FFF2 before the pairing is dropped silently (NimBLE refuses it before
+  the device's own code sees it). Apps built for 4.x never met this
+  because the device had asked for the pairing at the connect; on the
+  v6 betas before 2026-11-02 it was the "no notification comes back"
+  report.
 - **Bonding** (`bonding` setting, default true): the pairing exchanges
   long-term keys so a paired phone reconnects **without re-entering the
   passkey**, and the keys are **persisted to NVS** across reboots and
@@ -138,12 +154,16 @@ the link is secured.
 ## 4. The data pipe (FFF2 to device to FFF1)
 
 A transparent **byte stream**, no framing added by BLE. What sits on the
-other end is a `bridge_manager` configuration: out of the box the OBD
-chip is bridged to WebSocket (`ws_obd`), so pairing BLE with OBD means
-setting `bridges` to `{"name":"br_ble","a":"obd","b":"ble"}` via
-`/api/settings/bridge_manager` (the single-consumer rule: `obd` feeds one
-bridge at a time). `{"a":"can","b":"ble","translator":"slcan"}` gives
-Lawicel slcan over BLE instead.
+other end is a `bridge_manager` configuration: out of the box (bridge_manager
+v2, 2026-11-02) the OBD chip is bridged to Bluetooth by the factory
+connection `br_ble_obd` (`{"name":"br_ble_obd","a":"obd","b":"ble"}`),
+beside WebSocket, TCP 35000 and USB on the chip's fan-out, so pairing an
+app is all it takes, as on 4.x (a device updated from an earlier v6 gets
+the row once unless a connection of its own already uses `ble`). The
+`ble` end carries one enabled connection: `{"a":"can","b":"ble",
+"translator":"slcan"}` gives Lawicel slcan over BLE instead, with
+`br_ble_obd` disabled. Without any `ble` connection, writes to FFF2 go
+nowhere and nothing is notified on FFF1 (the v6 betas before this).
 
 With the OBD bridge active the dialect is **ELM327/STN ASCII**:
 
@@ -447,6 +467,13 @@ The full WiCAN command line (same registry as UART/WebSocket; commands in
 the 4.2 behaviour, so a stored v3 config migrates by filling the
 defaults. `GET /api/ble` mirrors both settings and the live link's
 `phy_tx`/`phy_rx`.
+
+Since descriptor v6 (2026-11-02, the 4.x parity of section 1 and 2):
+`address` (`public` default | `private`) = the address the device
+advertises with, and `security_request` (true default) = the LL Security
+Request at the connect. Both fill in as defaults on an older stored
+object. `GET /api/ble` echoes them as `address_type`, `security_request`
+and the public address itself as `address`.
 
 Since descriptor v5 (2026-10-31) the **Bluetooth memory profile**
 `ble_ram_profile` (`lean` default | `full` | `custom`) sizes the ESP32-S3

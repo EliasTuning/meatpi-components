@@ -257,9 +257,18 @@ static int fff0_access(uint16_t conn_handle, uint16_t attr_handle,
       .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | \
                BLE_GATT_CHR_F_READ_AUTHEN }
 
+/* The subscribe (the CCCD write) needs the paired link too, as the 4.x table
+   had it (ESP_GATT_PERM_WRITE_ENC_MITM on the CCCD): NimBLE gates a CCCD
+   only through the NOTIFY_INDICATE_* flags of its characteristic. Without
+   them a plain link subscribed FFF1 silently and its write-without-response
+   to FFF2 was dropped silently, so an app that only subscribes and writes
+   never paired (2026-11-02, the Discord report). With them the subscribe is
+   answered Insufficient Authentication and the phone pairs right there. */
 #define OUT_FLAGS (BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | \
                    BLE_GATT_CHR_F_READ_AUTHEN | \
-                   BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE)
+                   BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE | \
+                   BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC | \
+                   BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN)
 #define IN_FLAGS  (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | \
                    BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN)
 /* stream channel OUT: the properties follow the owner's out_modes. An
@@ -272,7 +281,9 @@ static int fff0_access(uint16_t conn_handle, uint16_t attr_handle,
    protocol carries the credits + frame counter that make a loss
    detectable (ble_http v2). */
 #define CH_OUT_BASE  (BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | \
-                      BLE_GATT_CHR_F_READ_AUTHEN)
+                      BLE_GATT_CHR_F_READ_AUTHEN | \
+                      BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC | \
+                      BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN)
 
 static ble_gatt_chr_flags ch_out_flags(int idx)
 {

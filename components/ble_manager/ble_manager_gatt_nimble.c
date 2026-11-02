@@ -57,6 +57,8 @@
 #include "esp_bt.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -122,6 +124,64 @@ static void phy_request(void)
     }
 }
 
+/* ---- the Security Request at connect (v6, 2026-11-02) ------------------------------------ */
+
+/* one second: a bonded central that encrypts on its own at the connect (Android,
+   the simulator's bench central) is secured well inside it and no request goes
+   out at all; at a quarter second the request went out while the central's LL
+   encryption (no SMP procedure on our side to answer EALREADY) was still in
+   flight, and a NimBLE central answered it with a second encryption that
+   restarted its discovery (blethru 2M, 2026-11-02, twice) */
+#define BLM_SECREQ_DELAY_US (1000 * 1000)
+
+static esp_timer_handle_t s_secreq_timer;
+
+/* esp_timer's task: the host API takes its own lock, any task may call it */
+static void secreq_fire(void *arg)
+{
+    (void)arg;
+
+    if (!s_connected || s_secured || !blm_core_pairing_allowed())
+    {
+        return;
+    }
+
+    int rc = ble_gap_security_initiate(s_conn_handle);
+
+    if (rc != 0 && rc != BLE_HS_EALREADY)
+    {
+        ESP_LOGW(TAG, "security request not sent (%d)", rc);
+    }
+}
+
+static void secreq_arm(void)
+{
+    if (s_secreq_timer == NULL)
+    {
+        const esp_timer_create_args_t args =
+        {
+            .callback = secreq_fire, .name = "ble_secreq",
+        };
+
+        if (esp_timer_create(&args, &s_secreq_timer) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "security request timer not created");
+            return;
+        }
+    }
+
+    (void)esp_timer_stop(s_secreq_timer);
+    (void)esp_timer_start_once(s_secreq_timer, BLM_SECREQ_DELAY_US);
+}
+
+static void secreq_disarm(void)
+{
+    if (s_secreq_timer != NULL)
+    {
+        (void)esp_timer_stop(s_secreq_timer);
+    }
+}
+
 /* ---- GAP ------------------------------------------------------------------------------ */
 
 static int gap_event(struct ble_gap_event *event, void *arg)
@@ -174,20 +234,32 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                radio without WiFi. Controllers may still negotiate DLE
                on their own - just don't force long TX packets. */
 
-            /* No Security Request from our side at connect (the legacy
-               esp_ble_set_encryption mirror, removed 2026-09-21): phones
-               pair on their first encrypted access anyway, and a
-               peripheral-initiated request makes Windows start a
-               system pairing that an app's own ceremony then cannot join
-               (WinRT custom pairing "Failed", no ceremony asked; the DUT
-               saw ENOTCONN 2 s in). The runtime pairing window still
-               applies through PASSKEY_ACTION. */
+            /* The Security Request at connect, as 4.x sent it
+               (esp_ble_set_encryption at ESP_GATTS_CONNECT_EVT while pairing
+               was allowed): the phone pairs now, or encrypts with its bond,
+               and the app's first write lands on a secured link. It had been
+               removed on 2026-09-21 because a peripheral-driven start makes
+               Windows begin a system pairing that an app's own ceremony
+               cannot join (WinRT custom pairing "Failed"); that is what the
+               `security_request` setting is for (off for such an app). Back
+               on 2026-11-02 (Ali: the removal was a mistake; apps built
+               against 4.x never pair otherwise, their write-without-response
+               is dropped silently). Sent one second in, not from this event,
+               and only if the link is still plain by then: a central that
+               pairs or encrypts on its own at connect (a bonded Android, the
+               simulator's bench central) is secured first and gets no
+               request at all (see BLM_SECREQ_DELAY_US). */
+            if (blm_core_config()->security_request && blm_core_pairing_allowed())
+            {
+                secreq_arm();
+            }
 
             blm_core_on_connect();
             blm_channel_on_link(BLE_MANAGER_CH_CONNECTED);
             break;
 
         case BLE_GAP_EVENT_DISCONNECT:
+            secreq_disarm();
             s_connected = false;
             s_secured = false;
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -342,9 +414,14 @@ static void on_sync(void)
     /* attribute handles are assigned by now (ble_gatts_start ran) */
     blm_svc_publish_handles();
 
-    /* resolvable private address like legacy; public as fallback */
+    /* the `address` setting (v6, 2026-11-02): public = the fixed hardware
+       address, what 4.x advertised (Bluedroid kept BLE_ADDR_TYPE_PUBLIC;
+       its config_local_privacy call only resolved the peers' addresses);
+       private = the controller's resolvable private address from our IRK,
+       a new one at every advertising restart and every
+       CONFIG_BT_NIMBLE_RPA_TIMEOUT. Public as the fallback either way. */
     if (ble_hs_util_ensure_addr(0) != 0 ||
-        ble_hs_id_infer_auto(1, &s_own_addr_type) != 0)
+        ble_hs_id_infer_auto(cfg->address_private ? 1 : 0, &s_own_addr_type) != 0)
     {
         s_own_addr_type = BLE_OWN_ADDR_PUBLIC;
     }
@@ -696,4 +773,27 @@ void blm_gatt_allow_pairing(bool allow)
     {
         ble_gap_security_initiate(s_conn_handle);
     }
+}
+
+esp_err_t blm_gatt_address(char *buf, size_t len)
+{
+    /* the controller's public address is the chip's Bluetooth MAC from the
+       efuse (the base MAC + 2), read without the host: ble_hs_id_copy_addr
+       needs the host up and hung /api/ble with Bluetooth off (2026-11-02) */
+    uint8_t mac[6];
+
+    if (buf == NULL || len < 18)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (esp_read_mac(mac, ESP_MAC_BT) != ESP_OK)
+    {
+        buf[0] = '\0';
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    snprintf(buf, len, "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return ESP_OK;
 }
