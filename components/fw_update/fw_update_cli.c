@@ -23,8 +23,8 @@
 /**
  * @file fw_update_cli.c
  * @brief The `fwupdate` console command: the summary, `check`, `install
- *        [<version>] [--wipe] [--dongle]`, `abort`, `notes [<version>]`
- *        (the notes' location: the fetch stays on the component's task),
+ *        [<version>] [--wipe] [--dongle]`, `abort`, `notes [--dongle]` (the
+ *        notes URL of the offered release: the browser fetches it, never the device),
  *        `confirm` and `forget` (the bench's knobs). Registered from the
  *        settings on_apply behind `cli` (standard §6b); handlers run on
  *        internal stacks, so the NVS erase of `forget` is legal here.
@@ -208,14 +208,14 @@ static int cmd_fwupdate(int argc, char **argv)
     }
     else if (strcmp(action, "notes") == 0)
     {
-        /* the console stack is not for a TLS fetch: say where they are */
+        /* the device never fetches the notes (2026-11-02): say where they are */
         static fw_update_status_t st EXT_RAM_BSS_ATTR;
+        const char *url;
 
         err = fw_update_status(&st);
-        cmdline_printf("notes: GET /api/fw_update/notes?version=%s on the device, "
-                       "or the manifest's notes file for %s\n",
-                       version ? version : st.target_version,
-                       version ? version : st.target_version);
+        url = (s_args.dongle->count > 0) ? st.dongle_latest_notes_url : st.latest_notes_url;
+        cmdline_printf("notes: %s\n", (err == ESP_OK && url[0]) ? url
+                       : "none offered yet (run `fwupdate check`); the web page fetches them");
     }
     else if (strcmp(action, "confirm") == 0)
     {
@@ -241,7 +241,7 @@ esp_err_t fw_update_register_cli(void)
 {
     s_args.action = arg_str0(NULL, NULL, "<check|install|abort|notes|confirm|forget>",
                              "bare = the summary");
-    s_args.version = arg_str0(NULL, NULL, "<version>", "install/notes: a release");
+    s_args.version = arg_str0(NULL, NULL, "<version>", "install: a release");
     s_args.wipe = arg_lit0(NULL, "wipe", "install: accept a layout that formats");
     s_args.dongle = arg_lit0(NULL, "dongle", "install/notes: the ESPNetLink dongle");
     s_args.end = arg_end(4);
