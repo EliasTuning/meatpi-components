@@ -23,7 +23,7 @@
 /**
  * @file fw_update_api.c
  * @brief The public API: the check and install requests with their
- *        synchronous refusals, abort, the snapshot, the notes, the
+ *        synchronous refusals, abort, the snapshot, the
  *        milestone by hand, the record erase and the providers the
  *        composition root wires. Split out of fw_update.c on 2026-10-19.
  */
@@ -407,73 +407,6 @@ esp_err_t fw_update_status(fw_update_status_t *out)
     }
 
     return fwu_status_build(out);
-}
-
-esp_err_t fw_update_notes(fw_update_target_t target, const char *version,
-                          char **out_psram, size_t *len)
-{
-    static SemaphoreHandle_t s_notes_gate;  /* one caller at a time */
-    static StaticSemaphore_t s_notes_gate_buf;
-    static SemaphoreHandle_t s_notes_done;
-    static StaticSemaphore_t s_notes_done_buf;
-
-    if (out_psram == NULL || len == NULL || target > FW_UPDATE_TARGET_DONGLE)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    *out_psram = NULL;
-    *len = 0;
-
-    if (!FWU->started || FWU->stopped)
-    {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (s_notes_gate == NULL)
-    {
-        s_notes_gate = xSemaphoreCreateMutexStatic(&s_notes_gate_buf);
-        s_notes_done = xSemaphoreCreateBinaryStatic(&s_notes_done_buf);
-    }
-
-    if (xSemaphoreTake(s_notes_gate, pdMS_TO_TICKS(2000)) != pdTRUE)
-    {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    fwu_engine_lock();
-
-    if (FWU->job.active)
-    {
-        fwu_engine_unlock();
-        xSemaphoreGive(s_notes_gate);
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    fwu_engine_unlock();
-
-    esp_err_t rc = ESP_FAIL;
-    fwu_cmd_t cmd = { .type = FWU_CMD_NOTES, .target = (uint8_t)target, .done = s_notes_done, .rc = &rc,
-                  .out = out_psram, .out_len = len };
-
-    strlcpy(cmd.version, (version != NULL) ? version : "", sizeof(cmd.version));
-    (void)xSemaphoreTake(s_notes_done, 0);
-
-    if (xQueueSend(FWU->cmds, &cmd, 0) != pdTRUE)
-    {
-        xSemaphoreGive(s_notes_gate);
-        return ESP_ERR_NO_MEM;
-    }
-
-    if (xSemaphoreTake(s_notes_done, pdMS_TO_TICKS(FWU_NOTES_WAIT_MS)) != pdTRUE)
-    {
-        rc = ESP_ERR_TIMEOUT; /* the task frees the body when it lands late */
-        xSemaphoreGive(s_notes_gate);
-        return rc;
-    }
-
-    xSemaphoreGive(s_notes_gate);
-    return rc;
 }
 
 esp_err_t fw_update_confirm(void)

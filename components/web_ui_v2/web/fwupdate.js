@@ -72,16 +72,21 @@ function mdLite(text){
   return out.join("");
 }
 
-async function notesModal(target,version){
+/* the notes come straight from the release server into the browser (2026-11-02):
+   the device only names their address (the snapshot's notes_url) and never
+   downloads them; a phone without internet sees the message below while the
+   device's own check and install carry on */
+async function notesModal(url,version,target){
   let body;
   try{
-    const r=await fetch(API+"/api/fw_update/notes?target="+(target||"self")+"&version="+encodeURIComponent(version||""));
+    if(!url)throw new Error("no notes for this release");
+    const r=await fetch(url,{cache:"no-cache"});
     const t=await r.text();
-    if(!r.ok){let m=t;try{m=JSON.parse(t).error||t;}catch{}throw new Error(m);}
+    if(!r.ok)throw new Error("HTTP "+r.status);
     body=h("div",{class:"fwu-notes",html:mdLite(t)});
-  }catch(e){body=h("p",{},"The release notes could not be fetched: "+e.message);}
+  }catch(e){body=h("p",{},"The release notes could not be loaded in this browser (they come from the release server, so this phone or PC needs internet): "+e.message);}
   modal({title:"Release notes"+(version?" "+version:"")+(target==="dongle"?" (ESPNetLink)":""),body,
-    actions:[{label:"Open on GitHub",fn:()=>window.open(NOTES_REPO,"_blank")},{label:"Close",kind:"pri"}]});
+    actions:[{label:"Open on GitHub",fn:()=>window.open(url||NOTES_REPO,"_blank")},{label:"Close",kind:"pri"}]});
 }
 
 async function post(path,body){return api(path,{method:"POST",body:body||{}});}
@@ -149,7 +154,7 @@ async function card(){
         +(tg.step?" (first step: more updates follow)":""))
       :h("div",{class:"help fwu-reason"},REASON_TEXT[self.reason]||self.reason||"Up to date");
     const right=[];
-    if(self.latest&&self.latest.notes)right.push(h("button",{class:"btn sm gh fwu-notes-btn",onclick:()=>notesModal("self",tg?tg.version:self.latest.version)},"Release notes"));
+    if(self.latest&&self.latest.notes_url)right.push(h("button",{class:"btn sm gh fwu-notes-btn",onclick:()=>notesModal(self.latest.notes_url,tg?tg.version:self.latest.version,"self")},"Release notes"));
     if(self.available&&tg&&self.installable)right.push(h("button",{class:"btn pri sm fwu-update",disabled:!!(job&&job.active)||mobile(),
       title:mobile()?"Downloads need a WiFi connection":"",onclick:()=>startInstall(tg)},ic("download"),"Update"));
     else if(self.available&&tg&&(tg.verdict==="serial"||tg.verdict==="unknown"))right.push(h("a",{class:"btn sm fwu-usb",href:DOCS_URL,target:"_blank"},"Needs a USB flash"));
@@ -178,7 +183,7 @@ async function card(){
       ?h("div",{class:"help fwu-dongle-avail"},d.target_version+" available"+(d.latest&&d.latest.date?", "+d.latest.date:"")+(d.latest&&d.latest.summary?", "+d.latest.summary:""))
       :h("div",{class:"help fwu-dongle-reason"},DONGLE_VERDICT_TEXT[d.verdict]||REASON_TEXT[d.reason]||d.verdict||"Up to date");
     const right=[];
-    if(d.latest&&d.latest.notes)right.push(h("button",{class:"btn sm gh fwu-dongle-notes",onclick:()=>notesModal("dongle",d.target_version||d.latest.version)},"Release notes"));
+    if(d.latest&&d.latest.notes_url)right.push(h("button",{class:"btn sm gh fwu-dongle-notes",onclick:()=>notesModal(d.latest.notes_url,d.target_version||d.latest.version,"dongle")},"Release notes"));
     if(d.verdict==="update_available"&&d.installable)right.push(h("button",{class:"btn pri sm fwu-dongle-update",disabled:!!(job&&job.active)||mobile()||!d.reachable,
       title:mobile()?"Downloads need a WiFi connection":!d.reachable?"The dongle is not reachable":"",onclick:()=>startDongle(d)},ic("download"),"Update dongle"));
     else if(d.verdict==="needs_usb_flash"||d.verdict==="layout_mismatch")right.push(h("a",{class:"btn sm fwu-dongle-usb",href:DONGLE_DOCS_URL,target:"_blank"},"Needs a USB flash"));

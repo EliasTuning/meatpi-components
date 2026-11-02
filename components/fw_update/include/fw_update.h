@@ -121,6 +121,7 @@ typedef enum
 #define FW_UPDATE_DETAIL_LEN  96
 #define FW_UPDATE_WIPES_LEN   64
 #define FW_UPDATE_REASON_LEN  96
+#define FW_UPDATE_NOTES_URL_LEN 256  /* base_url + the manifest's notes path */
 
 /** The snapshot GET /api/fw_update renders (fw_update/HTTP_API.md). */
 typedef struct
@@ -154,7 +155,9 @@ typedef struct
     char     latest_date[11];
     char     latest_summary[FW_UPDATE_SUMMARY_LEN];
     uint32_t latest_size;
-    bool     latest_notes;
+    char     latest_notes_url[FW_UPDATE_NOTES_URL_LEN]; /**< the release notes, absolute;
+                                          "" none. The page fetches them itself
+                                          (2026-11-02): the device never does */
     bool     available;
     bool     installable;
     char     reason[FW_UPDATE_CODE_LEN];
@@ -182,7 +185,7 @@ typedef struct
     char     dongle_latest_date[11];
     char     dongle_latest_summary[FW_UPDATE_SUMMARY_LEN];
     uint32_t dongle_latest_size;
-    bool     dongle_latest_notes;
+    char     dongle_latest_notes_url[FW_UPDATE_NOTES_URL_LEN];
     bool     dongle_available;
     bool     dongle_installable;
     char     dongle_target_version[FW_UPDATE_VER_LEN];
@@ -280,15 +283,6 @@ esp_err_t fw_update_abort(void);
  *  from a PSRAM-stack task (the HA poster): the slot fields are the record
  *  the boot task and the confirm helper read from flash (2026-10-21). */
 esp_err_t fw_update_status(fw_update_status_t *out);
-
-/**
- * The release notes of @p version (NULL = the target), fetched through the
- * device: markdown in a PSRAM buffer the caller frees with free(). Runs on
- * the component's task; ESP_ERR_INVALID_STATE while a job runs,
- * ESP_ERR_NOT_FOUND no such release, ESP_FAIL the fetch failed.
- */
-esp_err_t fw_update_notes(fw_update_target_t target, const char *version,
-                          char **out_psram, size_t *len);
 
 /** Mark the running image verified now (the console, the bench). */
 esp_err_t fw_update_confirm(void);

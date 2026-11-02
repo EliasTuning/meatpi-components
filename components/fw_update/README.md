@@ -100,7 +100,6 @@ bootloader runs (`rollback.bootloader_version` 2 = with the option).
 | `fw_update_install(target, version, flags, &id, why, &already)` | Validates against the last view synchronously (busy, no manifest, no network, unknown / not visible / yanked version, the layout verdict, `FW_UPDATE_F_CONFIRM_WIPE`, the cellular policy with `FW_UPDATE_F_ALLOW_CELLULAR`, 24 KB free internal RAM), then the task re-fetches the manifest (a yank must beat a cached view), downloads through the pipe (three attempts for a transport failure), writes the record and restarts 1.5 s later through `restart_tracker_restart(OTA_APPLY, OTA, id)`. Idempotent on (target, version). `already` = the running firmware is that version. The dongle target answers `dongle_absent` until the relay is built (D1). |
 | `fw_update_abort()` | `ESP_ERR_NOT_FOUND` without a job, `ESP_ERR_INVALID_STATE` once the restart is scheduled. |
 | `fw_update_status(*out)` | The snapshot (`fw_update_status_t`, ~1 KB: keep it off task stacks): settings, uplink, the last check, this device against the manifest, the job, the last recorded job, the slots. RAM only, so a PSRAM-stack task may call it (the HA poster does): the slot fields are the record the boot task and the confirm helper read from flash, see "Flash reads and PSRAM stacks" below (2026-10-21). |
-| `fw_update_notes(target, version, &psram, &len)` | The release notes fetched on the task (<= 16 KB, markdown), freed by the caller. |
 | `fw_update_confirm()` | The milestone by hand (the console, the bench). |
 | `fw_update_forget()` | Erases the record (the bench). Caller on an internal stack. |
 | `fw_update_set_event_cb(cb)` | A snapshot after every check and job move (one consumer). |
@@ -113,12 +112,12 @@ bootloader runs (`rollback.bootloader_version` 2 = with the option).
 | File | Role |
 |---|---|
 | `fw_update.c` | lifecycle, the task (12 KB PSRAM stack: the TLS handshakes run on it, flash never does), the command queue, the one state object (`fwu_state_t`, PSRAM, under the engine lock), the schedule, the sleep hold, the milestone, the pre-restart confirm |
-| `fw_update_job.c` | the job runners on the task: the check (this device's manifest, then the dongle's), the install of this device, the notes (2026-10-19 split) |
+| `fw_update_job.c` | the job runners on the task: the check (this device's manifest, then the dongle's), the install of this device (2026-10-19 split; the notes job went on 2026-11-02) |
 | `fw_update_api.c` | the public API with its synchronous refusals (2026-10-19 split) |
 | `fw_update_dongle.c`, `fw_update_dongle_job.c`, `fw_update_dongle.h` | the relay (2026-10-19): the dongle's view, check, verdicts, refusals and snapshot; the job (stage, verify, push, the restart, the version read back) |
 | `fw_update_fetch_ram.c` | a release's image into a PSRAM buffer of exactly its size (the relay's download) |
 | `fw_update_version.c`, `fw_update_core.c`, `fw_update_record.c` | PURE, host-tested: the version grammar (strict and tolerant) and order, channel visibility, the bounded manifest parse, the selection with stepping and yanked, the layout verdict, URL composition; the record codec and the boot decision table |
-| `fw_update_fetch.c` | the manifest with its ETag, the notes, the image into the pipe (`http_client_manager_stream`) |
+| `fw_update_fetch.c` | the manifest with its ETag, the image into the pipe (`http_client_manager_stream`) |
 | `fw_update_boot.c` | the record store, the internal-stack helper (`fwu_run_internal`), the slots read (`fwu_slots_read_fn`: otadata and the bootloader description, internal stacks only), the boot check |
 | `fw_update_status.c` | the snapshot: RAM only, the slots copied from the record above under the engine lock |
 | `fw_update_settings.c`, `fw_update_http.c`, `fw_update_cli.c` | the standard's set |
@@ -146,9 +145,23 @@ right after `restart_tracker_init`; start after ota_manager_start.
 | `cli` | `true` | the `fwupdate` command |
 
 `on_validate`: the URL rules, `cert_set` in `[a-z0-9_-]`. There is no
-cellular policy knob since 2026-10-19 (Ali): the lists and the notes are
-read on any uplink, an image is never downloaded over the dongle's LTE
+cellular policy knob since 2026-10-19 (Ali): the lists are read on any
+uplink, an image is never downloaded over the dongle's LTE
 (`cellular.policy` reads `wifi_only` on the snapshot).
+
+## The release notes are the page's own fetch (2026-11-02, Ali)
+
+The device never downloads release notes: they are of no use to it, only to
+the person reading the Firmware update page. The snapshot carries each
+`latest` entry's `notes_url` (`base_url` + the manifest's `notes` path, `""`
+when the release has none) and the page fetches that URL itself, straight
+from GitHub (raw.githubusercontent.com answers cross-origin requests), so a
+browser without internet shows "could not be loaded" while the device's own
+check and install are untouched. Until that day the device proxied the notes
+(`GET /api/fw_update/notes`, a 16 KB PSRAM buffer, a 25 s wait on the task)
+and a notes file over 16 KB was refused outright; the beta.7 notes had grown
+past it. Gone with it: `fw_update_notes()`, the `FWU_CMD_NOTES` command, the
+notes fetch and the route.
 
 ## Flash-write discipline (standard section 11)
 
@@ -192,7 +205,6 @@ the milestone (an upload in the first ten minutes after an update) shows
 | the dongle image staged for the push | PSRAM heap, transient | the image's size (about 1.9 MB for the dongle), freed after the push; refused when the largest free block minus 512 KB is smaller |
 | the selection, the job, the record, the check | PSRAM static | about 1.5 KB |
 | the manifest body during a check | PSRAM heap, transient | <= 64 KB |
-| the notes body | PSRAM heap, transient | <= 16 KB |
 | the command queue storage | PSRAM static | 4 x 56 B |
 | the internal-stack flash helper | internal heap, transient | 4 KB during a record write or a confirm |
 | ota_manager's pipe writer | internal heap, session-scoped | 5 KB during a download (ota_manager/README.md) |

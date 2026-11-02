@@ -219,22 +219,6 @@ esp_err_t fwu_fetch_manifest(const fwu_config_t *cfg, const char *device_type,
     return err;
 }
 
-esp_err_t fwu_fetch_notes(const fwu_config_t *cfg, const char *path,
-                          fwu_fetch_result_t *out)
-{
-    char url[FWU_URL_LEN + FWU_NOTES_LEN];
-
-    if (path == NULL || path[0] == '\0' ||
-        !fwu_compose_url(cfg->base_url, path, url, sizeof(url)))
-    {
-        memset(out, 0, sizeof(*out));
-        snprintf(out->code, sizeof(out->code), "bad_url");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    return fetch_doc(cfg, url, NULL, FWU_NOTES_CAP, 1, out);
-}
-
 /* ---- the image ---------------------------------------------------------------- */
 
 typedef struct

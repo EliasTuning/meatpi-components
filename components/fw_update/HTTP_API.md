@@ -15,14 +15,14 @@ The snapshot. Never mutates, never fetches.
  "targets":{
   "self":{"installed":"6.1.0-alfa.1","build":"v6.1.0p-alfa.1-0-gb1adc7e","release_known":true,"dev_build":false,
           "installed_yanked":false,
-          "latest":{"version":"6.1.0","date":"2026-10-20","summary":"...","notes":true,"size":3764768},
+          "latest":{"version":"6.1.0","date":"2026-10-20","summary":"...","notes_url":"https://raw.githubusercontent.com/meatpiHQ/meatpi-devices/main/wican_pro/firmware/notes/6.1.0.md","size":3764768},
           "available":true,"installable":true,"reason":"",
           "target":{"version":"6.1.0","step":false,"verdict":"none","wipes":[],"layout_md5":"35c16cb5677477a27c662bd912582329"},
           "layout":{"flashed_md5":"35c16cb5677477a27c662bd912582329","build_md5":"35c16cb5677477a27c662bd912582329"}},
   "dongle":{"present":true,"verdict":"update_available","reachable":true,"transport":"usb",
             "installed":{"fw_version":"v1.22-61-gcc81591","device_id":"206ef1894aa5","api_level":9,"release_known":false,"dev_build":true},
             "last_check":{"ok":true,"error":""},
-            "latest":{"version":"1.23.0-alfa.1","date":"2026-10-24","summary":"...","notes":true,"size":1912400},
+            "latest":{"version":"1.23.0-alfa.1","date":"2026-10-24","summary":"...","notes_url":"https://raw.githubusercontent.com/meatpiHQ/meatpi-devices/main/espnetlink/firmware/notes/1.23.0-alfa.1.md","size":1912400},
             "available":true,"installable":true,"reason":"","target_version":"1.23.0-alfa.1","cellular_needed":false,
             "last_result":null}},
  "job":{"id":7,"active":true,"target":"self","version":"6.1.0","state":"downloading","received":1048576,"total":3764768,"pct":28,"attempt":1,"error":"","detail":"","elapsed_s":12,"transport":"","backup":{"sd":false}},
@@ -145,10 +145,10 @@ restart is scheduled, or once a dongle image is being pushed (the dongle's
 httpd would be left waiting). The download stops at the next chunk and the
 slot is left as scratch; `job.state` reads `aborted`.
 
-## GET /api/fw_update/notes?target=self&version=6.1.0
+## The release notes
 
-The release notes fetched through the device (`<base_url>` + the manifest's
-`notes` path, <= 16 KB): `text/markdown; charset=utf-8`. `target` is `self`
-or `dongle` (its own manifest's notes). `version` omitted = the target,
-else the channel's latest. 404 `no_notes`, 409 `busy` while a job runs,
-502 `fetch_failed`.
+There is no notes route since 2026-11-02 (`GET /api/fw_update/notes` is gone):
+each `latest` object of the snapshot carries `notes_url`, the absolute address
+of the release's notes on the release server (`base_url` + the manifest's
+`notes` path; `""` when the release has none), and the Firmware update page
+fetches it in the browser. The device never downloads them.

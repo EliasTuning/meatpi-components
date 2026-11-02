@@ -53,7 +53,6 @@ extern "C" {
 #define FWU_BASE_URL_LEN   129
 #define FWU_CERT_SET_LEN   25
 #define FWU_MANIFEST_CAP   (64 * 1024)
-#define FWU_NOTES_CAP      (16 * 1024)
 #define FWU_DEFAULT_BASE_URL \
     "https://raw.githubusercontent.com/meatpiHQ/meatpi-devices/main/"
 
@@ -66,7 +65,6 @@ extern "C" {
 #define FWU_HOLD_MINUTES     10
 #define FWU_HOLD_RENEW_US    (5LL * 60 * 1000000)
 #define FWU_RESTART_DELAY_MS 1500
-#define FWU_NOTES_WAIT_MS    25000
 
 #define FWU_DONGLE_DEVICE_TYPE "espnetlink"
 
@@ -142,10 +140,6 @@ typedef struct
 esp_err_t fwu_fetch_manifest(const fwu_config_t *cfg, const char *device_type,
                              const char *etag, fwu_fetch_result_t *out);
 
-/** GET base_url + notes path (<= 16 KB). */
-esp_err_t fwu_fetch_notes(const fwu_config_t *cfg, const char *path,
-                          fwu_fetch_result_t *out);
-
 typedef void (*fwu_progress_fn)(size_t received, size_t total);
 
 /**
@@ -176,7 +170,6 @@ typedef enum
 {
     FWU_CMD_CHECK = 0,
     FWU_CMD_INSTALL,
-    FWU_CMD_NOTES,
 } fwu_cmd_type_t;
 
 typedef struct
@@ -186,11 +179,6 @@ typedef struct
     uint32_t flags;
     uint32_t job_id;
     char     version[FW_UPDATE_VER_LEN];
-    /* FWU_CMD_NOTES: the answer */
-    SemaphoreHandle_t done;
-    esp_err_t *rc;
-    char    **out;
-    size_t   *out_len;
 } fwu_cmd_t;
 
 typedef struct
@@ -284,7 +272,6 @@ int64_t fwu_jittered_interval_us(void);
 /* the job runners (fw_update_job.c), called by the task */
 void fwu_run_check(uint32_t job_id);
 void fwu_run_install(const fwu_cmd_t *cmd);
-void fwu_run_notes(fwu_cmd_t *cmd);
 
 /* ---- the dongle relay (fw_update_dongle.c, 2026-10-19) ---------------------------- */
 
@@ -305,8 +292,6 @@ esp_err_t fwu_dongle_validate_install(const char *version, uint32_t flags,
 /** The relay job (the task). */
 void fwu_dongle_install(const fwu_cmd_t *cmd);
 
-/** The notes path of a dongle release ("" none), under the lock. */
-void fwu_dongle_notes_path(const char *version, char *path, size_t cap);
 
 /** The snapshot's dongle part (under the lock). */
 void fwu_dongle_status_fill(fw_update_status_t *out);

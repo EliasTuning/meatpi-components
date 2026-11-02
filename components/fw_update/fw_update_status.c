@@ -74,7 +74,13 @@ static void fill_self(fw_update_status_t *o, const fwu_manifest_t *m,
         strlcpy(o->latest_date, l->date, sizeof(o->latest_date));
         strlcpy(o->latest_summary, l->summary, sizeof(o->latest_summary));
         o->latest_size = l->size;
-        o->latest_notes = l->notes[0] != '\0';
+
+        if (l->notes[0] == '\0' ||
+            !fwu_compose_url(fwu_settings_config()->base_url, l->notes,
+                             o->latest_notes_url, sizeof(o->latest_notes_url)))
+        {
+            o->latest_notes_url[0] = '\0';
+        }
     }
 
     o->available = sel->available;

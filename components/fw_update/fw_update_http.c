@@ -23,7 +23,8 @@
 /**
  * @file fw_update_http.c
  * @brief The five routes (fw_update/HTTP_API.md): GET /api/fw_update,
- *        POST /api/fw_update/check, /install, /abort, GET /api/fw_update/notes.
+ *        POST /api/fw_update/check, /install, /abort (the release notes are the
+ *        page's own fetch of the snapshot's notes_url since 2026-11-02).
  *        Own-routes pattern (standard §6); errors carry a snake_case `code`
  *        beside the house `error` text.
  */
@@ -98,8 +99,6 @@ static const char *code_text(const char *code)
         { "bad_request", "bad request" },
         { "no_job", "no update job is running" },
         { "too_late", "the restart is scheduled: the job cannot be aborted" },
-        { "no_notes", "no release notes for that version" },
-        { "fetch_failed", "the release notes could not be fetched" },
     };
 
     for (size_t i = 0; i < sizeof(TEXTS) / sizeof(TEXTS[0]); i++)
@@ -183,7 +182,7 @@ static cJSON *target_self(const fw_update_status_t *s)
         cJSON_AddStringToObject(l, "version", s->latest_version);
         cJSON_AddStringToObject(l, "date", s->latest_date);
         cJSON_AddStringToObject(l, "summary", s->latest_summary);
-        cJSON_AddBoolToObject(l, "notes", s->latest_notes);
+        cJSON_AddStringToObject(l, "notes_url", s->latest_notes_url);
         cJSON_AddNumberToObject(l, "size", s->latest_size);
     }
     else
@@ -271,7 +270,7 @@ static cJSON *target_dongle(const fw_update_status_t *s)
         cJSON_AddStringToObject(l, "version", s->dongle_latest_version);
         cJSON_AddStringToObject(l, "date", s->dongle_latest_date);
         cJSON_AddStringToObject(l, "summary", s->dongle_latest_summary);
-        cJSON_AddBoolToObject(l, "notes", s->dongle_latest_notes);
+        cJSON_AddStringToObject(l, "notes_url", s->dongle_latest_notes_url);
         cJSON_AddNumberToObject(l, "size", s->dongle_latest_size);
     }
     else
@@ -603,58 +602,6 @@ static esp_err_t abort_handler(httpd_req_t *req)
     return send_json(req, o, "200 OK");
 }
 
-/* ---- GET /api/fw_update/notes ---------------------------------------------------- */
-
-static esp_err_t notes_handler(httpd_req_t *req)
-{
-    char query[96] = "";
-    char version[FW_UPDATE_VER_LEN] = "";
-    char target[8] = "self";
-    char *body = NULL;
-    size_t len = 0;
-
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
-    {
-        (void)httpd_query_key_value(query, "version", version, sizeof(version));
-        (void)httpd_query_key_value(query, "target", target, sizeof(target));
-    }
-
-    fw_update_target_t tg = FW_UPDATE_TARGET_SELF;
-
-    if (strcmp(target, "dongle") == 0)
-    {
-        tg = FW_UPDATE_TARGET_DONGLE;
-    }
-    else if (strcmp(target, "self") != 0)
-    {
-        return send_error(req, "400 Bad Request", "bad_request", NULL);
-    }
-
-    esp_err_t err = fw_update_notes(tg, version[0] ? version : NULL, &body, &len);
-
-    if (err == ESP_ERR_NOT_FOUND)
-    {
-        return send_error(req, "404 Not Found", "no_notes", NULL);
-    }
-
-    if (err == ESP_ERR_INVALID_STATE)
-    {
-        return send_error(req, "409 Conflict", "busy", NULL);
-    }
-
-    if (err != ESP_OK || body == NULL)
-    {
-        free(body);
-        return send_error(req, "502 Bad Gateway", "fetch_failed", NULL);
-    }
-
-    httpd_resp_set_type(req, "text/markdown; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    err = httpd_resp_send(req, body, (ssize_t)len);
-    free(body);
-    return err;
-}
-
 esp_err_t fw_update_register_http(void)
 {
     static const httpd_uri_t URIS[] =
@@ -666,8 +613,6 @@ esp_err_t fw_update_register_http(void)
           .handler = install_handler },
         { .uri = "/api/fw_update/abort", .method = HTTP_POST,
           .handler = abort_handler },
-        { .uri = "/api/fw_update/notes", .method = HTTP_GET,
-          .handler = notes_handler },
     };
 
     return http_server_manager_register_handlers(URIS,

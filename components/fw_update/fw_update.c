@@ -374,12 +374,6 @@ static void fwu_task(void *arg)
         {
             if (FWU->stopped)
             {
-                if (cmd.type == FWU_CMD_NOTES)
-                {
-                    *cmd.rc = ESP_ERR_INVALID_STATE;
-                    xSemaphoreGive(cmd.done);
-                }
-
                 continue;
             }
 
@@ -387,7 +381,6 @@ static void fwu_task(void *arg)
             {
                 case FWU_CMD_CHECK:   fwu_run_check(cmd.job_id); break;
                 case FWU_CMD_INSTALL: fwu_run_install(&cmd); break;
-                case FWU_CMD_NOTES:   fwu_run_notes(&cmd); break;
                 default:          break;
             }
 

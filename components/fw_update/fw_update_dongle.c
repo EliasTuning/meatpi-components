@@ -520,30 +520,7 @@ esp_err_t fwu_dongle_validate_install(const char *version, uint32_t flags,
     return ESP_OK;
 }
 
-/* ---- the notes and the snapshot ----------------------------------------------------------- */
-
-void fwu_dongle_notes_path(const char *version, char *path, size_t cap)
-{
-    path[0] = '\0';
-
-    if (!FWD->view_valid)
-    {
-        return;
-    }
-
-    int idx = (version != NULL && version[0] != '\0')
-                  ? fwu_find_version(&FWD->view, version) : FWD->sel.target;
-
-    if (idx < 0 && (version == NULL || version[0] == '\0'))
-    {
-        idx = FWD->sel.latest;
-    }
-
-    if (idx >= 0)
-    {
-        strlcpy(path, FWD->view.rel[idx].notes, cap);
-    }
-}
+/* ---- the snapshot ---------------------------------------------------------------- */
 
 void fwu_dongle_status_fill(fw_update_status_t *o)
 {
@@ -592,7 +569,14 @@ void fwu_dongle_status_fill(fw_update_status_t *o)
             strlcpy(o->dongle_latest_summary, l->summary,
                     sizeof(o->dongle_latest_summary));
             o->dongle_latest_size = l->size;
-            o->dongle_latest_notes = l->notes[0] != '\0';
+
+            if (l->notes[0] == '\0' ||
+                !fwu_compose_url(fwu_settings_config()->base_url, l->notes,
+                                 o->dongle_latest_notes_url,
+                                 sizeof(o->dongle_latest_notes_url)))
+            {
+                o->dongle_latest_notes_url[0] = '\0';
+            }
         }
 
         if (FWD->sel.target >= 0)
