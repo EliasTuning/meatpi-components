@@ -29,6 +29,8 @@
 #include "wireguard.h"
 #include "mbedtls/base64.h"
 #include "ip4_routes.h"   /* WiCAN: the tunnel's lwIP destination routes */
+#include "freertos/semphr.h"
+#include "arch/sys_arch.h" /* sys_thread_tcpip: am I the tcpip thread? */
 #include <string.h>
 #include <errno.h>
 
@@ -253,6 +255,22 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
  * on that thread. */
 static struct udp_pcb *s_wg_output_pcb = NULL;
 
+/* one outgoing WireGuard datagram handed to the tcpip thread */
+typedef struct {
+    struct pbuf *p;
+    ip_addr_t dst;
+    uint16_t port;
+} wg_udp_send_job_t;
+
+static void wg_udp_send_in_tcpip(void *arg) {
+    wg_udp_send_job_t *job = (wg_udp_send_job_t *)arg;
+    if (s_wg_output_pcb) {
+        udp_sendto(s_wg_output_pcb, job->p, &job->dst, job->port);
+    }
+    pbuf_free(job->p);
+    free(job);
+}
+
 static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
                                 const uint8_t *data, size_t len, void *ctx) {
     microlink_t *ml = (microlink_t *)ctx;
@@ -267,7 +285,6 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
              (int)dest_port,
              len >= 1 ? data[0] : -1);
 
-    /* Use raw PCB to send: safe from any thread context */
     if (!s_wg_output_pcb) return ERR_CONN;
 
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
@@ -278,14 +295,106 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
     IP_SET_TYPE_VAL(dst, IPADDR_TYPE_V4);
     ip4_addr_set_u32(ip_2_ip4(&dst), dest_ip);  /* already network byte order */
 
-    err_t err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port);
-    pbuf_free(p);
-    return err;
+    /* udp_sendto is lwIP core: direct on the tcpip thread (the data path:
+     * ip_output -> wireguardif_output -> here), posted from this task (the
+     * handshakes and keepalives of wireguardif_periodic / _connect and the
+     * relay's wireguardif_network_rx; WiCAN 2026-11-02, the thread-check
+     * build asserted here next after the link flags). The pbuf travels with
+     * the job and is freed on the tcpip thread. */
+    if (sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)) {
+        err_t err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port);
+        pbuf_free(p);
+        return err;
+    }
+
+    wg_udp_send_job_t *job = (wg_udp_send_job_t *)malloc(sizeof(*job));
+    if (!job) {
+        pbuf_free(p);
+        return ERR_MEM;
+    }
+    job->p = p;
+    job->dst = dst;
+    job->port = dest_port;
+    if (tcpip_callback(wg_udp_send_in_tcpip, job) != ERR_OK) {
+        pbuf_free(p);
+        free(job);
+        return ERR_MEM;
+    }
+    return ERR_OK;
 }
 
 /* ============================================================================
  * WireGuard Interface Initialization
  * ========================================================================== */
+
+/* WiCAN (2026-11-02, the beta.5 vpn_state crashes of esp_wireguard, the same
+ * class here): lwIP's core (the netif list, netif_set_up/down, netif_remove,
+ * udp_new) runs on the tcpip thread only, and this firmware has no core lock.
+ * netif_remove on a netif that still has an address aborts and frees every
+ * TCP connection on it, which must not happen from this task while the tcpip
+ * thread uses them. The netif's attach and detach run inside the tcpip thread
+ * (the ml_zerocopy pattern: tcpip_callback and a semaphore). */
+typedef struct {
+    void (*fn)(struct netif *netif);
+    struct netif *netif;
+    SemaphoreHandle_t done;
+} wg_tcpip_job_t;
+
+static void wg_tcpip_trampoline(void *arg) {
+    wg_tcpip_job_t *job = (wg_tcpip_job_t *)arg;
+    job->fn(job->netif);
+    xSemaphoreGive(job->done);
+}
+
+static esp_err_t wg_mgr_in_tcpip(void (*fn)(struct netif *netif), struct netif *netif) {
+    wg_tcpip_job_t job = { .fn = fn, .netif = netif, .done = xSemaphoreCreateBinary() };
+    if (!job.done) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (tcpip_callback(wg_tcpip_trampoline, &job) != ERR_OK) {
+        vSemaphoreDelete(job.done);
+        ESP_LOGE(TAG, "tcpip_callback: no message buffer");
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreTake(job.done, portMAX_DELAY);
+    vSemaphoreDelete(job.done);
+    return ESP_OK;
+}
+
+/* in the tcpip thread: the netif onto lwIP's list and up, the raw output pcb */
+static void wg_netif_attach_in_tcpip(struct netif *netif) {
+    /* Add to lwIP netif list (bypass netif_add which wants init callback) */
+    netif->next = netif_list;
+    netif_list = netif;
+
+    /* Bring interface up */
+    netif_set_up(netif);
+    netif_set_link_up(netif);
+
+    /* Create raw UDP PCB for WG output (avoids BSD sendto deadlock on TCPIP
+     * thread).  Bind to port 51820 to match the DISCO socket source port.
+     * The existing BSD disco_sock4 is only used from the wg_mgr task for
+     * DISCO/STUN; this raw PCB is used from the TCPIP thread for WG output. */
+    if (!s_wg_output_pcb) {
+        s_wg_output_pcb = udp_new();
+        if (s_wg_output_pcb) {
+            /* Set source port to 51820 (matching DISCO socket) WITHOUT calling
+             * udp_bind: avoids registering for input which would steal WG
+             * responses from the DISCO BSD socket. udp_sendto uses local_port. */
+            s_wg_output_pcb->local_port = 51820;
+            /* DSCP 46 (EF) = WMM AC_VO for low-latency WiFi scheduling */
+            s_wg_output_pcb->tos = 0xB8;
+        }
+    }
+}
+
+/* in the tcpip thread: the device's timer gone, the netif down and off the list */
+static void wg_netif_detach_in_tcpip(struct netif *netif) {
+    wireguardif_shutdown(netif);
+    netif_set_link_down(netif);
+    netif_set_down(netif);
+    netif_remove(netif);
+}
 
 static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Convert our WG private key to base64 */
@@ -336,28 +445,12 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
      * callback uses raw udp_sendto (not BSD sendto) to avoid deadlock. */
     netif->input = tcpip_input;
 
-    /* Add to lwIP netif list (bypass netif_add which wants init callback) */
-    netif->next = netif_list;
-    netif_list = netif;
-
-    /* Bring interface up */
-    netif_set_up(netif);
-    netif_set_link_up(netif);
-
-    /* Create raw UDP PCB for WG output (avoids BSD sendto deadlock on TCPIP
-     * thread).  Bind to port 51820 to match the DISCO socket source port.
-     * The existing BSD disco_sock4 is only used from the wg_mgr task for
-     * DISCO/STUN; this raw PCB is used from the TCPIP thread for WG output. */
-    if (!s_wg_output_pcb) {
-        s_wg_output_pcb = udp_new();
-        if (s_wg_output_pcb) {
-            /* Set source port to 51820 (matching DISCO socket) WITHOUT calling
-             * udp_bind: avoids registering for input which would steal WG
-             * responses from the DISCO BSD socket. udp_sendto uses local_port. */
-            s_wg_output_pcb->local_port = 51820;
-            /* DSCP 46 (EF) → WMM AC_VO for low-latency WiFi scheduling */
-            s_wg_output_pcb->tos = 0xB8;
-        }
+    /* the list, the up flags and the raw output pcb: inside the tcpip thread */
+    if (wg_mgr_in_tcpip(wg_netif_attach_in_tcpip, netif) != ESP_OK) {
+        ESP_LOGE(TAG, "WG netif attach: no tcpip message");
+        wireguardif_fini(netif);
+        free(netif);
+        return ESP_FAIL;
     }
 
     /* Register output callbacks for magicsock mode */
@@ -1759,12 +1852,14 @@ void ml_wg_mgr_task(void *arg) {
         struct netif *netif = (struct netif *)ml->wg_netif;
         ip4_routes_clear(netif);    /* WiCAN: before the netif goes */
         ml->route_count = 0;
-        wireguardif_shutdown(netif);
-        netif_set_link_down(netif);
-        netif_set_down(netif);
         vTaskDelay(pdMS_TO_TICKS(100));
-        netif_remove(netif);
-        free(netif);
+        /* the timer, the down flags and the list removal (which aborts the
+         * TCP connections on the tunnel address): inside the tcpip thread */
+        if (wg_mgr_in_tcpip(wg_netif_detach_in_tcpip, netif) != ESP_OK) {
+            ESP_LOGE(TAG, "WG netif detach: no tcpip message (netif leaked)");
+        } else {
+            free(netif);
+        }
         ml->wg_netif = NULL;
     }
 

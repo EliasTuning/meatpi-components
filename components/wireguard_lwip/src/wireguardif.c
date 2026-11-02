@@ -65,6 +65,39 @@
 // Forward declaration for timer cancellation in wireguardif_shutdown
 static void wireguardif_tmr(void *arg);
 
+// WiCAN (2026-11-02): the netif link flag is lwIP core state and may only be
+// changed on the tcpip thread (the thread-check build asserted in
+// wireguardif_periodic, task ml_wg_mgr, 9 s after a Tailscale start). The
+// esp_wireguard client runs this driver from the tcpip timer, where the direct
+// call is right; microlink runs wireguardif_periodic and the relay's receive
+// path on its own task, so the change is posted from there (fire and forget:
+// the next periodic pass re-evaluates the state).
+#include "arch/sys_arch.h"
+
+static void wg_link_up_in_tcpip(void *arg) {
+	netif_set_link_up((struct netif *)arg);
+}
+
+static void wg_link_down_in_tcpip(void *arg) {
+	netif_set_link_down((struct netif *)arg);
+}
+
+static void wg_set_link(struct netif *netif, bool up) {
+	if (sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)) {
+		if (up) {
+			netif_set_link_up(netif);
+		} else {
+			netif_set_link_down(netif);
+		}
+		return;
+	}
+	// already in that state: nothing to post (netif_is_link_up is a flag read)
+	if (up == (netif_is_link_up(netif) != 0)) {
+		return;
+	}
+	(void)tcpip_callback(up ? wg_link_up_in_tcpip : wg_link_down_in_tcpip, netif);
+}
+
 // Flag to disable internal UDP socket binding (for magicsock mode)
 static bool g_disable_socket_bind = false;
 
@@ -441,7 +474,7 @@ static void wireguardif_process_response_message(struct wireguard_device *device
 		wireguardif_send_keepalive(device, peer);
 
 		// Set the IF-UP flag on netif
-		netif_set_link_up(device->netif);
+		wg_set_link(device->netif, true);
 		printf("[WG] *** WIREGUARD SESSION ESTABLISHED wg_idx=%u ***\n", wg_idx);
 	} else {
 		// Packet bad
@@ -532,7 +565,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					}
 
 					// Make sure that link is reported as up
-					netif_set_link_up(device->netif);
+					wg_set_link(device->netif, true);
 
 					if (pbuf->tot_len > 0) {
 						//4a. Once the packet payload is decrypted, the interface has a plaintext packet. If this is not an IP packet, it is dropped.
@@ -587,10 +620,20 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 
 								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
 								if (dest_ok) {
-									// Send packet to be processed by LWIP
+									// Send packet to be processed by LWIP through the netif's
+									// input function: ip_input for a driver run from the tcpip
+									// thread (esp_wireguard's UDP receive callback), tcpip_input
+									// for microlink, whose DISCO socket and relay hand packets
+									// in from its own task (WiCAN 2026-11-02: a direct ip_input
+									// here ran lwIP's whole IP/TCP input on that task; the
+									// thread-check build asserted on the first tunnel packet).
+									// tcpip_input leaves the pbuf to the caller when its post
+									// fails; ip_input always consumes it.
 									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
-									ip_input(pbuf, device->netif);
-									// pbuf is owned by IP layer now
+									if (device->netif->input(pbuf, device->netif) != ERR_OK) {
+										pbuf_free(pbuf);
+									}
+									// pbuf is owned by the IP layer (or freed) now
 									pbuf = NULL;
 								} else {
 									WG_DEBUG("[WG_RX_IP] DROPPED: dest_ok=false\n");
@@ -1223,7 +1266,7 @@ static void wireguardif_tmr(void *arg) {
 
 	if (!link_up) {
 		// Clear the IF-UP flag on netif
-		netif_set_link_down(device->netif);
+		wg_set_link(device->netif, false);
 	}
 }
 
@@ -1273,7 +1316,7 @@ void wireguardif_periodic(struct netif *netif) {
 		}
 	}
 	if (!link_up) {
-		netif_set_link_down(device->netif);
+		wg_set_link(device->netif, false);
 	}
 }
 

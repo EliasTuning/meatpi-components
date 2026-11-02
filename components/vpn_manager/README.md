@@ -109,6 +109,25 @@ command (`held: ...`). The relay's state is `/api/vpn` `derp` (`relay up` /
 internal RAM left at that moment. Bench: `ts_public_soak.sh` (the DERP leg,
 the internal-RAM-flat leg; `.\test.ps1 tspublic`).
 
+## The tunnel's lwIP work runs on the tcpip thread (2026-11-02)
+
+lwIP's core (netif, udp, the timeouts) is single-threaded: it runs on the tcpip
+thread, or under the core lock, which this firmware does not build
+(`CONFIG_LWIP_TCPIP_CORE_LOCKING` off). Two beta.5 crash reports in task
+`vpn_state` (a double free in `tlsf_free`, an InstructionFetchError in
+`tcp_abandon`) were `esp_wireguard_disconnect()` clearing the tunnel address
+from this component's state task: lwIP then aborted and freed every TCP
+connection on the tunnel address (the MQTT broker behind the tunnel) while the
+tcpip thread was using them. Since then every lwIP core sequence of the
+WireGuard client (`esp_wireguard`) and of the Tailscale client's netif
+(`microlink`'s `ml_wg_mgr.c`) runs inside the tcpip thread through
+`tcpip_callback`; `vpn_wg_down()` and `vpn_wg_up()` only call them. The rule
+for any new code on the state task: never call a `netif_*`, `udp_*`, `tcp_*`
+or `sys_timeout` function directly; post it. A build with
+`CONFIG_LWIP_CHECK_THREAD_SAFETY=y` asserts the rule at the first wrong call
+(the diagnostic of `internal/TASK_wg_teardown_race.md`); the race bench is
+`.\test.ps1 wgcycle`.
+
 ## Surfaces
 
 - `GET /api/vpn`: `{state, type, endpoint, network, paused, routes, ts_ip, ts_peers, derp, reason, connects, failures, uptime_s, peers}` (`state` is `disabled | waiting | paused | connecting | connected`; `network` = the station's network, "" without one; `derp` (2026-10-31, issue 1024) = the Tailscale DERP relay connection is up, false for wireguard, while the relay is in backoff and before the first map; `reason` = why the tunnel is held in `waiting`, "" otherwise, see the internal-RAM floor below; `routes` = for wireguard the `routes` setting's networks, for tailscale (2026-11-01) the subnet routes learned from the tailnet, see below).
@@ -170,6 +189,12 @@ loop simply succeeds once the tunnel routes the broker. If retry
 latency ever hurts, add a rule on `vpn.state`.
 
 ## Footprint
+
+Since 2026-11-02 the WireGuard client keeps one binary semaphore (a FreeRTOS object,
+internal RAM, about 80 B, created at the first tunnel and kept) for the lwIP jobs it
+posts to the tcpip thread; the Tailscale client creates and deletes one per netif
+attach or detach and allocates one small job (24 B) per handshake packet it sends from
+its own task, freed on the tcpip thread.
 
 PSRAM: the two peer-snapshot tables of the HTTP and CLI surfaces (1.3 KB each, PSRAM since 2026-09-22), the two route-snapshot tables (2026-11-01, 320 B each), the 176 B hold reason, and since 2026-11-01 the 6 KB state-task stack (`vpn_manager.c`: it was internal because the Tailscale start reads and writes the device keys in NVS from it, `WICAN RAMMAP vpn_manager=6520`; microlink runs that work through its `flash_run` hook now, which `vpn_manager_ts.c` sets to `flash_jobs_run`, the shared internal-stack worker, and the WireGuard manager task of the client moved with it: lever 2 of `internal/TASK_ble_tailscale_margin.md`). The TCB stays internal (FreeRTOS). `.\test.ps1 stackaudit` asserts both placements whenever the tasks exist; `tspublic` asserts them with the tunnel up.
 

@@ -35,6 +35,9 @@
 #include <lwip/ip.h>
 #include <lwip/netdb.h>
 #include <lwip/err.h>
+#include <lwip/tcpip.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_wireguard.h>
@@ -57,6 +60,67 @@ static struct netif *wg_netif = NULL;
 static struct wireguardif_peer peer = {0};
 static uint8_t s_wg_peer_index = WIREGUARDIF_INVALID_INDEX;
 static uint8_t preshared_key_decoded[WG_KEY_LEN];
+
+/* WICAN FIX (2026-11-02, the two beta.5 crash reports in task vpn_state):
+ * lwIP's core (netif, udp, the timeouts) runs on the tcpip thread only, and
+ * this firmware has no core lock (CONFIG_LWIP_TCPIP_CORE_LOCKING off).
+ * Upstream called netif_add, netif_set_up, netif_set_default,
+ * netif_set_ipaddr and netif_remove from the caller's task; at the
+ * disconnect, netif_set_ipaddr(ANY) made lwIP abort and free every TCP
+ * connection on the tunnel address (MQTT, Home Assistant) from the vpn_state
+ * task while the tcpip thread was using them: a double free in tlsf_free,
+ * a freed callback pointer in tcp_abandon. Every lwIP core sequence of this
+ * file now runs inside the tcpip thread through wg_in_tcpip(); only the
+ * peer's name resolution (getaddrinfo, which needs the tcpip thread free)
+ * stays on the caller. The callers are serialized by construction (one
+ * tunnel, vpn_manager's state task), hence the one semaphore; a caller
+ * must never be the tcpip thread itself (it would wait for itself). */
+typedef esp_err_t (*wg_tcpip_fn)(void *arg);
+
+struct wg_tcpip_job
+{
+    wg_tcpip_fn fn;
+    void *arg;
+    esp_err_t result;
+    SemaphoreHandle_t done;
+};
+
+static void wg_tcpip_trampoline(void *ctx)
+{
+    struct wg_tcpip_job *job = (struct wg_tcpip_job *)ctx;
+
+    job->result = job->fn(job->arg);
+    xSemaphoreGive(job->done);
+}
+
+static esp_err_t wg_in_tcpip(wg_tcpip_fn fn, void *arg)
+{
+    static SemaphoreHandle_t s_done; /* internal: FreeRTOS object, 80 B */
+
+    if (s_done == NULL)
+    {
+        s_done = xSemaphoreCreateBinary();
+
+        if (s_done == NULL)
+        {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    struct wg_tcpip_job job =
+    {
+        .fn = fn, .arg = arg, .result = ESP_FAIL, .done = s_done,
+    };
+
+    if (tcpip_callback(wg_tcpip_trampoline, &job) != ERR_OK)
+    {
+        ESP_LOGE(TAG, "tcpip_callback: no message buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    xSemaphoreTake(s_done, portMAX_DELAY);
+    return job.result;
+}
 
 static esp_err_t esp_wireguard_peer_init(const wireguard_config_t *config, struct wireguardif_peer *peer)
 {
@@ -150,18 +214,16 @@ fail:
     return err;
 }
 
-static esp_err_t esp_wireguard_netif_create(const wireguard_config_t *config)
+/* in the tcpip thread: the netif into lwIP (netif_add runs wireguardif_init:
+ * the UDP pcb, its receive callback and the periodic timeout) and up */
+static esp_err_t netif_create_in_tcpip(void *arg)
 {
+    const wireguard_config_t *config = (const wireguard_config_t *)arg;
     esp_err_t err;
     ip_addr_t ip_addr;
     ip_addr_t netmask;
     ip_addr_t gateway = IPADDR4_INIT_BYTES(0, 0, 0, 0);
     struct wireguardif_init_data wg = {0};
-
-    if (!config) {
-        err = ESP_ERR_INVALID_ARG;
-        goto fail;
-    }
 
     // Always start with a clean netif struct. If a previous session ended
     // via netif_remove(), the struct's `next` pointer is left stale; reusing
@@ -208,6 +270,81 @@ fail:
     return err;
 }
 
+static esp_err_t esp_wireguard_netif_create(const wireguard_config_t *config)
+{
+    if (!config)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return wg_in_tcpip(netif_create_in_tcpip, (void *)config);
+}
+
+/* in the tcpip thread: the peer into the device (its table is read by the
+ * receive callback and the timer on that thread) */
+static esp_err_t peer_add_in_tcpip(void *arg)
+{
+    (void)arg;
+    err_t lwip_err = wireguardif_add_peer(wg_netif, &peer, &s_wg_peer_index);
+
+    if (lwip_err != ERR_OK || s_wg_peer_index == WIREGUARDIF_INVALID_INDEX)
+    {
+        ESP_LOGE(TAG, "wireguardif_add_peer: %i", lwip_err);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+/* in the tcpip thread: the handshake starts (udp_sendto on the device's pcb) */
+static esp_err_t connect_in_tcpip(void *arg)
+{
+    (void)arg;
+    err_t lwip_err = wireguardif_connect(wg_netif, s_wg_peer_index);
+
+    if (lwip_err != ERR_OK)
+    {
+        ESP_LOGE(TAG, "wireguardif_connect: %i", lwip_err);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+/* in the tcpip thread: the peer out, the timer and the pcb gone, the netif
+ * out of lwIP (netif_remove aborts the TCP connections on its address when
+ * it still has one: the field crash was this walk off the thread) */
+static esp_err_t netif_destroy_in_tcpip(void *arg)
+{
+    struct netif *netif = (struct netif *)arg;
+
+    if (s_wg_peer_index != WIREGUARDIF_INVALID_INDEX)
+    {
+        err_t lwip_err = wireguardif_disconnect(netif, s_wg_peer_index);
+
+        if (lwip_err != ERR_OK)
+        {
+            ESP_LOGW(TAG, "wireguardif_disconnect: peer_index: %" PRIu8 " err: %i",
+                     s_wg_peer_index, lwip_err);
+        }
+
+        lwip_err = wireguardif_remove_peer(netif, s_wg_peer_index);
+
+        if (lwip_err != ERR_OK)
+        {
+            ESP_LOGW(TAG, "wireguardif_remove_peer: peer_index: %" PRIu8 " err: %i",
+                     s_wg_peer_index, lwip_err);
+        }
+
+        s_wg_peer_index = WIREGUARDIF_INVALID_INDEX;
+    }
+
+    wireguardif_shutdown(netif);
+    netif_remove(netif);
+    wireguardif_fini(netif);
+    return ESP_OK;
+}
+
 esp_err_t esp_wireguard_init(wireguard_config_t *config, wireguard_ctx_t *ctx)
 {
     esp_err_t err = ESP_FAIL;
@@ -229,7 +366,6 @@ fail:
 esp_err_t esp_wireguard_connect(wireguard_ctx_t *ctx)
 {
     esp_err_t err = ESP_FAIL;
-    err_t lwip_err = -1;
     bool created_netif = false;
 
     if (!ctx) {
@@ -253,9 +389,8 @@ esp_err_t esp_wireguard_connect(wireguard_ctx_t *ctx)
         }
 
         /* Register the new WireGuard peer with the network interface */
-        lwip_err = wireguardif_add_peer(wg_netif, &peer, &s_wg_peer_index);
-        if (lwip_err != ERR_OK || s_wg_peer_index == WIREGUARDIF_INVALID_INDEX) {
-            ESP_LOGE(TAG, "wireguardif_add_peer: %i", lwip_err);
+        err = wg_in_tcpip(peer_add_in_tcpip, NULL);
+        if (err != ESP_OK) {
             goto fail;
         }
         if (ip_addr_isany(&peer.endpoint_ip)) {
@@ -267,13 +402,7 @@ esp_err_t esp_wireguard_connect(wireguard_ctx_t *ctx)
     }
 
     ESP_LOGI(TAG, "Connecting to %s:%i", ctx->config->endpoint, ctx->config->port);
-    lwip_err = wireguardif_connect(wg_netif, s_wg_peer_index);
-    if (lwip_err != ERR_OK) {
-        ESP_LOGE(TAG, "wireguardif_connect: %i", lwip_err);
-        err = ESP_FAIL;
-        goto fail;
-    }
-    err = ESP_OK;
+    err = wg_in_tcpip(connect_in_tcpip, NULL);
 fail:
     // If we created the netif in this call but failed before ctx->netif was set,
     // clean up the lwIP netif. Otherwise a later retry will hit:
@@ -281,15 +410,7 @@ fail:
     if (err != ESP_OK && created_netif && ctx && ctx->netif == NULL && wg_netif != NULL)
     {
         // Best-effort cleanup (some steps may fail depending on how far we got)
-        if (s_wg_peer_index != WIREGUARDIF_INVALID_INDEX)
-        {
-            (void)wireguardif_disconnect(wg_netif, s_wg_peer_index);
-            (void)wireguardif_remove_peer(wg_netif, s_wg_peer_index);
-            s_wg_peer_index = WIREGUARDIF_INVALID_INDEX;
-        }
-        wireguardif_shutdown(wg_netif);
-        netif_remove(wg_netif);
-        wireguardif_fini(wg_netif);
+        (void)wg_in_tcpip(netif_destroy_in_tcpip, wg_netif);
         wg_netif = NULL;
         memset(&wg_netif_struct, 0, sizeof(wg_netif_struct));
     }
@@ -305,59 +426,68 @@ fail:
  * underlay hairpinned via WiFi while the LTE uplink sat idle). */
 static bool s_default_route_taken = false;
 
-esp_err_t esp_wireguard_set_default(wireguard_ctx_t *ctx)
+/* in the tcpip thread: the tunnel becomes the default route */
+static esp_err_t set_default_in_tcpip(void *arg)
 {
-    esp_err_t err;
-    if (!ctx) {
-        err = ESP_ERR_INVALID_ARG;
-        goto fail;
-    }
+    wireguard_ctx_t *ctx = (wireguard_ctx_t *)arg;
+
     /* capture at TAKEOVER time (not init) so the restore target is the
      * default that was actually in effect when we took the route */
     ctx->netif_default = netif_default;
     netif_set_default(ctx->netif);
     s_default_route_taken = true;
-    err = ESP_OK;
-fail:
-    return err;
+    return ESP_OK;
+}
+
+esp_err_t esp_wireguard_set_default(wireguard_ctx_t *ctx)
+{
+    if (!ctx)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return wg_in_tcpip(set_default_in_tcpip, ctx);
+}
+
+/* in the tcpip thread: the address cleared (lwIP aborts every TCP
+ * connection on it: the walk of the beta.5 crashes, on its own thread now),
+ * the peer and the netif out, the default route given back */
+static esp_err_t disconnect_in_tcpip(void *arg)
+{
+    wireguard_ctx_t *ctx = (wireguard_ctx_t *)arg;
+
+    // Clear the IP address to gracefully disconnect any clients while the
+    // peers are still valid
+    netif_set_ipaddr(ctx->netif, IP4_ADDR_ANY4);
+
+    (void)netif_destroy_in_tcpip(ctx->netif);
+
+    /* WICAN FIX (BUG_WG_DEFAULT_NETIF_CLOBBER.md): restore ONLY what we
+     * took. default_route=false sessions never touched the default,
+     * restoring here clobbered another owner's route pin on every
+     * reconnect cycle. */
+    if (s_default_route_taken)
+    {
+        netif_set_default(ctx->netif_default);
+        s_default_route_taken = false;
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t esp_wireguard_disconnect(wireguard_ctx_t *ctx)
 {
     esp_err_t err;
-    err_t lwip_err;
 
     if (!ctx) {
         err = ESP_ERR_INVALID_ARG;
         goto fail;
     }
 
-    // Clear the IP address to gracefully disconnect any clients while the
-    // peers are still valid
-    netif_set_ipaddr(ctx->netif, IP4_ADDR_ANY4);
-
-    lwip_err = wireguardif_disconnect(ctx->netif, s_wg_peer_index);
-    if (lwip_err != ERR_OK) {
-        ESP_LOGW(TAG, "wireguardif_disconnect: peer_index: %" PRIu8 " err: %i", s_wg_peer_index, lwip_err);
-    }
-
-    lwip_err = wireguardif_remove_peer(ctx->netif, s_wg_peer_index);
-    if (lwip_err != ERR_OK) {
-        ESP_LOGW(TAG, "wireguardif_remove_peer: peer_index: %" PRIu8 " err: %i", s_wg_peer_index, lwip_err);
-    }
-
-    s_wg_peer_index = WIREGUARDIF_INVALID_INDEX;
-    wireguardif_shutdown(ctx->netif);
-    netif_remove(ctx->netif);
-    wireguardif_fini(ctx->netif);
-
-    /* WICAN FIX (BUG_WG_DEFAULT_NETIF_CLOBBER.md): restore ONLY what we
-     * took. default_route=false sessions never touched the default,
-     * restoring here clobbered another owner's route pin on every
-     * reconnect cycle. */
-    if (s_default_route_taken) {
-        netif_set_default(ctx->netif_default);
-        s_default_route_taken = false;
+    err = wg_in_tcpip(disconnect_in_tcpip, ctx);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "disconnect: %s", esp_err_to_name(err));
+        goto fail;
     }
     ctx->netif = NULL;
 

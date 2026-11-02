@@ -167,6 +167,22 @@ DERP stack are validated through `vpn_manager` on the bench
     is the snapshot for `/api/vpn`. Upstream never read `AllowedIPs`, so a
     network behind a subnet router was unreachable from the client.
 
+19. **The WireGuard netif attached and detached inside the tcpip thread**
+    (2026-11-02, the same class as the two beta.5 `vpn_state` crash reports
+    of esp_wireguard): `ml_wg_mgr.c` put the netif onto lwIP's list by hand,
+    set it up and created the raw output pcb from its own task, and at the
+    task's exit ran `netif_set_down` + `netif_remove` there too; lwIP's core
+    is single-threaded and this firmware has no core lock, and `netif_remove`
+    on a netif that still has an address aborts and frees every TCP
+    connection on it. Both blocks run through `tcpip_callback` and a
+    semaphore now (`wg_mgr_in_tcpip`, the `ml_zerocopy.c` pattern). The
+    task's other raw calls (`wireguardif_connect`, `_update_endpoint`,
+    `_add_peer`, `_remove_peer`, `wireguardif_periodic`, `wireguardif_network_rx`
+    on the relay path) still run on the task: they touch the device's own
+    peer table and send through the raw pcb; a `CONFIG_LWIP_CHECK_THREAD_SAFETY`
+    build names them (`udp_sendto` asserts), see
+    `internal/TASK_wg_teardown_race.md` for what the bench showed.
+
 ## Upstream layout kept
 
 `microlink.h` public API, `src/ml_*.c` (coord/derp/net_io/wg_mgr/stun/
