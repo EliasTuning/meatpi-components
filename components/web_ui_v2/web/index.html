@@ -2102,6 +2102,10 @@ PAGES.status=async(view)=>{
   p.append(cardsEl,hintEl,colsEl);
   /* this boot's cause is fixed for the whole boot, fetched once, not every refresh */
   const hist=await tryGet("/api/restart/history");
+  /* whether MQTT is enabled at all (2026-11-03): "Off" read as disabled while a
+     broker behind a VPN was merely unreachable; the setting is fetched once */
+  const mq=await tryGet("/api/settings/mqtt_manager");
+  const mqttOn=!!(mq&&mq.enabled);
   const recs=(hist&&hist.records)||[];
   const wake=wakeSource(recs.find(r=>hist&&r.seq===hist.boot_count)||recs[0]);
   const crashed=recs.find(r=>r.crash); /* newest first: the last crash on record */
@@ -2139,7 +2143,7 @@ PAGES.status=async(view)=>{
         ["mDNS",(st.device_id||(conn.info&&conn.info.device_id))?("wican_"+(st.device_id||conn.info.device_id)+".local"):"-"],
         ["Bluetooth ID",st.bluetooth_id||(st.device_id||(conn.info&&conn.info.device_id)?("WiC_"+(st.device_id||conn.info.device_id)):"-")],
         ["WiFi MAC",st.wifi_mac||(conn.info&&conn.info.mac)||"-"],
-        ["MQTT",b.mqtt_connected?"Connected":"Off"],
+        ["MQTT",b.mqtt_connected?"Connected":(mqttOn?"Not connected":"Off")],
         ["VPN",vpn?vpnWord(vpn):"-"]])),
       card("System","cpu",kv([
         ["Firmware",st.version||"-"],
