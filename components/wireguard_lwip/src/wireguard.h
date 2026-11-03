@@ -86,6 +86,14 @@ typedef err_t (*wireguard_derp_output_fn)(const uint8_t *peer_public_key, const 
 // Returns: ERR_OK on success, error code on failure
 typedef err_t (*wireguard_udp_output_fn)(uint32_t dest_ip, uint16_t dest_port, const uint8_t *data, size_t len, void *ctx);
 
+// WiCAN (2026-11-03): lwIP handed the netif a data packet for a peer that
+// has no session (or an expired one). The packet is dropped as before
+// (ERR_CONN); the owner starts the handshake the way it sees fit (through
+// the relay, to a direct address DISCO has proven). Runs on the thread that
+// called netif->output (the tcpip thread for lwIP traffic): it must not
+// block and must not touch the driver.
+typedef void (*wireguard_session_wanted_fn)(const uint8_t *peer_public_key, void *ctx);
+
 struct wireguard_keypair {
 	bool valid;
 	bool initiator; // Did we initiate this session (send the initiation packet rather than sending the response packet)
@@ -214,6 +222,10 @@ struct wireguard_device {
 
 	// Force all peer output through DERP relay (cellular mode)
 	bool force_derp_output;
+
+	// WiCAN (2026-11-03): see wireguard_session_wanted_fn
+	wireguard_session_wanted_fn session_wanted_fn;
+	void *session_wanted_ctx;
 
 	bool valid;
 };

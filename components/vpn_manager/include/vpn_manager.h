@@ -80,6 +80,8 @@ typedef struct
     char        ts_ip[16];        /**< tailnet 100.x address ("" none)  */
     int         ts_peers;         /**< tailnet peers visible            */
     bool        ts_derp;          /**< the DERP relay connection is up  */
+    uint16_t    ts_derp_region;   /**< the relay region the home connection
+                                       uses (2026-11-03; 0 for wireguard)  */
     char        reason[176];      /**< why the tunnel is held in waiting
                                        ("" none): the internal-RAM floor */
     uint32_t    connects;         /**< successful peer-up transitions   */

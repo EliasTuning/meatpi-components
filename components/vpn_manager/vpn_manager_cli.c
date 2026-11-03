@@ -79,8 +79,9 @@ static int cmd_vpn(int argc, char **argv)
 
     if (st.tailscale && st.ts_ip[0])
     {
-        cmdline_printf("  tailnet ip %s, %d peer(s), relay %s\n", st.ts_ip,
-                       st.ts_peers, st.ts_derp ? "up" : "down");
+        cmdline_printf("  tailnet ip %s, %d peer(s), relay %s (home region %u)\n",
+                       st.ts_ip, st.ts_peers, st.ts_derp ? "up" : "down",
+                       (unsigned)st.ts_derp_region);
 
         static vpn_ts_peer_t peers[16] EXT_RAM_BSS_ATTR; /* console task only; PSRAM (1.3 KB) */
         int n = vpn_ts_get_peers(peers, 16);

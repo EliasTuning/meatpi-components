@@ -100,6 +100,9 @@ static esp_err_t vpn_get_handler(httpd_req_t *req)
     /* the DERP relay (2026-10-31, issue 1024): false until the relay
      * handshake is through, and while the relay is in backoff */
     cJSON_AddBoolToObject(obj, "derp", st.ts_derp);
+    /* the home relay's region (2026-11-03): where the peers reach this
+     * node; a peer is sent to through its own region */
+    cJSON_AddNumberToObject(obj, "derp_region", st.ts_derp_region);
     /* the internal-RAM floor (issue 1024): "" unless the tunnel is held */
     cJSON_AddStringToObject(obj, "reason", st.reason);
     cJSON_AddNumberToObject(obj, "connects", st.connects);

@@ -147,6 +147,45 @@ static void routes_allow(struct netif *netif, u8_t wg_idx, const ml_peer_t *p) {
 static disco_probe_t pending_probes[MAX_PENDING_PROBES];
 
 /* ============================================================================
+ * WiCAN (2026-11-03): sessions on demand for lwIP traffic
+ *
+ * The firmware's own sockets (MQTT, the webhook poster, the destinations)
+ * reach a peer through lwIP: ip4_routes sends the packet into the tunnel
+ * netif and the driver looks the peer up by its allowed address. Without a
+ * session the driver drops the packet (ERR_CONN) and, as ported, nothing
+ * started one: a session came only from the peer initiating, from a DISCO
+ * pong over a direct path (the one-shot in process_disco_pong) or from
+ * microlink's own ml_tcp/ml_udp API, which the firmware does not use. A
+ * WiCAN on a phone hotspot (no direct path through two NATs) talking to a
+ * subnet router at home (which never contacts the WiCAN) therefore never
+ * had a session, and every connection attempt timed out while the VPN page
+ * said connected. The driver now reports the want
+ * (wireguardif_set_session_wanted, on the tcpip thread: a timestamp per
+ * peer slot, nothing else) and this task starts the handshake: through the
+ * relay (the peer's own region, ml_derp_pool.c), or to the direct address
+ * when DISCO has proven one. The driver's own timer retries every
+ * REKEY_TIMEOUT while the peer is active; the want expires after
+ * ML_SESSION_WANT_MS (WireGuard's REKEY_ATTEMPT_TIME, 90 s) without lwIP
+ * asking again and the peer goes passive, so a dead peer costs nothing.
+ * ========================================================================== */
+#define ML_SESSION_WANT_MS   90000u
+
+static volatile uint32_t s_session_want_ms[ML_MAX_PEERS];   /* 0 = none; the tcpip thread writes */
+static uint32_t s_session_started_ms[ML_MAX_PEERS];         /* the window's first handshake; wg_mgr only */
+
+static void wg_session_wanted_cb(const uint8_t *peer_public_key, void *ctx) {
+    microlink_t *ml = (microlink_t *)ctx;
+    if (!ml) return;
+    for (int i = 0; i < ml->peer_count; i++) {
+        if (ml->peers[i].active && memcmp(ml->peers[i].public_key, peer_public_key, 32) == 0) {
+            uint32_t now = (uint32_t)ml_get_time_ms();
+            s_session_want_ms[i] = now ? now : 1;
+            return;
+        }
+    }
+}
+
+/* ============================================================================
  * Base64 Key Encoding (wireguard-lwip API requires base64 keys)
  * ========================================================================== */
 
@@ -456,6 +495,7 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Register output callbacks for magicsock mode */
     wireguardif_set_derp_output(netif, wg_derp_output_cb, ml);
     wireguardif_set_udp_output(netif, wg_udp_output_cb, ml);
+    wireguardif_set_session_wanted(netif, wg_session_wanted_cb, ml);   /* WiCAN 2026-11-03 */
 
     /* On cellular AT socket bridge, force all WG output through DERP relay.
      * AT sockets are TCP-only, so direct UDP is impossible.
@@ -671,18 +711,16 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         IP4_ADDR(&wg_peer.allowed_ip.u_addr.ip4, ip_a, ip_b, ip_c, ip_d);
         IP4_ADDR(&wg_peer.allowed_mask.u_addr.ip4, 255, 255, 255, 255);
 
-        /* Set endpoint if available, otherwise leave blank for DERP-only */
-        if (p->endpoint_count > 0 && p->endpoints[0].ip != 0) {
-            uint8_t ea = (p->endpoints[0].ip >> 24) & 0xFF;
-            uint8_t eb = (p->endpoints[0].ip >> 16) & 0xFF;
-            uint8_t ec = (p->endpoints[0].ip >> 8) & 0xFF;
-            uint8_t ed = p->endpoints[0].ip & 0xFF;
-            IP4_ADDR(&wg_peer.endpoint_ip.u_addr.ip4, ea, eb, ec, ed);
-            wg_peer.endport_port = p->endpoints[0].port;
-        } else {
-            ip_addr_set_any(false, &wg_peer.endpoint_ip);
-            wg_peer.endport_port = 0;
-        }
+        /* WiCAN (2026-11-03): no endpoint until DISCO proves one. The map's
+         * endpoints are candidates (a LAN address, a NAT mapping); with the
+         * first of them installed here, every handshake the driver started
+         * went to that address and never through the relay, so a peer behind
+         * a NAT that had not opened its mapping toward us was unreachable
+         * although the relay could carry it. Tailscale sends through the
+         * relay until a pong proves a direct address (process_disco_pong
+         * installs it, and switches the session over). */
+        ip_addr_set_any(false, &wg_peer.endpoint_ip);
+        wg_peer.endport_port = 0;
 
         wg_peer.keep_alive = 25;
 
@@ -704,13 +742,12 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                          key_match ? "KEY_OK" : "KEY_MISMATCH!");
             }
 
-            /* DON'T initiate handshakes to all peers on add.
-             * Tailscale uses lazy peer config: remote peers only add us to their
-             * wireguard-go when they need to send traffic. Our handshake initiations
-             * to idle peers get silently dropped (peer has no WG entry for us).
-             * Instead, we wait for the peer to initiate when they need to reach us.
-             * The WG session is established on-demand, matching Tailscale's model. */
-            ESP_LOGI(TAG, "WG peer ready (passive), waiting for peer-initiated handshake");
+            /* No handshake at the add: a peer may sit idle for days. A
+             * session starts when the peer initiates, when lwIP has traffic
+             * for it (session_wants_service), when DISCO proves a direct
+             * path (the one-shot in process_disco_pong) or when microlink's
+             * own API asks (ml_wg_mgr_trigger_handshake). */
+            ESP_LOGI(TAG, "WG peer ready (passive): a session starts with traffic");
 
             /* WiCAN: its subnet routes, into WireGuard and into lwIP */
             routes_allow(netif, wg_peer_idx, p);
@@ -1528,15 +1565,15 @@ void ml_wg_mgr_send_cmm(microlink_t *ml, uint32_t peer_vpn_ip) {
  * Dual-path strategy:
  * 1. DERP: Always send via DERP relay (reliable, works through all NATs)
  * 2. Direct: If DISCO has discovered a direct endpoint, ALSO send the
- *    handshake init directly to the peer's UDP port. This is critical
- *    because the direct path hits magicsock's receiveIPv4() handler which
- *    calls noteRecvActivity() → maybeReconfigWireguardLocked() to re-add
- *    trimmed peers to wireguard-go. The DERP path alone does NOT trigger
- *    this re-add for WG handshake packets, so idle peers silently drop
- *    DERP-only handshake inits.
+ *    handshake init directly to the peer's UDP port: the faster path when
+ *    it exists.
  *
- * The direct handshake arrives at the peer's magicsock UDP socket, wakes
- * the lazy peer, and wireguard-go processes the init and responds. */
+ * WiCAN (2026-11-03): the port's note that a relayed initiation is dropped
+ * by a peer that had trimmed us from wireguard-go was wrong: magicsock's
+ * processDERPReadResult calls noteRecvActivity for a packet from any known
+ * peer, relayed or direct, so the relay alone wakes the peer. What dropped
+ * those initiations was the relay itself: sent through our home region,
+ * a peer homed elsewhere never received them (ml_derp_pool.c). */
 esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip) {
     if (!ml || !ml->wg_netif) return ESP_ERR_INVALID_STATE;
 
@@ -1702,6 +1739,74 @@ static void disco_periodic_probes(microlink_t *ml) {
 }
 
 /* ============================================================================
+ * WiCAN (2026-11-03): the sessions lwIP traffic asked for (see the note at
+ * s_session_want_ms). wg_mgr task only.
+ * ========================================================================== */
+
+static void session_wants_service(microlink_t *ml) {
+    if (!ml->wg_netif) return;
+    struct netif *netif = (struct netif *)ml->wg_netif;
+    struct wireguard_device *dev = (struct wireguard_device *)netif->state;
+    uint32_t now = (uint32_t)ml_get_time_ms();
+
+    for (int i = 0; i < ml->peer_count && i < ML_MAX_PEERS; i++) {
+        uint32_t want = s_session_want_ms[i];
+        if (!want) continue;
+        ml_peer_t *p = &ml->peers[i];
+        if (!p->active || p->wg_peer_index < 0 || p->wg_peer_index >= WIREGUARD_MAX_PEERS) {
+            s_session_want_ms[i] = 0;
+            s_session_started_ms[i] = 0;
+            continue;
+        }
+        if (wireguardif_peer_is_up(netif, (u8_t)p->wg_peer_index, NULL, NULL) == ERR_OK) {
+            /* the session is there: the want is served */
+            if (s_session_started_ms[i]) {
+                ESP_LOGI(TAG, "session with %s up after %lu ms", p->hostname,
+                         (unsigned long)(now - s_session_started_ms[i]));
+            }
+            s_session_want_ms[i] = 0;
+            s_session_started_ms[i] = 0;
+            continue;
+        }
+        if (now - want > ML_SESSION_WANT_MS) {
+            /* nobody asked for 90 s: the driver stops its retries */
+            ESP_LOGW(TAG, "no session with %s after %u s of trying: passive until "
+                     "lwIP asks again", p->hostname, (unsigned)(ML_SESSION_WANT_MS / 1000u));
+            s_session_want_ms[i] = 0;
+            s_session_started_ms[i] = 0;
+            if (dev) dev->peers[p->wg_peer_index].active = false;
+            continue;
+        }
+        if (s_session_started_ms[i]) continue;   /* the driver's timer retries */
+
+        /* the first handshake of this want: through the relay, or to the
+         * direct address DISCO has proven (the driver keeps retrying every
+         * REKEY_TIMEOUT to whichever address the peer entry holds) */
+        s_session_started_ms[i] = now ? now : 1;
+        if (p->has_direct_path && p->best_ip != 0 && p->best_port != 0) {
+            ip_addr_t ep_ip;
+            IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
+            ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(p->best_ip));
+            wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index, &ep_ip, p->best_port);
+            wireguardif_connect(netif, (u8_t)p->wg_peer_index);
+            ESP_LOGI(TAG, "session wanted with %s (lwIP traffic): handshake to %d.%d.%d.%d:%d",
+                     p->hostname,
+                     (int)((p->best_ip >> 24) & 0xFF), (int)((p->best_ip >> 16) & 0xFF),
+                     (int)((p->best_ip >> 8) & 0xFF), (int)(p->best_ip & 0xFF),
+                     (int)p->best_port);
+        } else {
+            wireguardif_connect_derp(netif, (u8_t)p->wg_peer_index);
+            ESP_LOGI(TAG, "session wanted with %s (lwIP traffic): handshake through the relay",
+                     p->hostname);
+        }
+        /* and our endpoints to the peer, so it probes a direct path too */
+        if (!ml_at_socket_is_ready()) {
+            disco_send_call_me_maybe(ml, i);
+        }
+    }
+}
+
+/* ============================================================================
  * WG Manager Task
  * ========================================================================== */
 
@@ -1752,10 +1857,9 @@ void ml_wg_mgr_task(void *arg) {
         /* Process peer updates from coord task */
         process_peer_updates(ml);
 
-        /* Track DERP connection state for DISCO.
-         * Note: We DON'T re-initiate WG handshakes on DERP connect because
-         * Tailscale peers use lazy config and would drop our initiations.
-         * WG sessions are established on-demand when peers initiate to us. */
+        /* Track DERP connection state for DISCO. No handshakes at the
+         * relay's connect: a session starts with traffic (the peer's, lwIP's
+         * through session_wants_service, a proven direct path). */
         {
             EventBits_t bits = xEventGroupGetBits(ml->events);
             bool derp_connected_now = (bits & ML_EVT_DERP_CONNECTED) != 0;
@@ -1831,6 +1935,9 @@ void ml_wg_mgr_task(void *arg) {
             last_wg_periodic_ms = now;
             ESP_LOGD(TAG, "wireguardif_periodic: %llu ms", (unsigned long long)dt);
         }
+
+        /* WiCAN (2026-11-03): the sessions lwIP traffic asked for */
+        session_wants_service(ml);
 
         /* Periodic DISCO probes (every 1s check) */
         now = ml_get_time_ms();

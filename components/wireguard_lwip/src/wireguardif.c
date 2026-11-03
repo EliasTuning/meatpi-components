@@ -405,6 +405,17 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
 		// No valid keys!
 		result = ERR_CONN;
 	}
+	// WiCAN (2026-11-03): a data packet with no session to carry it (a
+	// keep-alive has q == NULL and is never sent without one): tell the
+	// owner, which starts the handshake. As ported, nothing did: lwIP's
+	// traffic for a peer that had not initiated to the device was dropped
+	// here forever.
+	if (result == ERR_CONN && q != NULL) {
+		struct wireguard_device *device = (struct wireguard_device *)netif->state;
+		if (device && device->session_wanted_fn) {
+			device->session_wanted_fn(peer->public_key, device->session_wanted_ctx);
+		}
+	}
 	return result;
 }
 
@@ -1500,6 +1511,17 @@ void wireguardif_force_derp_output(struct netif *netif, bool force) {
 	if (device->valid) {
 		device->force_derp_output = force;
 		printf("[WG] force_derp_output=%d\n", force);
+	}
+}
+
+// WiCAN (2026-11-03): see wireguard_session_wanted_fn
+void wireguardif_set_session_wanted(struct netif *netif, wireguard_session_wanted_fn fn, void *ctx) {
+	LWIP_ASSERT("netif != NULL", (netif != NULL));
+	LWIP_ASSERT("state != NULL", (netif->state != NULL));
+	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+	if (device->valid) {
+		device->session_wanted_fn = fn;
+		device->session_wanted_ctx = ctx;
 	}
 }
 

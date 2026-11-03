@@ -164,6 +164,14 @@ bool microlink_is_connected(const microlink_t *ml);
 bool microlink_derp_connected(const microlink_t *ml);
 
 /**
+ * @brief WiCAN (2026-11-03): the relay region the home connection uses
+ *        (the control server's HomeDERP for this node, else the first
+ *        usable region of the map, else the compile-time default; 0
+ *        before the client exists)
+ */
+uint16_t microlink_derp_home_region(const microlink_t *ml);
+
+/**
  * @brief Get our assigned VPN IP
  * @return VPN IP in host byte order, 0 if not yet assigned
  */

@@ -83,6 +83,10 @@ extern "C" {
 #define ML_DERP_REGION          9       /* Dallas (dfw) */
 #define ML_DERP_HOST            "derp9e.tailscale.com"
 #define ML_DERP_PORT            443
+/* WiCAN (2026-11-03): the relay connections to the peers' own regions
+ * beside the home one (ml_derp_pool.c), and how long an unused one lives */
+#define ML_DERP_EXTRA_CONNS     2
+#define ML_DERP_EXTRA_IDLE_MS   120000u
 
 /* Tailscale control plane */
 #define ML_CTRL_HOST            "controlplane.tailscale.com"
@@ -198,6 +202,7 @@ typedef struct {
     uint8_t *data;              /* Heap-allocated payload (caller frees on failure) */
     size_t len;                 /* Payload length */
     uint8_t frame_type;         /* DERP frame type (0x04 = SendPacket) */
+    uint16_t region;            /* WiCAN (2026-11-03): the peer's home region, 0 = unknown */
 } ml_derp_tx_item_t;
 
 /* Received packet (from net_io to disco/wg queues) */
@@ -362,6 +367,11 @@ typedef struct {
      * backoff_ms doubles per failed round and is 0 again once connected */
     uint64_t retry_after_ms;
     uint32_t backoff_ms;
+    /* WiCAN (2026-11-03): the region this connection serves (the home
+     * region for ml->derp, a peer's home region for the extra ones) and
+     * when it last carried a frame (an idle extra connection is closed) */
+    uint16_t region;
+    uint64_t last_use_ms;
 } ml_derp_conn_t;
 
 /* ============================================================================
@@ -404,6 +414,17 @@ struct microlink_s {
     /* DERP connection (owned exclusively by DERP I/O task after connect) */
     /* Connection setup by coord task, then handed to DERP I/O task */
     ml_derp_conn_t derp;
+
+    /* WiCAN (2026-11-03): the connections to the peers' own regions and
+     * the region each peer was last heard from (ml_derp_pool.c; the DERP
+     * I/O task owns both; a peer is sent to through its own home region,
+     * never only through ours) */
+    ml_derp_conn_t derp_extra[ML_DERP_EXTRA_CONNS];
+    struct {
+        uint8_t key[32];
+        uint16_t region;
+    } derp_heard[ML_MAX_PEERS];
+    int derp_heard_count;
 
     /* Sockets for net_io select() loop */
     int disco_sock4;                    /* UDP socket for DISCO + direct WG */

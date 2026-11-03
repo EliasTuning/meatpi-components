@@ -182,6 +182,64 @@ DERP stack are validated through `vpn_manager` on the bench
     peer table and send through the raw pcb; a `CONFIG_LWIP_CHECK_THREAD_SAFETY`
     build names them (`udp_sendto` asserts), see
     `internal/TASK_wg_teardown_race.md` for what the bench showed.
+20. **The relay through the peer's own region** (2026-11-03, the field
+    report of an MQTT broker behind a home subnet router that a WiCAN on a
+    phone hotspot could not reach while the VPN page said connected and
+    listed the route): upstream sent every relayed packet through its own
+    home region (`ML_DERP_REGION` 9, Dallas, for every device: the port
+    never measured a nearer one, and the control server echoes the region
+    the client reports), and a relay answers PeerGone for a peer homed
+    anywhere else; the port logged the PeerGone and dropped the packet.
+    Tailscale sends through the PEER's home region (`derpWriteChanForRegion`
+    in magicsock/derp.go), dialling it when needed, or through a region it
+    heard the peer on (the reverse route, issue 150), which is why peers
+    that contacted the device first always worked. `src/ml_derp_pool.c`
+    (new) keeps `ML_DERP_EXTRA_CONNS` (2) connections beside the home one,
+    each to a peer's region, opened by the first packet for a peer there,
+    closed after `ML_DERP_EXTRA_IDLE_MS` (2 min) without a frame, a refused
+    dial backed off 30 s doubling to 5 min with the home relay meanwhile;
+    the heard-from table feeds the reverse route and a PeerGone clears it.
+    `ml_derp.c`'s primitives take the connection (`ml_derp_conn_t`) instead
+    of the context (`src/ml_derp_private.h`), `ml_derp_queue_send` stamps
+    the item with the peer's region, the I/O task picks the connection per
+    item and polls the extra ones with a zero-timeout select so an idle
+    one costs no read timeout. The per-packet TX/RX lines moved to debug
+    level (they flooded the log ring at idle). `microlink_derp_home_region`
+    is new for the surfaces. Not done: the home region by latency
+    (Tailscale's netcheck), which would spare the extra connection in the
+    common case and halve the relay path for a device far from Dallas.
+21. **Sessions on demand for lwIP traffic, no endpoint until proven**
+    (same day, the same report): `wireguardif_output_to_peer` answered
+    ERR_CONN for a packet without a session and nothing started a handshake:
+    a session came only from the peer initiating, from a DISCO pong over a
+    direct path (the one-shot in `process_disco_pong`) or from `ml_tcp.c` /
+    `ml_udp.c` (`ml_wg_mgr_trigger_handshake`), which this firmware never
+    uses: MQTT, the webhook poster and the destinations are lwIP sockets
+    routed into the tunnel netif by `ip4_routes`. The vendored driver gained
+    `wireguardif_set_session_wanted` (a callback from the ERR_CONN branch,
+    data packets only, on the calling thread); `ml_wg_mgr.c` records the
+    want per peer slot (a timestamp written on the tcpip thread) and
+    `session_wants_service` starts the handshake through the relay
+    (`wireguardif_connect_derp`) or to the direct address DISCO has proven,
+    sends a CallMeMaybe, lets the driver's timer retry every REKEY_TIMEOUT
+    and makes the peer passive again after `ML_SESSION_WANT_MS` (90 s,
+    WireGuard's REKEY_ATTEMPT_TIME) without lwIP asking again. `add_peer`
+    no longer installs the map's first endpoint as the WireGuard endpoint
+    (with it, every handshake the driver started went to an unproven
+    address and never through the relay): a pong installs the direct
+    address, as before. The port's comment that a relayed initiation is
+    dropped by a peer that trimmed us was wrong (`processDERPReadResult`
+    calls `noteRecvActivity` for any known peer); what dropped them was 20.
+    One piece of this lives outside microlink: the driver marks the netif's
+    LINK down while no peer holds a session (`wireguardif_periodic`), and
+    `ip4_routes` would then not route a subnet packet to the tunnel, so the
+    traffic that was meant to trigger the on-demand session leaked to the
+    station and no session ever started (the deadlock the bench showed:
+    `session_wants_service` never fired, the session came only from a stray
+    DISCO direct path). `ip4_routes` routes to an admin-up tunnel netif
+    whether or not its link is up now (2026-11-03); the dropped packet
+    reaches `wireguardif_output`, fires the want, and TCP's retransmit rides
+    the session up.
 
 ## Upstream layout kept
 

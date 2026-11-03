@@ -7,6 +7,7 @@
  */
 
 #include "microlink_internal.h"
+#include "ml_derp_private.h"   /* WiCAN (2026-11-03): the relay pool's reset */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -315,6 +316,7 @@ microlink_t *microlink_init(const microlink_config_t *config) {
     ml->stun_sock = -1;
     ml->stun_sock6 = -1;
     ml->derp.sockfd = -1;
+    ml_derp_pool_reset(ml);     /* WiCAN (2026-11-03): the extra relay connections */
 
     /* Resolve timing (0 = use defaults from #defines) */
     ml->t_disco_heartbeat_ms = ml->config.disco_heartbeat_ms ? ml->config.disco_heartbeat_ms : ML_DISCO_HEARTBEAT_MS;
@@ -693,6 +695,10 @@ bool microlink_is_connected(const microlink_t *ml) {
 
 bool microlink_derp_connected(const microlink_t *ml) {
     return ml && ml->derp.connected;
+}
+
+uint16_t microlink_derp_home_region(const microlink_t *ml) {
+    return ml ? ml_effective_derp_region((microlink_t *)ml) : 0;
 }
 
 uint32_t microlink_get_vpn_ip(const microlink_t *ml) {

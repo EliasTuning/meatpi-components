@@ -130,7 +130,64 @@ or `sys_timeout` function directly; post it. A build with
 
 ## Surfaces
 
-- `GET /api/vpn`: `{state, type, endpoint, network, paused, routes, ts_ip, ts_peers, derp, reason, connects, failures, uptime_s, peers}` (`state` is `disabled | waiting | paused | connecting | connected`; `network` = the station's network, "" without one; `derp` (2026-10-31, issue 1024) = the Tailscale DERP relay connection is up, false for wireguard, while the relay is in backoff and before the first map; `reason` = why the tunnel is held in `waiting`, "" otherwise, see the internal-RAM floor below; `routes` = for wireguard the `routes` setting's networks, for tailscale (2026-11-01) the subnet routes learned from the tailnet, see below).
+- `GET /api/vpn`: `{state, type, endpoint, network, paused, routes, ts_ip, ts_peers, derp, derp_region, reason, connects, failures, uptime_s, peers}` (`state` is `disabled | waiting | paused | connecting | connected`; `network` = the station's network, "" without one; `derp` (2026-10-31, issue 1024) = the Tailscale DERP relay connection is up, false for wireguard, while the relay is in backoff and before the first map; `derp_region` (2026-11-03) = the home relay region, see the relay section below; `reason` = why the tunnel is held in `waiting`, "" otherwise, see the internal-RAM floor below; `routes` = for wireguard the `routes` setting's networks, for tailscale (2026-11-01) the subnet routes learned from the tailnet, see below).
+
+## The relay through the peer's region, and sessions on demand (2026-11-03)
+
+A Tailscale node reaches a peer through the PEER's home relay region (the
+map's HomeDERP of that peer), dialling that region when it has no
+connection to it, or through a region it has heard the peer on; its own
+home connection is where the others reach it. The ported client sent
+everything through its own home region (region 9, Dallas, for every WiCAN:
+the port never measured a nearer one and the control server echoes the
+region a client reports), which a relay answers with PeerGone for a peer
+homed anywhere else. And a packet from lwIP (MQTT, the webhook poster, a
+destination) for a peer without a session was dropped by the driver with
+nothing starting a handshake: a session came only from the peer
+initiating, from a DISCO pong over a direct path, or from microlink's own
+socket API, which this firmware does not use. On the bench every run had a
+direct path to betty's public address and the peer pinging first, so both
+defects hid; in the field (a WiCAN on a phone hotspot, the broker behind a
+subnet router at home that never contacts the WiCAN, two NATs between
+them) the VPN page said connected and listed the route while every
+connection timed out: "MQTT won't connect", the Status page's "Off".
+
+Since 2026-11-03: the driver reports a data packet without a session
+(`wireguardif_set_session_wanted`, a timestamp per peer on the tcpip
+thread) and the WireGuard manager starts the handshake through the relay,
+or to a direct address DISCO has proven; the driver retries every 5 s and
+the want expires after 90 s without lwIP asking again (WireGuard's own
+REKEY_ATTEMPT_TIME), so a dead peer costs nothing. For that packet to reach
+the driver at all, `ip4_routes` routes a subnet packet to the tunnel netif
+whenever it is administratively up, not only when a session has brought its
+link up: the driver marks the link down while no peer holds a session, and
+gated on the link the packet would leak to the station and the session it
+was meant to trigger would never start (the deadlock, 2026-11-03). A peer's WireGuard
+entry carries no endpoint until a pong proves one (the map's endpoints are
+candidates; with the first installed blind, every handshake went to it and
+never through the relay). The relay client keeps up to two connections
+beside the home one, each to a peer's region, opened by the first packet
+for a peer there and closed after 2 min idle (`microlink/src/ml_derp_pool.c`);
+a region that refuses the dial waits 30 s doubling to 5 min and the packets
+take the home relay meanwhile (a peer that dialled our home to reach us is
+reachable there: the reverse route). An extra connection costs its TLS
+context (about 21 KB of PSRAM, 230 B internal) while it exists. The home
+region stays the compile-time default unless the control server assigns
+one; choosing it by latency (Tailscale's netcheck) is the follow-up that
+would spare the extra connection in the common case. `GET /api/vpn`
+carries `derp_region` and the `vpn` command prints `relay up (home region
+N)`; the log lines `ml_wg_mgr: session wanted with <peer> (lwIP traffic):
+handshake through the relay`, `ml_derp: relay region N opened for peer
+...` and `ml_wg_mgr: session with <peer> up after N ms` show the path.
+Bench: the relay-only pass of `ts_public_soak.sh` (every UDP packet between
+betty and the DUT's public address dropped on betty before the peer joins,
+so the DUT's first request through the subnet route is the first packet
+between the two, through the relay; `.\test.ps1 tspublic`). State at the
+2026-11-03 hand-over: the session comes up over the relay and a request on
+a confirmed relay session passes, but a session the device itself initiated
+over the relay does not stay usable (betty re-handshakes, the data segments
+go unacknowledged): the gate is red, the open item and the candidates are in
+`internal/TASK_tailscale_relay.md` section 5.
 
 ## Subnet routes on the tailnet (2026-11-01)
 

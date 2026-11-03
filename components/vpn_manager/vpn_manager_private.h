@@ -116,7 +116,8 @@ esp_err_t vpn_ts_up(const vpn_config_t *cfg);   /* init + start        */
 void      vpn_ts_down(void);                    /* stop + destroy      */
 bool      vpn_ts_connected(void);
 bool      vpn_ts_failed(void);
-void      vpn_ts_status(char *ip, size_t ip_len, int *peers, bool *derp);
+void      vpn_ts_status(char *ip, size_t ip_len, int *peers, bool *derp,
+                        uint16_t *region);
 
 /* Per-peer snapshot for /api/vpn + the `vpn` CLI ("peer online +
  * direct-vs-relay"). Returns the number of entries written (0 when the

@@ -580,7 +580,7 @@ esp_err_t vpn_manager_status(vpn_manager_status_t *out)
     if (cfg->tailscale)
     {
         vpn_ts_status(out->ts_ip, sizeof(out->ts_ip), &out->ts_peers,
-                      &out->ts_derp);
+                      &out->ts_derp, &out->ts_derp_region);
     }
 
     return ESP_OK;
@@ -606,8 +606,9 @@ esp_err_t vpn_manager_tunnel_ip(char *buf, size_t len)
     {
         int peers = 0;
         bool derp = false;
+        uint16_t region = 0;
 
-        vpn_ts_status(buf, len, &peers, &derp);
+        vpn_ts_status(buf, len, &peers, &derp, &region);
     }
     else
     {

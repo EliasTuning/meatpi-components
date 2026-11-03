@@ -197,8 +197,21 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
 
         portEXIT_CRITICAL(&s_mux);
 
-        if (nif != NULL && netif_is_up(nif) && netif_is_link_up(nif) &&
-            !connected_elsewhere(dest, nif))
+        /* admin-up is enough, the link need not be up (2026-11-03): a
+         * magicsock-style tunnel (microlink) brings its WireGuard session
+         * up on demand, when it first has traffic for a peer, and the
+         * driver marks the netif's LINK down while no peer holds a session
+         * (wireguardif_periodic). Gated on the link, a routed packet would
+         * then leak to the station instead of reaching the tunnel's output,
+         * so the session that the packet was meant to trigger would never
+         * start: the broker behind a subnet router stayed unreachable
+         * although the route was installed. Routed to an admin-up tunnel
+         * whose link is down, the packet reaches wireguardif_output, which
+         * drops it and signals the owner to start the handshake; TCP's own
+         * retransmit rides the session up. A tunnel that is torn down
+         * removes its routes (ip4_routes_clear), so an admin-up netif with
+         * no session only ever means a handshake in flight. */
+        if (nif != NULL && netif_is_up(nif) && !connected_elsewhere(dest, nif))
         {
             return nif;
         }

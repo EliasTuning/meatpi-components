@@ -186,4 +186,9 @@ void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn,
 // When enabled, peer_output always uses DERP even if peer has a direct endpoint.
 void wireguardif_force_derp_output(struct netif *netif, bool force);
 
+// WiCAN (2026-11-03): the owner's hook for a data packet that found no
+// session to carry it (wireguard_session_wanted_fn in wireguard.h). The
+// driver itself starts no handshake for such a packet.
+void wireguardif_set_session_wanted(struct netif *netif, wireguard_session_wanted_fn fn, void *ctx);
+
 #endif /* _WIREGUARDIF_H_ */

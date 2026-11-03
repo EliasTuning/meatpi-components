@@ -132,11 +132,13 @@ bool vpn_ts_failed(void)
     return s_ml != NULL && microlink_get_state(s_ml) == ML_STATE_ERROR;
 }
 
-void vpn_ts_status(char *ip, size_t ip_len, int *peers, bool *derp)
+void vpn_ts_status(char *ip, size_t ip_len, int *peers, bool *derp,
+                   uint16_t *region)
 {
     ip[0] = '\0';
     *peers = 0;
     *derp = false;
+    *region = 0;
 
     if (s_ml == NULL)
     {
@@ -144,6 +146,7 @@ void vpn_ts_status(char *ip, size_t ip_len, int *peers, bool *derp)
     }
 
     *derp = microlink_derp_connected(s_ml);
+    *region = microlink_derp_home_region(s_ml);
 
     uint32_t vpn_ip = microlink_get_vpn_ip(s_ml);
 
