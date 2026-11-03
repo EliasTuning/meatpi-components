@@ -6,10 +6,12 @@ ts2021 control plane, WireGuard data plane, DERP/DISCO/STUN, MagicDNS.
 Sole consumer: `vpn_manager` (type "tailscale"). Design +
 decisions: `vpn_manager/TASK_tailscale.md`.
 
-**Testing:** no local unit suite, vendored upstream code isn't forked into
-a parallel test tree. Its config server (12 routes) + the ts2021/WireGuard/
-DERP stack are validated through `vpn_manager` on the bench
-(`TS TARGET PASS`, end-to-end MapResponse + WireGuard data plane).
+**Testing:** `host_test/` compiles the local DISCO reply implementation
+with transport and crypto test doubles (8 cases, `.\test.ps1 host microlink`).
+The vendored crypto and protocol stack are not copied into a parallel test
+tree. The config server (12 routes) and ts2021/WireGuard/DERP stack are
+validated through `vpn_manager` on the bench (`TS TARGET PASS` and
+`.\test.ps1 tspublic`, including relay-only subnet traffic and direct upgrade).
 
 ## Local changes (this repo)
 
@@ -240,6 +242,31 @@ DERP stack are validated through `vpn_manager` on the bench
     whether or not its link is up now (2026-11-03); the dropped packet
     reaches `wireguardif_output`, fires the want, and TCP's retransmit rides
     the session up.
+
+22. **DISCO replies stay on their probe's transport** (2026-11-03,
+    completion of the relay task): `process_disco_ping` sent every pong to
+    the source, the peer's candidate UDP endpoints and DERP. A UDP reply to
+    a DERP probe made Tailscale promote the probe's synthetic
+    `127.3.3.40:5` address to its direct endpoint. Betty logged
+    `now using 127.3.3.40:5` and `active; direct 127.3.3.40:5`; the
+    WireGuard handshake succeeded but TCP replies did not return reliably.
+    This reproduced twice on the preceding image, including a diagnostic
+    run with valid sequential WireGuard counters, before the change.
+    `src/ml_disco_pong.c` owns the reply now: DERP in, DERP out; UDP in,
+    one UDP reply to that exact source; no fallback or copies to candidates.
+    The UDP sender remains shared with probes in `ml_wg_mgr.c`.
+    Encryption and send failures are reported, never sent as an invalid
+    pong or retried on an unrelated transport. The host suite checks the
+    transport invariant, byte encoding and failure paths. The periodic
+    direct-probe log is DEBUG, not INFO. The local module follows the
+    component standard (Allman, under 100 columns and 700 lines, no heap
+    or retained state); the upstream file keeps its existing layout.
+    The new frame is 176 B (compiler `.su`), on the existing PSRAM stack.
+    `.\test.ps1 tspublic` passed at 15:57 on ELF `8b3f8068ef52c85b`:
+    six relay requests exactly once across rekey with 141 UDP drops, direct
+    recovery, RAM flat at 88,519 B, zero errors/faults, exact settings restore.
+    References: Tailscale v1.78.1 `wgengine/magicsock/magicsock.go`
+    `handlePingLocked` and `endpoint.go` `handlePongConnLocked`.
 
 ## Upstream layout kept
 

@@ -179,15 +179,29 @@ carries `derp_region` and the `vpn` command prints `relay up (home region
 N)`; the log lines `ml_wg_mgr: session wanted with <peer> (lwIP traffic):
 handshake through the relay`, `ml_derp: relay region N opened for peer
 ...` and `ml_wg_mgr: session with <peer> up after N ms` show the path.
-Bench: the relay-only pass of `ts_public_soak.sh` (every UDP packet between
-betty and the DUT's public address dropped on betty before the peer joins,
-so the DUT's first request through the subnet route is the first packet
-between the two, through the relay; `.\test.ps1 tspublic`). State at the
-2026-11-03 hand-over: the session comes up over the relay and a request on
-a confirmed relay session passes, but a session the device itself initiated
-over the relay does not stay usable (betty re-handshakes, the data segments
-go unacknowledged): the gate is red, the open item and the candidates are in
-`internal/TASK_tailscale_relay.md` section 5.
+
+The remaining relay failure was DISCO reply routing, not WireGuard key
+drift: the client sent each pong over UDP and DERP regardless of the probe's
+transport. Tailscale could then promote the synthetic relay address
+`127.3.3.40:5` to its direct endpoint, and return traffic stalled. The local
+`microlink/src/ml_disco_pong.c` now replies only on the incoming transport:
+DERP to DERP, UDP to the exact source, with no copies to other candidates
+and no cross-transport fallback on failure. Its compiler-measured stack
+frame is 176 B on the existing PSRAM manager stack; it adds no retained
+state, heap allocation or task. Eight host tests cover dispatch, framing
+and failure paths (`.\test.ps1 host microlink`).
+
+Bench: `.\test.ps1 tspublic`, **PASS 2026-11-03 15:57**, 559.9 s. All UDP
+between Betty and the DUT's public address was blocked before the peer
+joined (141 attempted UDP packets dropped). The DUT's first application
+request through the subnet route answered 200 in 1234 ms; five more across
+the rekey boundary answered in 319 to 744 ms, all six arriving exactly once.
+The peer stayed on a relay rather than a false direct endpoint. After the
+unblock: direct DISCO, ICMP 8/8, HTTP 200 and subnet HTTP 200 in 98 ms.
+Internal RAM stayed at 88,519 B over the soak, the two task stacks were in
+PSRAM with 3816/4012 B headroom, and errors/faults were zero. Both original
+settings documents were restored and verified after the planned restart.
+Report: firmware repo `test-reports/2026-11-03_1557_tspublic.md`.
 
 ## Subnet routes on the tailnet (2026-11-01)
 

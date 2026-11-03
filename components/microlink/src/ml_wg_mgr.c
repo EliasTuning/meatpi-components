@@ -13,6 +13,7 @@
  */
 
 #include "microlink_internal.h"
+#include "ml_disco_pong.h"
 #include "ml_config_httpd.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -209,14 +210,19 @@ static inline bool disco_has_udp_path(const microlink_t *ml) {
     return (ml->disco_sock4 >= 0);
 }
 
-static int disco_udp_sendto(microlink_t *ml, const uint8_t *data, size_t len,
-                             uint32_t dest_ip_hbo, uint16_t dest_port) {
+int ml_disco_udp_sendto(microlink_t *ml, const uint8_t *data, size_t len,
+                       uint32_t dest_ip_hbo, uint16_t dest_port)
+{
 #ifdef CONFIG_ML_ZERO_COPY_WG
-    if (ml->zc.pcb) {
+    if (ml->zc.pcb)
+    {
         return (ml_zerocopy_send(ml, data, len, dest_ip_hbo, dest_port) == ESP_OK) ? len : -1;
     }
 #endif
-    if (ml->disco_sock4 < 0) return -1;
+    if (ml->disco_sock4 < 0)
+    {
+        return -1;
+    }
 
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
@@ -961,48 +967,6 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
     }
 }
 
-static void disco_build_pong(microlink_t *ml, int peer_idx,
-                               const uint8_t *txid,
-                               uint32_t src_ip, uint16_t src_port,
-                               uint8_t *out, size_t *out_len) {
-    ml_peer_t *p = &ml->peers[peer_idx];
-
-    /* Plaintext: [type(1)][version(1)][txid(12)][src_addr(18)] = 32 bytes */
-    /* src_addr: IPv6-mapped IPv4 (16 bytes) + port (2 bytes big-endian) */
-    uint8_t plaintext[32];
-    plaintext[0] = DISCO_MSG_PONG;
-    plaintext[1] = 0;
-    memcpy(plaintext + 2, txid, DISCO_TXID_LEN);
-
-    /* IPv6-mapped IPv4: ::ffff:A.B.C.D */
-    memset(plaintext + 14, 0, 10);
-    plaintext[24] = 0xff;
-    plaintext[25] = 0xff;
-    plaintext[26] = (src_ip >> 24) & 0xFF;
-    plaintext[27] = (src_ip >> 16) & 0xFF;
-    plaintext[28] = (src_ip >> 8) & 0xFF;
-    plaintext[29] = src_ip & 0xFF;
-    plaintext[30] = (src_port >> 8) & 0xFF;
-    plaintext[31] = src_port & 0xFF;
-
-    /* Generate random nonce */
-    uint8_t nonce[DISCO_NONCE_LEN];
-    esp_fill_random(nonce, DISCO_NONCE_LEN);
-
-    /* Encrypt */
-    uint8_t ciphertext[32 + NACL_BOX_MACBYTES];
-    nacl_box(ciphertext, plaintext, sizeof(plaintext), nonce,
-             p->disco_key, ml->disco_private_key);
-
-    /* Build packet */
-    size_t pos = 0;
-    memcpy(out + pos, DISCO_MAGIC, 6); pos += 6;
-    memcpy(out + pos, ml->disco_public_key, 32); pos += 32;
-    memcpy(out + pos, nonce, DISCO_NONCE_LEN); pos += DISCO_NONCE_LEN;
-    memcpy(out + pos, ciphertext, sizeof(ciphertext)); pos += sizeof(ciphertext);
-    *out_len = pos;
-}
-
 static void disco_send_ping_to_peer(microlink_t *ml, int peer_idx, bool force) {
     ml_peer_t *p = &ml->peers[peer_idx];
     uint64_t now = ml_get_time_ms();
@@ -1024,7 +988,7 @@ static void disco_send_ping_to_peer(microlink_t *ml, int peer_idx, bool force) {
      * This is critical for heartbeat pings to renew trust_until_ms.
      * A DERP pong would arrive with via_derp=true and NOT renew trust. */
     if (p->has_direct_path && p->best_ip != 0 && p->best_port != 0) {
-        disco_udp_sendto(ml, pkt, pkt_len, p->best_ip, p->best_port);
+        ml_disco_udp_sendto(ml, pkt, pkt_len, p->best_ip, p->best_port);
         direct_sent = true;
     }
 
@@ -1037,9 +1001,10 @@ static void disco_send_ping_to_peer(microlink_t *ml, int peer_idx, bool force) {
                     /* Skip if same as best_ip (already sent) */
                     if (p->endpoints[i].ip == p->best_ip &&
                         p->endpoints[i].port == p->best_port) continue;
-                    int ret = disco_udp_sendto(ml, pkt, pkt_len, p->endpoints[i].ip, p->endpoints[i].port);
+                    int ret = ml_disco_udp_sendto(ml, pkt, pkt_len,
+                                                 p->endpoints[i].ip, p->endpoints[i].port);
                     if (!direct_sent) {  /* Log only first direct send per peer */
-                        ESP_LOGI(TAG, "  direct probe -> %d.%d.%d.%d:%d (%d eps, ret=%d)",
+                        ESP_LOGD(TAG, "direct probe -> %d.%d.%d.%d:%d (%d eps, ret=%d)",
                                  (int)((p->endpoints[i].ip >> 24) & 0xFF),
                                  (int)((p->endpoints[i].ip >> 16) & 0xFF),
                                  (int)((p->endpoints[i].ip >> 8) & 0xFF),
@@ -1095,58 +1060,7 @@ static void process_disco_ping(microlink_t *ml, const ml_rx_packet_t *pkt,
     ESP_LOGD(TAG, "DISCO PING from %s (via %s)",
              p->hostname, pkt->via_derp ? "DERP" : "direct");
 
-    /* Build PONG */
-    uint8_t pong[256];
-    size_t pong_len = 0;
-    disco_build_pong(ml, peer_idx, txid, pkt->src_ip, pkt->src_port,
-                     pong, &pong_len);
-
-    if (pong_len == 0) return;
-
-    /* Send PONG via ALL paths for maximum reachability (matching v1 + tailscaled):
-     * 1. Direct reply to PING source address (opens NAT hole)
-     * 2. All known LAN endpoints (fastest path for same-network)
-     * 3. DERP relay (guaranteed delivery) */
-
-    bool direct_sent = false;
-
-    /* 1. Direct reply to PING source (if it was direct UDP) */
-    if (!pkt->via_derp && pkt->src_ip != 0 && pkt->src_port != 0) {
-        disco_udp_sendto(ml, pong, pong_len, pkt->src_ip, pkt->src_port);
-        direct_sent = true;
-    }
-
-    /* 2. Send to ALL known LAN endpoints (same-network = fastest path) */
-    if (disco_has_udp_path(ml)) {
-        for (int i = 0; i < p->endpoint_count; i++) {
-            if (p->endpoints[i].is_ipv6 || p->endpoints[i].ip == 0) continue;
-            if (!is_lan_ip(p->endpoints[i].ip)) continue;
-            /* Skip if this is the same as the ping source (already sent) */
-            if (p->endpoints[i].ip == pkt->src_ip &&
-                p->endpoints[i].port == pkt->src_port) continue;
-
-            disco_udp_sendto(ml, pong, pong_len, p->endpoints[i].ip, p->endpoints[i].port);
-            direct_sent = true;
-        }
-
-        /* 2b. Also try public endpoints if no LAN worked */
-        if (!direct_sent) {
-            for (int i = 0; i < p->endpoint_count; i++) {
-                if (p->endpoints[i].is_ipv6 || p->endpoints[i].ip == 0) continue;
-                if (is_lan_ip(p->endpoints[i].ip)) continue;
-
-                disco_udp_sendto(ml, pong, pong_len, p->endpoints[i].ip, p->endpoints[i].port);
-                direct_sent = true;
-                break;  /* Only try one public endpoint */
-            }
-        }
-    }
-
-    /* 3. ALWAYS send via DERP (guaranteed delivery, even if direct worked) */
-    ml_derp_queue_send(ml, p->public_key, pong, pong_len);
-
-    ESP_LOGD(TAG, "PONG sent to %s (direct=%s, DERP=yes)",
-             p->hostname, direct_sent ? "yes" : "no");
+    ml_disco_reply_ping(ml, p, pkt, txid);
 }
 
 static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
@@ -1374,7 +1288,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
                     disco_build_ping(ml, peer_idx, ping_pkt, &ping_len);
 
                     if (ping_len > 0) {
-                        int ret = disco_udp_sendto(ml, ping_pkt, ping_len, ip, port);
+                        int ret = ml_disco_udp_sendto(ml, ping_pkt, ping_len, ip, port);
                         ESP_LOGI(TAG, "CMM probe -> %d.%d.%d.%d:%d (%d bytes, ret=%d)",
                                  (int)((ip >> 24) & 0xFF), (int)((ip >> 16) & 0xFF),
                                  (int)((ip >> 8) & 0xFF), (int)(ip & 0xFF),
