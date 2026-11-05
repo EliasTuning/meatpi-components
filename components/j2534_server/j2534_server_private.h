@@ -47,6 +47,11 @@ bool      j2534_srv_send_frame(const j2534_transport_t *t, uint8_t type,
 bool      j2534_srv_send_ack(const j2534_transport_t *t, uint16_t seq,
                              uint16_t channel, uint32_t status,
                              const uint32_t *result);
+/** A run of ready-made frames (header + payload each) in ONE transport
+ *  write, under the send lock; counts every frame as sent. The RX pump's
+ *  batch (2026-11-06). */
+bool      j2534_srv_send_raw(const j2534_transport_t *t, const uint8_t *buf,
+                             size_t len);
 
 /* transport -> core */
 bool      j2534_srv_running(void);

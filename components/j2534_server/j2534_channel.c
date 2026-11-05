@@ -55,6 +55,18 @@ static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf;   /* internal: FreeRTOS object */
 static bool s_refused_said;            /* the refusal line went out this connect */
 
+/* The channels' bus queues live for the module's life (2026-11-06): the
+ * RX pump blocks on the active channel's queue between frames
+ * (j2534_channel_wait_queue), so no queue may be deleted under it; a
+ * CONNECT resets its slot's queue instead. can_core fills them from its
+ * RX task (never an ISR), so the storage sits in PSRAM like the records;
+ * the queue objects stay internal. Before, a channel's queue was created
+ * at CONNECT and deleted at teardown, and the pump polled every 2 ms. */
+static StaticQueue_t s_can_q_obj[J2534_MAX_CHANNELS];   /* internal: FreeRTOS objects */
+EXT_RAM_BSS_ATTR static uint8_t s_can_q_store[J2534_MAX_CHANNELS]
+                                              [J2534_CH_CAN_QLEN * sizeof(can_core_frame_t)];
+static QueueHandle_t s_can_q[J2534_MAX_CHANNELS];
+
 /* The UDS memory-transfer services (0x34 RequestDownload, 0x35
  * RequestUpload, 0x36 TransferData, 0x37 RequestTransferExit) in a
  * tester's request are COUNTED (/api/j2534 reflash_seen), never refused.
@@ -180,7 +192,32 @@ void j2534_channel_init(void)
     for (int i = 0; i < J2534_MAX_CHANNELS; i++)
     {
         s_ch[i].can_sub = -1;
+
+        if (s_can_q[i] == NULL)
+        {
+            s_can_q[i] = xQueueCreateStatic(J2534_CH_CAN_QLEN,
+                                            sizeof(can_core_frame_t),
+                                            s_can_q_store[i],
+                                            &s_can_q_obj[i]);
+        }
     }
+}
+
+QueueHandle_t j2534_channel_wait_queue(void)
+{
+    /* every CAN and ISO15765 channel subscribes to every bus frame, so the
+       first one's queue announces them all; read without the lock: the
+       handles are static and never freed, and a channel closing under the
+       pump costs it one 2 ms timeout at most */
+    for (int i = 0; i < J2534_MAX_CHANNELS; i++)
+    {
+        if (s_ch[i].in_use && s_ch[i].can_q != NULL)
+        {
+            return s_ch[i].can_q;
+        }
+    }
+
+    return NULL;
 }
 
 static void teardown(j2534_channel_t *c)
@@ -192,7 +229,7 @@ static void teardown(j2534_channel_t *c)
     }
     if (c->can_q != NULL)
     {
-        vQueueDelete(c->can_q);
+        xQueueReset(c->can_q);   /* static: lives on for the next CONNECT */
         c->can_q = NULL;
     }
     j2534_iso_unbind_all(c);
@@ -220,14 +257,19 @@ void j2534_channel_reset_all(void)
    on an ISO15765 one */
 static bool subscribe_bus(j2534_channel_t *c, const char *name)
 {
-    c->can_q = xQueueCreate(J2534_CH_CAN_QLEN, sizeof(can_core_frame_t));
+    c->can_q = s_can_q[c - s_ch];
+
+    if (c->can_q != NULL)
+    {
+        xQueueReset(c->can_q);   /* frames of the slot's previous life */
+    }
 
     if (c->can_q == NULL ||
         can_manager_subscribe_queue(c->can_q, 0, 0, c->ext, true,
                                     &c->can_sub) != ESP_OK)
     {
-        ESP_LOGW(TAG, "no CAN subscription for the channel (queue memory "
-                      "or a free subscriber slot)");
+        ESP_LOGW(TAG, "no CAN subscription for the channel (no queue "
+                      "or no free subscriber slot)");
         return false;
     }
 

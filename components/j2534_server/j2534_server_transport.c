@@ -112,6 +112,39 @@ bool j2534_srv_send_frame(const j2534_transport_t *t, uint8_t type,
     return ok;
 }
 
+bool j2534_srv_send_raw(const j2534_transport_t *t, const uint8_t *buf,
+                        size_t len)
+{
+    if (t == NULL || buf == NULL || len < J2534_HDR_SIZE)
+    {
+        return false;
+    }
+
+    xSemaphoreTake(s_send_lock, portMAX_DELAY);
+
+    bool ok = write_all(t, buf, len);
+
+    if (ok)
+    {
+        /* count the frames in the run (every one starts with a header) */
+        for (size_t off = 0; off + J2534_HDR_SIZE <= len;)
+        {
+            j2534_hdr_t h;
+
+            if (!j2534_hdr_decode(buf + off, J2534_HDR_SIZE, &h))
+            {
+                break;
+            }
+
+            j2534_srv_count_tx();
+            off += J2534_HDR_SIZE + h.length;
+        }
+    }
+
+    xSemaphoreGive(s_send_lock);
+    return ok;
+}
+
 bool j2534_srv_send_ack(const j2534_transport_t *t, uint16_t seq,
                         uint16_t channel, uint32_t status,
                         const uint32_t *result)

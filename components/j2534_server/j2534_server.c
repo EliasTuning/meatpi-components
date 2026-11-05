@@ -38,8 +38,10 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "can_core.h"      /* can_core_frame_t: the pump's queue peek */
 #include "can_manager.h"
 #include "log_manager.h"
 #include "obd_gate.h"
@@ -536,6 +538,61 @@ void j2534_srv_session_end(void)
 
 /* ---- RX pump: drain every active channel, push RX_MSG to the tester --- */
 
+/* RX_MSG frames waiting to go out in ONE transport write (PSRAM; the
+ * pump task only). Up to a maximal frame's worth: every transport takes
+ * that size today (CDC's DMA buffer, BLE's channel write), and the wire
+ * contract lets frames be coalesced (J2534_WIRE_PROTOCOL.md section 1). */
+#define J2534_RX_BATCH_MAX  32   /* frames per write at most */
+EXT_RAM_BSS_ATTR static uint8_t s_rx_batch[J2534_MAX_FRAME];
+
+/* One pass over the active channels into the batch. Returns the number
+ * of frames appended (0 = nothing was pending anywhere). */
+static unsigned pump_pass(const j2534_transport_t *t, size_t *used)
+{
+    unsigned got = 0;
+
+    for (int slot = 0; slot < J2534_MAX_CHANNELS; slot++)
+    {
+        if (!s_session.ch_used[slot])
+        {
+            continue;
+        }
+
+        if (!j2534_channel_poll_rx(slot, &s_rx_msg))
+        {
+            continue;
+        }
+
+        size_t n = j2534_msg_encode(&s_rx_msg, s_rx_wire, sizeof(s_rx_wire));
+
+        if (n == 0 || j2534_srv_active() != t)
+        {
+            continue;
+        }
+
+        if (*used + J2534_HDR_SIZE + n > sizeof(s_rx_batch))
+        {
+            /* no room beside what waits: send that first, alone */
+            (void)j2534_srv_send_raw(t, s_rx_batch, *used);
+            *used = 0;
+        }
+
+        j2534_hdr_encode(s_rx_batch + *used, J2534_MT_RX_MSG, 0,
+                         (uint16_t)(slot + 1), (uint32_t)n);
+        memcpy(s_rx_batch + *used + J2534_HDR_SIZE, s_rx_wire, n);
+        *used += J2534_HDR_SIZE + n;
+        got++;
+    }
+
+    return got;
+}
+
+/* The pump pushes what the channels received as it arrives. 2026-11-06
+ * (the VW TP 2.0 speed report: a tool that acknowledges every block of a
+ * transfer pays the device's round trip at every block end): the pump
+ * blocks on the active channel's bus queue instead of sleeping 2 ms
+ * between polls (a frame woke the tester up to 2 ms late), and what has
+ * piled up goes out in one transport write instead of one per frame. */
 static void rx_pump_task(void *arg)
 {
     (void)arg;
@@ -550,33 +607,40 @@ static void rx_pump_task(void *arg)
             continue;
         }
 
-        bool any = false;
+        size_t used = 0;
+        unsigned frames = 0;
+        unsigned got;
 
-        for (int slot = 0; slot < J2534_MAX_CHANNELS; slot++)
+        /* drain: a burst that arrives while the pass runs joins the batch */
+        while ((got = pump_pass(t, &used)) > 0)
         {
-            if (!s_session.ch_used[slot])
-            {
-                continue;
-            }
+            frames += got;
 
-            if (j2534_channel_poll_rx(slot, &s_rx_msg))
+            if (frames >= J2534_RX_BATCH_MAX)
             {
-                size_t n = j2534_msg_encode(&s_rx_msg, s_rx_wire,
-                                            sizeof(s_rx_wire));
-
-                if (n > 0 && j2534_srv_active() == t)
-                {
-                    j2534_srv_send_frame(t, J2534_MT_RX_MSG, 0,
-                                         (uint16_t)(slot + 1), s_rx_wire,
-                                         (uint32_t)n);
-                    any = true;
-                }
+                break;
             }
         }
 
-        if (!any)
+        if (used > 0)
         {
-            vTaskDelay(pdMS_TO_TICKS(2));
+            (void)j2534_srv_send_raw(t, s_rx_batch, used);
+            continue; /* straight back for what came in meanwhile */
+        }
+
+        /* nothing pending: wait for the next bus frame on the active
+           channel's queue (peek: the poll above consumes), or 2 ms for
+           what no queue announces (an ISO-TP PDU the provider completes,
+           a J1850 reply, an indication) */
+        QueueHandle_t q = j2534_channel_wait_queue();
+        can_core_frame_t peek;
+
+        if (q == NULL || xQueuePeek(q, &peek, pdMS_TO_TICKS(2)) != pdTRUE)
+        {
+            if (q == NULL)
+            {
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
         }
     }
 

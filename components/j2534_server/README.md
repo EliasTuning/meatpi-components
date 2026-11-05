@@ -15,6 +15,19 @@ protocol runs over three transports: the TCP listener in this component
 2026-09-21). Exactly one tester at a time across all of them; a second one
 is answered `ERR_DEVICE_IN_USE`.
 
+The RX pump (the `j2534_rx` task) pushes what the channels received as it
+arrives: it blocks on the open channel's bus queue between frames (the
+channel queues are static for the module's life, reset at CONNECT, so a
+waiter never sees one deleted; `j2534_channel_wait_queue`) and falls back
+to a 2 ms poll only for what no queue announces (an ISO-TP PDU the
+provider completes, a J1850 reply, an indication). A burst of received
+frames goes out in ONE transport write (`j2534_srv_send_raw`, up to 32
+frames or a maximal frame's worth; the wire contract lets frames be
+coalesced). Until 2026-11-06 the pump slept 2 ms between polls and wrote
+one frame per transport write: a tool that acknowledges every block of a
+transfer (a VW TP 2.0 flasher, the field report of 2026-10-27) paid up to
+2 ms of that on every block end, on top of the link's round trip.
+
 J1850 VPW (GM Class 2, protocol id 1) rides the OBD chip, not the native
 CAN controller (2026-10-19, modelled on the nightjoker7 4.47p fork but
 rebuilt on the v6 `obd_chip` claim model and the chip's own

@@ -46,14 +46,25 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #include "j2534_proto.h"
 
 #define J2534_CH_MAX_FILTERS  8
 #define J2534_CH_MAX_SESSIONS 4   /* ISO-TP sessions (ECUs) per channel */
 
-void j2534_channel_init(void);          /* one-time: mutex etc. */
+void j2534_channel_init(void);          /* one-time: mutex, the bus queues */
 void j2534_channel_reset_all(void);     /* tester disconnected: tear down */
+
+/**
+ * The bus queue the RX pump may block on between frames: the first open
+ * CAN or ISO15765 channel's (every such channel subscribes to every bus
+ * frame), NULL when no channel has one (none open, or J1850 only). The
+ * handle is static for the module's life (never deleted under a waiter);
+ * xQueuePeek on it, never a receive: j2534_channel_poll_rx consumes.
+ */
+QueueHandle_t j2534_channel_wait_queue(void);
 
 /**
  * The bus bitrate at CONNECT. The bus runs at the device's setting, at
