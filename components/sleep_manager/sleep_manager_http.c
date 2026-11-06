@@ -71,14 +71,15 @@ static int status_json(char *body, size_t len)
                     "\"sleep_v\":%.2f,\"wake_v\":%.2f,\"naps\":%lu,"
                     "\"pending\":\"%s\",\"sleep_in_s\":%lu,"
                     "\"critical_v\":%.2f,\"critical_s\":%lu,"
-                    "\"hold_s\":%lu,\"holds_left\":%u,\"holds_max\":%u}",
+                    "\"hold_s\":%lu,\"holds_left\":%u,\"holds_max\":%u,"
+                    "\"activity_s\":%lu}",
                     st.enabled ? "true" : "false", state_str(st.state),
                     st.voltage, st.sleep_v, st.wake_v,
                     (unsigned long)st.naps,
                     pending_str(st.pending), (unsigned long)st.sleep_in_s,
                     st.critical_v, (unsigned long)st.critical_s,
                     (unsigned long)st.hold_s, (unsigned)st.holds_left,
-                    (unsigned)st.holds_max);
+                    (unsigned)st.holds_max, (unsigned long)st.activity_s);
 }
 
 static esp_err_t sleep_handler(httpd_req_t *req)

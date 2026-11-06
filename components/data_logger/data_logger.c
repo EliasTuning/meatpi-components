@@ -567,6 +567,15 @@ esp_err_t data_logger_stats(data_logger_stats_t *out)
     out->clock_steps = cs.steps_this_boot;
     out->clock_rotations = cs.rotations_by_clock;
     out->journal_bytes = cs.journal_bytes;
+
+    /* the params stream as configured, and what the export served */
+    const dl_cfg_t *cfg = dl_settings_config();
+    static const char *const AP_LOG[] = { "off", "changed", "all" };
+
+    snprintf(out->format, sizeof(out->format), "%s", cfg->format);
+    snprintf(out->autopid_log, sizeof(out->autopid_log), "%s",
+             AP_LOG[cfg->autopid_log < 3 ? cfg->autopid_log : 0]);
+    dl_export_stats(out);
     return ESP_OK;
 }
 

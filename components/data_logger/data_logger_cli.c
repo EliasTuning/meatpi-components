@@ -29,8 +29,10 @@
  *        engine throughput without a bus: run `logger` afterwards and
  *        watch `written`/`frames` move).
  */
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -40,9 +42,28 @@
 #include "data_logger.h"
 #include "data_logger_private.h"
 
-static int cmd_logger_test(int rows)
+/* `logger test <rows> [<source> <name> [<age_s> [<step_ms>]]]`: synthetic
+ * records `i * 0.5`, stamped now (the default `test.value`), or, for the
+ * store-and-forward bench (2026-11-06), under any source and name and
+ * starting `age_s` ago at `step_ms` apart (explicit stamps: never
+ * re-based), so a consumer's import of past hours can be checked against
+ * a known series without touching the device's clock. */
+static int cmd_logger_test(int argc, char **argv)
 {
-    static dl_param_t s_param = -1;
+    int rows = atoi(argv[2]);
+    const char *source = (argc >= 5) ? argv[3] : "test";
+    const char *name = (argc >= 5) ? argv[4] : "value";
+    /* the start: an age in seconds back from now, or `@<epoch s>` for an
+       absolute one (two series on the same stamps: the GPS track bench) */
+    const char *when = (argc >= 6) ? argv[5] : "0";
+    bool absolute = (when[0] == '@');
+    long long at_s = absolute ? atoll(when + 1) : 0;
+    long age_s = absolute ? 0 : atol(when);
+    long step_ms = (argc >= 7) ? atol(argv[6]) : 1000;
+    dl_param_t param;
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
 
     if (rows < 1 || rows > 20000)
     {
@@ -50,14 +71,30 @@ static int cmd_logger_test(int rows)
         return 1;
     }
 
-    if (s_param < 0 &&
-        data_logger_register_param("test", "value", &s_param) != ESP_OK)
+    if (age_s < 0 || age_s > 90L * 86400L || step_ms < 1 || step_ms > 3600000L)
+    {
+        cmdline_printf("age_s 0..7776000 or @<epoch_s>, step_ms 1..3600000\n");
+        return 1;
+    }
+
+    if (absolute && (at_s < (long long)tv.tv_sec - 90LL * 86400LL ||
+                     at_s > (long long)tv.tv_sec + 60LL))
+    {
+        cmdline_printf("@<epoch_s> must be within the last 90 days\n");
+        return 1;
+    }
+
+    if (data_logger_register_param(source, name, &param) != ESP_OK)
     {
         cmdline_printf("param registration failed\n");
         return 1;
     }
 
     int queued = 0;
+    bool explicit_stamps = absolute || (age_s > 0);
+    int64_t t0 = absolute
+        ? at_s * 1000
+        : (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000 - (int64_t)age_s * 1000;
 
     for (int i = 0; i < rows; i++)
     {
@@ -71,13 +108,19 @@ static int cmd_logger_test(int rows)
             vTaskDelay(pdMS_TO_TICKS(20));
         }
 
-        if (data_logger_write(s_param, (double)i * 0.5) == ESP_OK)
+        esp_err_t err = explicit_stamps
+            ? data_logger_write_at(param, t0 + (int64_t)i * step_ms,
+                                   (double)i * 0.5)
+            : data_logger_write(param, (double)i * 0.5);
+
+        if (err == ESP_OK)
         {
             queued++;
         }
     }
 
-    cmdline_printf("queued %d/%d test.value records\n", queued, rows);
+    cmdline_printf("queued %d/%d %s.%s records%s\n", queued, rows, source,
+                   name, explicit_stamps ? " (stamped in the past)" : "");
     return 0;
 }
 
@@ -124,7 +167,7 @@ static int cmd_logger(int argc, char **argv)
 
     if (argc >= 3 && strcmp(argv[1], "test") == 0)
     {
-        return cmd_logger_test(atoi(argv[2]));
+        return cmd_logger_test(argc, argv);
     }
 
     if (argc >= 3 && strcmp(argv[1], "frametest") == 0)
@@ -166,6 +209,19 @@ static int cmd_logger(int argc, char **argv)
                    st.clock_source, (unsigned long)st.clock_steps,
                    (unsigned long)st.clock_rotations,
                    (unsigned long)st.journal_bytes);
+    cmdline_printf("  export: %s params as %s; %lu read(s), %lu rows, %lu B%s",
+                   st.autopid_log, st.format,
+                   (unsigned long)st.export_reads,
+                   (unsigned long)st.export_rows,
+                   (unsigned long)st.export_bytes,
+                   st.export_age_s < 0 ? "\n" : "");
+
+    if (st.export_age_s >= 0)
+    {
+        cmdline_printf(", the last %ld s ago at %s\n", (long)st.export_age_s,
+                       st.export_cursor);
+    }
+
     return 0;
 }
 
@@ -174,8 +230,9 @@ esp_err_t data_logger_register_cli(void)
     static const esp_console_cmd_t CMD =
     {
         .command = "logger",
-        .help = "Data logger status; `logger test <rows>` / "
-                "`logger frametest <n>` queue synthetic records",
+        .help = "Data logger status; `logger test <rows> [<source> <name> "
+                "[<age_s> [<step_ms>]]]` / `logger frametest <n>` queue "
+                "synthetic records",
         .func = cmd_logger,
     };
 

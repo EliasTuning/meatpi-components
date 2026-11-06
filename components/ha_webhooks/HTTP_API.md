@@ -165,20 +165,36 @@ v1→v2 migration adds `gzip:false`.
 | `POST /api/ota/upload` + legacy `/upload/ota.bin` bridge | `ota_manager` / `api_http` |
 | `GET /api/logger/export?stream=params&since=<cursor>&limit=<n>` (ask #8) | `data_logger`, see below |
 
-### GET /api/logger/export (ask #8, added 2026-07-18)
+### GET /api/logger/export (ask #8, added 2026-07-18; the shape as built)
 
-Incremental NDJSON export of the numeric-params log stream. Requires the
-params stream `format` setting to be `jsonl` (400 otherwise).
+Incremental export of the numeric-params log stream: the store-and-forward
+source the integration's history backfill reads (`history.py`, aligned to
+this shape 2026-11-06). Requires the params stream `format` setting to be
+`jsonl` or `csv` (400 `params stream is not jsonl or csv` otherwise; the
+integration reports that in its diagnostics and imports nothing).
 
 - `stream`: only `params` (default).
-- `since`:   opaque cursor from a previous response (`<epoch>:<offset>`).
-  Omit to start from the OLDEST retained file. A cursor pointing at a
-  retired (aged-out) file resumes at the next newer file.
-- `limit`:   max records per response (default 500, cap 2000; responses
-  are also byte-budgeted at 16 KB).
+- `since`: the cursor of a previous response (`<file-epoch>:<offset>`,
+  opaque, exact: a cursor at a retired file resumes at the next newer one
+  from its start), or a PLAIN epoch (seconds or milliseconds, 2026-11-06:
+  "the rows from that moment"), which starts at the newest file opened at
+  or before it. Omitted or 0: the OLDEST retained file.
+- `limit`: max rows per response (default 500, cap 2000; a response is
+  also capped at 64 KB emitted and 512 KB read from the card).
 
-Response `application/x-ndjson`: the logged rows verbatim, then a FINAL
-meta line `{"_cursor":"<next>","more":true|false}`: feed `_cursor` back
-as `since`; `more=true` means call again immediately. The active file's
-trailing partially-written record is never emitted (it is picked up by
-the next call). Rows cut only on record boundaries.
+Response `application/x-ndjson` (`text/plain` for csv): a `{"_file":
+"<name>"}` line ahead of each file's rows, the logged rows verbatim
+(`{"ts":<epoch MILLISECONDS>,"param":"<source>.<name>","value":n}`; the
+AutoPID sink's rows are `autopid.<name>` with the name of the push's
+`autopid_data` key; csv rows `ts_ms,source.name,value` under one
+`ts_ms,param,value` header per file), then a FINAL meta line
+`{"_cursor":"<next>","more":true|false}`: feed `_cursor` back as `since`;
+`more=true` means call again at once. There is no `X-Next-Since` header
+(the response is chunked; the cursor is known at its end). The active
+file's trailing partially-written record is never emitted (the next call
+picks it up); rows cut only on record boundaries; the in-band clock-step
+markers are never emitted. `GET /api/logger` carries `format`,
+`autopid_log` and `export{reads, rows, bytes, age_s, cursor}` (what the
+route served since boot). Every read that carried rows keeps a counting
+device awake a minute more (ten at most): `data_logger/README.md`,
+"Store and forward".

@@ -8,6 +8,7 @@ idf_component_register(
          "test_recover.c"
          "test_clock.c"
          "${comp_dir}/data_logger_files.c"
+         "${comp_dir}/data_logger_cursor.c"
          "${comp_dir}/data_logger_recover.c"
          "${comp_dir}/data_logger_clock.c"
     INCLUDE_DIRS "${comp_dir}/include" "${comp_dir}"

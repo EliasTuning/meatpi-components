@@ -178,6 +178,53 @@ bool sm_hold_apply(sm_policy_t *p, bool ladder_on, sm_critical_t *c,
     return counting;
 }
 
+void sm_activity_init(sm_activity_t *a)
+{
+    a->active = false;
+    a->cap_until = 0;
+    a->until = 0;
+}
+
+bool sm_activity_apply(sm_policy_t *p, bool ladder_on, sm_critical_t *c,
+                       sm_activity_t *a, uint32_t now_ms, uint32_t hold_ms,
+                       uint32_t cap_ms)
+{
+    bool ladder = ladder_on && p->state == SLEEP_MANAGER_LOW_VOLTAGE;
+
+    if (p->state == SLEEP_MANAGER_SLEEPING ||
+        p->state == SLEEP_MANAGER_WAKE_PENDING || (!ladder && !c->armed))
+    {
+        a->active = false; /* asleep, or nothing counts: nothing to hold */
+        return false;
+    }
+
+    if (!a->active)
+    {
+        a->active = true;
+        a->cap_until = now_ms + cap_ms; /* the countdown's first read */
+    }
+
+    uint32_t until = now_ms + hold_ms;
+
+    if ((int32_t)(until - a->cap_until) > 0)
+    {
+        until = a->cap_until;
+    }
+
+    if (ladder)
+    {
+        push_out(&p->t_low, until);
+    }
+
+    if (c->armed)
+    {
+        push_out(&c->t_trip, until);
+    }
+
+    a->until = until;
+    return true;
+}
+
 uint32_t sm_pending_pack(sleep_manager_pending_t cause, uint32_t deadline_ms)
 {
     return ((uint32_t)cause << 30) | (deadline_ms & SM_PENDING_MS_MASK);

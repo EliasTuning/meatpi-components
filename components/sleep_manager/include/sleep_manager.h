@@ -111,6 +111,8 @@ typedef struct
     uint32_t              hold_s;       /**< seconds left of a hold (0: none) */
     uint8_t               holds_left;   /**< holds still allowed this boot */
     uint8_t               holds_max;    /**< the cap per boot (3)      */
+    uint32_t              activity_s;   /**< seconds left of the extension a
+                                             log read gave (0: none) */
 } sleep_manager_status_t;
 
 /** Ordered shutdown glue the composition root provides (stop radios,
@@ -139,6 +141,15 @@ esp_err_t sleep_manager_set_prepare_cb(sleep_manager_prepare_cb_t cb);
  *  nothing is counting (healthy battery, or asleep), ESP_ERR_NOT_ALLOWED
  *  past the third. */
 esp_err_t sleep_manager_hold(uint32_t minutes);
+
+/** Something is reading the device's log (the Home Assistant backfill after
+ *  a drive, the dashboard's history; the composition root wires
+ *  data_logger's reader hook here, 2026-11-06): a counting device stays
+ *  awake @p seconds more from now where that is later than its deadline,
+ *  but never longer than 10 minutes past the first such read of the
+ *  countdown. Runtime only, counts against nothing. ESP_ERR_INVALID_ARG out
+ *  of 1..600, ESP_ERR_INVALID_STATE when nothing counts. */
+esp_err_t sleep_manager_activity(uint32_t seconds);
 
 /** Force a sleep entry for the bench: enters the full sequence, then
  *  auto-reboots after @p wake_after_s regardless of voltage (so a

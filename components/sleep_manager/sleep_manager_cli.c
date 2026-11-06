@@ -110,6 +110,12 @@ static int cmd_sleep(int argc, char **argv)
                        (unsigned)st.holds_left, (unsigned)st.holds_max);
     }
 
+    if (st.activity_s > 0)
+    {
+        cmdline_printf("  held awake while the log is read: %lu s left\n",
+                       (unsigned long)st.activity_s);
+    }
+
     cmdline_printf("  naps %lu, chip re-sleeps %lu\n",
                    (unsigned long)st.naps,
                    (unsigned long)st.chip_resleeps);

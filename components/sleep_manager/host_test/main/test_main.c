@@ -538,6 +538,126 @@ static void test_pending_word_is_exact_at_the_read(void)
     TEST_ASSERT_EQUAL_UINT32(0, s);
 }
 
+/* a log read pushes both counting deadlines out a minute from the read,
+   read after read, and never past ten minutes from the first read of the
+   countdown; the states do not change */
+static void test_activity_holds_within_the_cap(void)
+{
+    sm_critical_t c;
+    sm_activity_t a;
+
+    s_cfg.delay_ms = 300000;
+    sm_critical_init(&c);
+    sm_activity_init(&a);
+    sm_policy_eval(&s_p, &s_cfg, 11.55f, 0);     /* both at 5 min */
+    sm_critical_eval(&c, 11.55f, 0);
+
+    /* a read 1 min in: the deadlines are 4 min away, 1 min is not later */
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, true, &c, &a, 60000, 60000,
+                                       600000));
+    TEST_ASSERT_TRUE(a.active);
+    TEST_ASSERT_EQUAL_UINT32(660000, a.cap_until);  /* 1 min + 10 min */
+    TEST_ASSERT_EQUAL_UINT32(300000, s_p.t_low);
+    TEST_ASSERT_EQUAL_UINT32(300000, c.t_trip);
+
+    /* a read 10 s before the entry: both move out to a minute from it */
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, true, &c, &a, 290000, 60000,
+                                       600000));
+    TEST_ASSERT_EQUAL_UINT32(350000, s_p.t_low);
+    TEST_ASSERT_EQUAL_UINT32(350000, c.t_trip);
+    TEST_ASSERT_EQUAL_UINT32(350000, a.until);
+    TEST_ASSERT_EQUAL_INT(SLEEP_MANAGER_LOW_VOLTAGE, s_p.state);
+    TEST_ASSERT_TRUE(c.armed);
+    expect_pending(SLEEP_MANAGER_PENDING_CRITICAL, 60, true, &c, 290000);
+
+    /* reads every second keep it awake ... */
+    for (uint32_t t = 291000; t < 640000; t += 1000)
+    {
+        TEST_ASSERT_TRUE(sm_activity_apply(&s_p, true, &c, &a, t, 60000,
+                                           600000));
+        TEST_ASSERT_EQUAL_INT(SM_ACT_NONE,
+                              sm_policy_eval(&s_p, &s_cfg, 11.55f, t));
+        TEST_ASSERT_FALSE(sm_critical_eval(&c, 11.55f, t));
+    }
+
+    /* ... but never past the cap: 10 min after the first read */
+    TEST_ASSERT_EQUAL_UINT32(660000, s_p.t_low);
+    TEST_ASSERT_EQUAL_UINT32(660000, c.t_trip);
+    TEST_ASSERT_EQUAL_UINT32(660000, a.until);
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, true, &c, &a, 659000, 60000,
+                                       600000));
+    TEST_ASSERT_EQUAL_UINT32(660000, c.t_trip);
+    TEST_ASSERT_TRUE(sm_critical_eval(&c, 11.55f, 660000));
+    TEST_ASSERT_EQUAL_INT(SM_ACT_ENTER_SLEEP,
+                          sm_policy_eval(&s_p, &s_cfg, 11.55f, 660000));
+    /* asleep: a read holds nothing and the tracker lets go */
+    TEST_ASSERT_FALSE(sm_activity_apply(&s_p, true, &c, &a, 661000, 60000,
+                                        600000));
+    TEST_ASSERT_FALSE(a.active);
+}
+
+/* only what counts moves: the floor alone with sleep disabled, the ladder
+   alone while the floor is not armed; nothing on a healthy battery; and a
+   fresh countdown gets a fresh cap once the tracker was reset */
+static void test_activity_only_what_counts(void)
+{
+    sm_critical_t c;
+    sm_activity_t a;
+
+    sm_critical_init(&c);
+    sm_activity_init(&a);
+    sm_policy_eval(&s_p, &s_cfg, 14.0f, 0);      /* healthy: nothing */
+    TEST_ASSERT_FALSE(sm_activity_apply(&s_p, true, &c, &a, 1000, 60000,
+                                        600000));
+    TEST_ASSERT_FALSE(a.active);
+
+    sm_policy_eval(&s_p, &s_cfg, 12.4f, 2000);   /* delay 180 s, floor idle */
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, true, &c, &a, 170000, 60000,
+                                       600000));
+    TEST_ASSERT_EQUAL_UINT32(230000, s_p.t_low);
+    TEST_ASSERT_FALSE(c.armed);
+
+    sm_policy_init(&s_p);                         /* sleep disabled */
+    sm_critical_init(&c);
+    sm_activity_init(&a);
+    sm_critical_eval(&c, 11.7f, 0);               /* floor at 300 s */
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, false, &c, &a, 280000, 60000,
+                                       600000));
+    TEST_ASSERT_EQUAL_UINT32(340000, c.t_trip);
+    TEST_ASSERT_EQUAL_INT(SLEEP_MANAGER_NORMAL, s_p.state);
+    expect_pending(SLEEP_MANAGER_PENDING_CRITICAL, 60, false, &c, 280000);
+
+    /* the cap belongs to one countdown: reset, the next read sets a new one */
+    sm_activity_init(&a);
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, false, &c, &a, 300000, 60000,
+                                       600000));
+    TEST_ASSERT_EQUAL_UINT32(900000, a.cap_until);
+    TEST_ASSERT_EQUAL_UINT32(360000, c.t_trip);
+}
+
+/* across the clock wrap the cap and the push still compare right */
+static void test_activity_clock_wrap_safe(void)
+{
+    sm_critical_t c;
+    sm_activity_t a;
+    uint32_t t0 = 0xFFFFFFFFu - 30000u;
+
+    sm_critical_init(&c);
+    sm_activity_init(&a);
+    sm_policy_eval(&s_p, &s_cfg, 11.7f, t0);      /* t_low = t0 + 180 s */
+    sm_critical_eval(&c, 11.7f, t0);              /* t_trip = t0 + 300 s */
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, true, &c, &a, t0 + 290000u,
+                                       60000, 600000));
+    TEST_ASSERT_EQUAL_UINT32(t0 + 350000u, c.t_trip);
+    TEST_ASSERT_EQUAL_UINT32(t0 + 350000u, s_p.t_low);
+    TEST_ASSERT_EQUAL_UINT32(t0 + 890000u, a.cap_until);
+    TEST_ASSERT_TRUE(sm_activity_apply(&s_p, true, &c, &a, t0 + 880000u,
+                                       60000, 600000));
+    TEST_ASSERT_EQUAL_UINT32(t0 + 890000u, c.t_trip);   /* capped */
+    expect_pending(SLEEP_MANAGER_PENDING_CRITICAL, 10, true, &c,
+                   t0 + 880000u);
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -564,5 +684,8 @@ void app_main(void)
     RUN_TEST(test_hold_moves_both_deadlines);
     RUN_TEST(test_hold_only_what_counts);
     RUN_TEST(test_hold_clock_wrap_safe);
+    RUN_TEST(test_activity_holds_within_the_cap);
+    RUN_TEST(test_activity_only_what_counts);
+    RUN_TEST(test_activity_clock_wrap_safe);
     UNITY_END();
 }

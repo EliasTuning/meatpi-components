@@ -115,25 +115,85 @@ Actions:
   file_rows, files, queued, frames_written, frames_dropped,
   rotations) + a `clock{}` block (valid, source, steps_this_boot,
   rotations_by_clock, journal_bytes, journal: the "Time" section).
-- `GET /api/logger/export?stream=params&since=<cursor>&limit=N[&name=<param>]`:
-  incremental pull of the params stream (jsonl and, since 2026-09-06, csv:
-  400 for the other engines, whose files the UI fetches whole through
-  `/api/fs/download`):
-  `{"ts":<epoch ms>,"param":"<source>.<name>","value":n}` lines, then a
-  `{"_cursor":"<epoch>:<offset>","more":bool}` meta line. `name` (2026-09-06)
-  filters to one parameter (the value after the last `.` or the full
-  `source.name`); the cursor walks every line either way, bounded per
-  request by 512 KB read / 64 KB emitted / `limit` lines. Every read
-  window re-seeks to the cursor (the old loop advanced the file position
-  by the whole window but the cursor by the kept part, so a second window
-  in one response started mid-record). The web dashboard's chart tiles
-  backfill from it.
+- `GET /api/logger/export?stream=params&since=<cursor>&limit=N[&name=<param>]`
+  (`data_logger_export.c`): incremental pull of the params stream (jsonl
+  and, since 2026-09-06, csv: 400 for the other engines, whose files the
+  UI fetches whole through `/api/fs/download`): a `{"_file":"<name>"}`
+  line ahead of each file's rows, the rows verbatim
+  (`{"ts":<epoch ms>,"param":"<source>.<name>","value":n}`, or
+  `ts_ms,source.name,value` for csv), then a FINAL
+  `{"_cursor":"<epoch>:<offset>","more":bool}` meta line. `since` takes
+  that cursor back (exact: a retired epoch resumes at the next newer file
+  from its start) or, since 2026-11-06, a plain epoch (seconds or
+  milliseconds: "the rows from that moment", for a client that only
+  remembers the time of its last import), which starts at the newest file
+  opened at or before it (the pure `dl_export_start()` in
+  `data_logger_cursor.c`, host-tested); nothing or 0 starts at the oldest
+  file. `name` (2026-09-06) filters to one parameter (the value after the
+  last `.` or the full `source.name`); the cursor walks every line either
+  way, bounded per request by 512 KB read / 64 KB emitted / `limit` lines
+  (cap 2000). Every read window re-seeks to the cursor (the old loop
+  advanced the file position by the whole window but the cursor by the
+  kept part, so a second window in one response started mid-record). A
+  client that goes away mid-response stops the card reads. The web
+  dashboard's chart tiles backfill from it, and so does the Home Assistant
+  integration (below). A page ends at a line boundary, always: a line that does not fit the
+  page's byte budget opens the next page (until 2026-11-06 a read window
+  whose first line did not fit went out raw, about one page in sixteen,
+  its cut tail row glued to the cursor line, and a client stopped paging
+  there; the walk is the pure `dl_export_walk()`, host-tested).
+- **Store and forward (2026-11-06).** A car away from home logs its
+  parameters here (`autopid_log` on, `format` jsonl or csv); once it is
+  back, the Home Assistant integration (`meatpi-multi-device` branch)
+  pulls the rows through the export route from the cursor it kept and
+  imports them into each sensor's long-term statistics at the recorded
+  hours. The device's part: `GET /api/logger` reports `format`,
+  `autopid_log` and an `export{reads, rows, bytes, age_s (-1 = never),
+  cursor}` block (what a consumer has read), the `logger` command prints
+  the same line, the web UI's Automate > Home Assistant card has a Store
+  and forward switch that stages the three keys, and every export read
+  that carried rows is reported to the composition root
+  (`data_logger_set_reader_cb()`, `data_logger_reader_cb_t`), which hands
+  it to `sleep_manager_activity()`: a car at home has its engine off and
+  the sleep countdown running, so the read pushes the countdown out a
+  minute at a time (ten minutes at most), and the backfill finishes before
+  the entry instead of waiting for the next drive. With a VPN on
+  (`vpn_manager.enabled`) the card warns that the integration reaches the
+  device away from home too and pulls the log over mobile data as well
+  (Ali, 2026-11-06: the pull stays as it is, no network rule, a warning).
+  Bench:
+  `tools/testbench/ha/ha_history_backfill_bench.py` (`.\test.ps1
+  habackfill`, `HA BACKFILL PASS`) against the bench Home Assistant.
+- `GET /api/logger/gpx?since=<cursor|epoch>&until=<epoch>&limit=<points>`
+  (2026-11-06, `data_logger_gpx.c`): **the GPS track.** The fix is published
+  as the AutoPID parameters `gps_latitude`, `gps_longitude`, `gps_altitude`,
+  `gps_speed`, `gps_heading` and `gps_satellites`, so Store and forward
+  records it; this route gathers those rows by stamp (one fix = one point,
+  within 0.2 s: the fields of one fix share a stamp to the millisecond,
+  and a 1 Hz track must not merge neighbours) into a static PSRAM table
+  of up to 4000 points (sorted;
+  rows out of order find their point) and writes a GPX 1.1 document: a
+  `<trkpt>` per fix with `<ele>`, `<time>` and `<extensions>` (speed in
+  m/s, course, satellites), a new `<trkseg>` after ten minutes without a
+  fix, and a trailing comment `<!-- cursor="<file-epoch>:<offset>"
+  more="true|false" points="N" -->` to continue from (`limit` default 2000,
+  max 4000; 3 MB read per request). jsonl or csv only (400); one request
+  at a time (409). It counts as an export read (the counters, the reader
+  hook). Home Assistant's own history cannot hold a position (no past
+  state, no statistics for a location): the time series lives in this
+  file. The Logger page's GPS track card downloads it for a window; the
+  HA integration's `wican.save_gpx` service saves it under `www/wican/`.
 - `POST /api/logger/gate` `{"enabled":bool}`: runtime (non-persisted)
   gate for BOTH streams; the HTTP twin of the `logger.enable`/
   `logger.disable` event actions. Resets on reboot.
-- CLI `logger`: both streams' status; `logger test <rows>` queues
-  synthetic `test.value` records, `logger frametest <n>` synthetic
-  frames (engine throughput without a bus).
+- CLI `logger`: both streams' status, the clock line and the export line;
+  `logger test <rows> [<source> <name> [<age_s>|@<epoch_s> [<step_ms>]]]`
+  queues synthetic records (`i * 0.5`; the default `test.value` stamped
+  now, or any `source.name` starting `age_s` ago, or at the absolute
+  `@<epoch_s>`, at `step_ms` apart with explicit stamps: the
+  store-and-forward bench's known series in past hours, two series on
+  the same stamps for the GPS track),
+  `logger frametest <n>` synthetic frames (engine throughput without a bus).
 
 ## Time (2026-10-13, issue #984)
 
@@ -210,7 +270,7 @@ planned restart close the files first.
 
 ## Testing
 
-- Host: `host_test/` (40 tests: file-name/prefix rules, hex filter
+- Host: `host_test/` (42 tests: file-name/prefix rules, the export's start, line and window rules, hex filter
   parse, `.wdl` + csv frame-encoder golden vectors, the recovery
   helpers (torn text/.wdl tails, set-aside names, salvage sanity, CRC),
   and the clock rules (the 32-byte record layout, the re-base incl. the

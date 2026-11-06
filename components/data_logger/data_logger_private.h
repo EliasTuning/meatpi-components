@@ -43,6 +43,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "esp_err.h"
 
@@ -459,6 +460,46 @@ bool dl_files_parse(const char *fname, int64_t *epoch_out);
 /* writes "<prefix>%010lld<ext>" (zero-padded: lexical order = age) */
 void dl_files_make(char *out, size_t len, const char *prefix,
                    int64_t epoch, const char *ext);
+/* where an export starts in the ascending list of a stream's file epochs
+ * for a `since` value (2026-11-06): an EXACT cursor ("<epoch>:<offset>")
+ * resumes at that file with its offset, a retired epoch at the next newer
+ * file from its start; a PLAIN epoch ("the rows from that moment": a
+ * client that remembers the time of its last import) starts at the newest
+ * file opened at or before it, from its start, since a file holds the rows
+ * written while it was open; nothing or 0 starts at the oldest file.
+ * Returns the index (n when every file is older than an exact cursor) and
+ * leaves *off alone only for an exact hit. */
+int dl_export_start(const int64_t *epochs, int n, int64_t since_epoch,
+                    bool exact, long *off);
+
+/* ---- data_logger_export.c: GET /api/logger/export ------------------------ */
+struct httpd_req;
+/* the export's pure line rules (data_logger_cursor.c, host-tested): the
+   `?name=` filter, the clock-step marker, and the walk of one file window
+   against a page's line and byte budgets through a sink (one call per
+   line; false = the client went away). The walk returns the bytes
+   consumed: 0 with `stop` set when the first complete line did not fit. */
+bool dl_export_line_matches(const char *line, size_t len, const char *name,
+                            bool csv);
+bool dl_export_line_is_marker(const char *line, size_t len, bool csv);
+typedef bool (*dl_export_send_fn)(void *ctx, const char *data, size_t len);
+size_t dl_export_walk(const char *buf, size_t n, const char *name, bool csv,
+                      int limit, int *lines_left, int *bytes_left,
+                      dl_export_send_fn send, void *ctx, bool *stop,
+                      bool *aborted);
+esp_err_t dl_export_get_handler(struct httpd_req *req);
+void dl_export_stats(data_logger_stats_t *out);   /* the export_* fields */
+/* the params files' epochs, ascending (the walk both routes share) */
+int dl_export_list_epochs(int64_t *out, int cap, const char *ext);
+/* the ACTIVE file is held by the writer: pause the gate and open it
+   (sets *gated_here; the caller restores the gate); NULL when it never
+   opened. The caller gates once per request. */
+FILE *dl_export_open_locked(const char *path, bool *gated_here);
+/* a read happened: the counters, the last cursor, the reader hook (rows > 0) */
+void dl_export_note_read(uint32_t rows, uint32_t bytes, int64_t epoch, long off);
+
+/* ---- data_logger_gpx.c: GET /api/logger/gpx (the GPS track) -------------- */
+esp_err_t dl_gpx_get_handler(struct httpd_req *req);
 
 typedef struct
 {

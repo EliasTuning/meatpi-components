@@ -128,6 +128,141 @@ static void test_make_clamps_negative_epoch(void)
     TEST_ASSERT_EQUAL_STRING("can_0000000000.csv", name);
 }
 
+/* where an export starts (2026-11-06): an exact cursor resumes at its
+   file with its offset, a retired one at the next newer file from 0; a
+   plain epoch starts at the file that was open at that moment */
+/* the export's window walk (2026-11-06): the sink of the test */
+static char s_walk_out[1024];
+static size_t s_walk_len;
+static int s_walk_lines;
+static int s_walk_bytes;
+
+static bool walk_send(void *ctx, const char *data, size_t len)
+{
+    (void)ctx;
+
+    if (s_walk_len + len > sizeof(s_walk_out))
+    {
+        return false;
+    }
+
+    memcpy(s_walk_out + s_walk_len, data, len);
+    s_walk_len += len;
+    return true;
+}
+
+static size_t walk(const char *win, size_t n, const char *name, int lines,
+                   int bytes, bool *stop, bool *aborted)
+{
+    s_walk_len = 0;
+    s_walk_lines = lines;
+    s_walk_bytes = bytes;
+    *aborted = false;
+    return dl_export_walk(win, n, name, false, 500, &s_walk_lines,
+                          &s_walk_bytes, walk_send, NULL, stop, aborted);
+}
+
+/* a budget spent exactly at a window start consumes nothing and stops: it
+   is not a window without a line boundary (bench run 5, 2026-11-06: such
+   a window went out raw and its cut tail row glued to the cursor line) */
+static void test_export_walk_budget(void)
+{
+    static const char WIN[] =
+        "{\"ts\":1,\"param\":\"a.x\",\"value\":1}\n"
+        "{\"ts\":2,\"param\":\"a.y\",\"value\":2}\n"
+        "{\"ts\":3,\"param\":\"a.x\",\"value\":3}\n"
+        "{\"ts\":4,\"param\":\"a.x\",\"va";          /* the cut tail */
+    const size_t n = sizeof(WIN) - 1;
+    const size_t line = strlen("{\"ts\":1,\"param\":\"a.x\",\"value\":1}\n");
+    bool stop;
+    bool aborted;
+
+    /* a whole window: the three complete lines go out, the tail stays */
+    TEST_ASSERT_EQUAL_UINT(3 * line, walk(WIN, n, "", 500, 65536, &stop, &aborted));
+    TEST_ASSERT_FALSE(stop);
+    TEST_ASSERT_EQUAL_INT(497, s_walk_lines);
+    TEST_ASSERT_EQUAL_UINT(3 * line, s_walk_len);
+
+    /* the budget runs out at the window start, a line already sent in this
+       request: nothing consumed, nothing sent, stop (the defect's case) */
+    TEST_ASSERT_EQUAL_UINT(0, walk(WIN, n, "", 499, (int)line - 1, &stop, &aborted));
+    TEST_ASSERT_TRUE(stop);
+    TEST_ASSERT_EQUAL_UINT(0, s_walk_len);
+    TEST_ASSERT_FALSE(aborted);
+
+    /* the first line of a request always goes out, however small the budget */
+    TEST_ASSERT_EQUAL_UINT(line, walk(WIN, n, "", 500, 10, &stop, &aborted));
+    TEST_ASSERT_TRUE(stop);
+    TEST_ASSERT_EQUAL_UINT(line, s_walk_len);
+
+    /* the budget runs out after the second line: two sent, stop */
+    TEST_ASSERT_EQUAL_UINT(2 * line, walk(WIN, n, "", 500, (int)(2 * line), &stop, &aborted));
+    TEST_ASSERT_TRUE(stop);
+    TEST_ASSERT_EQUAL_UINT(2 * line, s_walk_len);
+
+    /* the name filter: only a.y goes out, the offsets still cover every line */
+    TEST_ASSERT_EQUAL_UINT(3 * line, walk(WIN, n, "y", 500, 65536, &stop, &aborted));
+    TEST_ASSERT_FALSE(stop);
+    TEST_ASSERT_EQUAL_INT(499, s_walk_lines);
+    TEST_ASSERT_EQUAL_UINT(line, s_walk_len);
+    TEST_ASSERT_EQUAL_STRING_LEN("{\"ts\":2", s_walk_out, 7);
+
+    /* the line cap */
+    TEST_ASSERT_EQUAL_UINT(2 * line, walk(WIN, n, "", 2, 65536, &stop, &aborted));
+    TEST_ASSERT_TRUE(stop);
+    TEST_ASSERT_EQUAL_INT(0, s_walk_lines);
+
+    /* the sink refuses (the client went away): aborted, stop */
+    s_walk_lines = 500;
+    s_walk_bytes = 65536;
+    s_walk_len = sizeof(s_walk_out);
+    aborted = false;
+    TEST_ASSERT_EQUAL_UINT(0, dl_export_walk(WIN, n, "", false, 500, &s_walk_lines,
+                                             &s_walk_bytes, walk_send, NULL, &stop,
+                                             &aborted));
+    TEST_ASSERT_TRUE(aborted);
+    TEST_ASSERT_TRUE(stop);
+}
+
+static void test_export_start_rule(void)
+{
+    const int64_t epochs[] = { 1000, 2000, 3000 };
+    long off = 77;
+
+    /* nothing / 0: the oldest file, offset 0 */
+    TEST_ASSERT_EQUAL_INT(0, dl_export_start(epochs, 3, 0, false, &off));
+    TEST_ASSERT_EQUAL_INT(0, off);
+    off = 77;
+    TEST_ASSERT_EQUAL_INT(0, dl_export_start(epochs, 3, 0, true, &off));
+    TEST_ASSERT_EQUAL_INT(0, off);
+
+    /* exact: a live file keeps its offset */
+    off = 77;
+    TEST_ASSERT_EQUAL_INT(1, dl_export_start(epochs, 3, 2000, true, &off));
+    TEST_ASSERT_EQUAL_INT(77, off);
+    /* exact: a retired epoch resumes at the next newer file from 0 */
+    off = 77;
+    TEST_ASSERT_EQUAL_INT(2, dl_export_start(epochs, 3, 2500, true, &off));
+    TEST_ASSERT_EQUAL_INT(0, off);
+    /* exact: newer than every file = nothing to read (n) */
+    off = 77;
+    TEST_ASSERT_EQUAL_INT(3, dl_export_start(epochs, 3, 9000, true, &off));
+    TEST_ASSERT_EQUAL_INT(0, off);
+
+    /* plain: the newest file opened at or before the moment, from 0 */
+    off = 77;
+    TEST_ASSERT_EQUAL_INT(1, dl_export_start(epochs, 3, 2500, false, &off));
+    TEST_ASSERT_EQUAL_INT(0, off);
+    off = 77;
+    TEST_ASSERT_EQUAL_INT(1, dl_export_start(epochs, 3, 2000, false, &off));
+    TEST_ASSERT_EQUAL_INT(0, off);
+    TEST_ASSERT_EQUAL_INT(2, dl_export_start(epochs, 3, 9000, false, &off));
+    /* plain: before every file = the oldest */
+    TEST_ASSERT_EQUAL_INT(0, dl_export_start(epochs, 3, 500, false, &off));
+    /* no files at all */
+    TEST_ASSERT_EQUAL_INT(0, dl_export_start(epochs, 0, 2000, true, &off));
+}
+
 static void test_scan_tracks_oldest_newest_count(void)
 {
     dl_scan_t s;
@@ -430,6 +565,8 @@ void app_main(void)
     RUN_TEST(test_make_parse_roundtrip);
     RUN_TEST(test_make_zero_pads_for_lexical_order);
     RUN_TEST(test_make_clamps_negative_epoch);
+    RUN_TEST(test_export_start_rule);
+    RUN_TEST(test_export_walk_budget);
     RUN_TEST(test_scan_tracks_oldest_newest_count);
     RUN_TEST(test_scan_ignores_foreign_entries);
     RUN_TEST(test_scan_isolates_streams_by_prefix);

@@ -122,6 +122,30 @@ sleep_manager_pending_t sm_pending_eval(const sm_policy_t *p, bool ladder_on,
 bool sm_hold_apply(sm_policy_t *p, bool ladder_on, sm_critical_t *c,
                    uint32_t now_ms, uint32_t hold_ms);
 
+/* The ACTIVITY hold (2026-11-06, store and forward): a consumer reading the
+ * device's log (the Home Assistant backfill after a drive, the dashboard's
+ * history) keeps a counting device awake a little longer so the read can
+ * finish before the entry. Every read pushes both counting deadlines out
+ * to @p now_ms + @p hold_ms where that is later, and never past the cap
+ * the first read of a countdown set (that read's now + @p cap_ms): a
+ * reader that never stops cannot hold a flat battery awake for good. The
+ * tracker forgets the cap once nothing counts (the caller resets it with
+ * the hold). Returns false when nothing counts or the device is asleep.
+ * Not a setting, never saved; a restart drops it. */
+#define SM_ACTIVITY_HOLD_MS 60000u
+#define SM_ACTIVITY_CAP_MS  600000u
+typedef struct
+{
+    bool     active;
+    uint32_t cap_until;   /* the countdown's first read + cap_ms   */
+    uint32_t until;       /* where the last read pushed to          */
+} sm_activity_t;
+
+void sm_activity_init(sm_activity_t *a);
+bool sm_activity_apply(sm_policy_t *p, bool ladder_on, sm_critical_t *c,
+                       sm_activity_t *a, uint32_t now_ms, uint32_t hold_ms,
+                       uint32_t cap_ms);
+
 /* The countdown as ONE word, for a reader on another task: the cause in
  * the top two bits, the low 30 bits of the deadline below; and back, as
  * the seconds left at @p now_ms (rounded up, 0 when due and with NONE).

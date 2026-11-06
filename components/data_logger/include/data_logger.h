@@ -106,7 +106,22 @@ typedef struct
     uint32_t clock_steps;        /**< sets of the system clock this boot     */
     uint32_t clock_rotations;    /**< files rotated because the clock moved  */
     uint32_t journal_bytes;      /**< /sd/logs/clock.jsonl as last written   */
+    /* the params stream as configured, and what /api/logger/export served
+     * (2026-11-06, store and forward: the Home Assistant backfill reads it) */
+    char     format[8];          /**< the params stream's engine (jsonl, ...)  */
+    char     autopid_log[8];     /**< off / changed / all                     */
+    uint32_t export_reads;       /**< export requests since boot              */
+    uint32_t export_rows;        /**< rows those requests carried             */
+    uint32_t export_bytes;       /**< bytes those requests carried            */
+    int32_t  export_age_s;       /**< seconds since the last read, -1 = never */
+    char     export_cursor[32];  /**< where the last read ended               */
 } data_logger_stats_t;
+
+/** A consumer read rows through /api/logger/export (the Home Assistant
+ *  backfill after a drive, the dashboard's history): the composition root
+ *  hands this to sleep_manager so a counting device stays awake a little
+ *  longer for the read to finish. httpd task context, after the response. */
+typedef void (*data_logger_reader_cb_t)(uint32_t rows);
 
 /** Register descriptors (settings/log/events). No storage access. */
 esp_err_t data_logger_init(void);
@@ -146,6 +161,10 @@ void data_logger_autopid_sink(const char *name, const char *unit,
 /** Optional /api/logger status route (§9.1: main wires it in HTTP
  *  compositions only). */
 esp_err_t data_logger_register_http(void);
+
+/** The export route tells @p cb about every read that carried rows
+ *  (NULL = nobody listens). main wires it to sleep_manager_activity(). */
+esp_err_t data_logger_set_reader_cb(data_logger_reader_cb_t cb);
 
 /** `logger` CLI command; called internally on the settings apply when
  *  the `cli` field is true. */

@@ -119,6 +119,27 @@ judged as "more current than asleep"; the sleep matrix now holds every wake
 against the current after a power cycle (`back_to_awake()`), and that is the
 check to keep green when the entry sequence gains another latched pin.
 
+**The activity hold (2026-11-06, store and forward).** A car back home after
+a drive has its engine off, so the sleep countdown runs while the Home
+Assistant integration pulls the drive's rows from the SD card through
+`/api/logger/export` (and while the dashboard reads its history). The
+composition root hands data_logger's reader hook to
+`sleep_manager_activity(seconds)`: every read that carried rows pushes both
+counting deadlines out to now + 60 s where that is later, and never past
+the cap the first such read of a countdown set (that read + 10 min,
+`SM_ACTIVITY_CAP_MS`): a reader that never stops cannot hold a flat battery
+awake for good. Pure `sm_activity_apply()` (host-tested: the push, the cap,
+only what counts, the clock wrap), edited under the same lock as the hold,
+the tracker reset with it once nothing counts. Not a setting, never saved,
+counts against nothing (the three holds stay the person's). One I line per
+countdown (the reads come every second during a backfill). Surfaces:
+`activity_s` on `GET /api/sleep` (seconds left of the extension, 0 = none),
+a `held awake while the log is read` line in `sleep`, the web UI's countdown
+bar says "Kept awake while the log is being read" and the Power Saving page
+has a note. The store-and-forward bench
+(`tools/testbench/ha/ha_history_backfill_bench.py`) holds the device at
+12.5 V while the integration pulls and reads the deadline move.
+
 ## Bench safety (meatpi 2026-07-07, mandatory)
 
 - The state task arms only after a **15 s boot grace**: a bootloop
@@ -154,7 +175,7 @@ voltage" resumes polling at this wake voltage (one pair rules both).
 
 - `GET /api/sleep`: `{enabled, state, voltage, sleep_v, wake_v,
   naps, pending, sleep_in_s, critical_v, critical_s, hold_s, holds_left,
-  holds_max}`. `pending` is
+  holds_max, activity_s}`. `pending` is
   `none`, `delay` (the sleep delay runs) or `critical` (the floor runs,
   with sleep disabled too); `sleep_in_s` is the seconds to that entry
   (0 with `none`, and 0 while the entry sequence runs); `critical_v` /

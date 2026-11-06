@@ -82,6 +82,9 @@ static StaticSemaphore_t s_lock_buf;          /* internal: FreeRTOS */
 static uint32_t s_hold_until;                 /* ms, while s_hold_active */
 static bool     s_hold_active;
 static uint8_t  s_holds_used;                 /* per boot */
+/* The activity hold (2026-11-06): a log read while a countdown runs. Edited
+ * under s_lock like the hold; the httpd task brings the reads. */
+static sm_activity_t s_activity;
 
 /* ---- sleep entry / nap loop ---------------------------------------------- */
 
@@ -250,6 +253,11 @@ static void publish_pending(uint32_t now)
     {
         s_hold_active = false;
     }
+
+    if (cause == SLEEP_MANAGER_PENDING_NONE)
+    {
+        s_activity.active = false; /* the next countdown gets a fresh cap */
+    }
 }
 
 /* ---- state task -------------------------------------------------------------- */
@@ -264,6 +272,7 @@ static void state_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(SM_BOOT_GRACE_MS));
     sm_policy_init(&s_policy);
     sm_critical_init(&s_crit);
+    sm_activity_init(&s_activity);
     ESP_LOGI(TAG, "armed (sleep %.2f V, wake %.2f V, wake after %lu ms, "
              "delay %lu min, periodic %s/%lu min)", cfg->sleep_v, cfg->wake_v,
              (unsigned long)cfg->wake_hold_ms,
@@ -335,6 +344,7 @@ static void state_task(void *arg)
             s_policy.state = SLEEP_MANAGER_SLEEPING;
             s_policy.t_periodic = now + cfg->interval_ms;
             s_hold_active = false;
+            s_activity.active = false;
             xSemaphoreGive(s_lock);
             enter_sleep_sequence(volts);
             s_run = true; /* wake machinery runs even if sleep disabled */
@@ -359,6 +369,7 @@ static void state_task(void *arg)
             /* due: a status read during the entry sequence says 0 s */
             s_pending = sm_pending_pack(SLEEP_MANAGER_PENDING_CRITICAL, now);
             s_hold_active = false;
+            s_activity.active = false;
             s_policy.state = SLEEP_MANAGER_SLEEPING;
             s_policy.t_periodic = now + cfg->interval_ms;
         }
@@ -544,15 +555,65 @@ esp_err_t sleep_manager_status(sleep_manager_status_t *out)
     out->hold_s = 0;
     out->holds_max = SM_HOLD_MAX;
     out->holds_left = SM_HOLD_MAX;
+    out->activity_s = 0;
 
     if (s_lock != NULL && xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE)
     {
-        int32_t left = (int32_t)(s_hold_until - sm_now_ms());
+        uint32_t now = sm_now_ms();
+        int32_t left = (int32_t)(s_hold_until - now);
+        int32_t act = (int32_t)(s_activity.until - now);
 
         out->hold_s = (s_hold_active && left > 0)
                           ? ((uint32_t)left + 999u) / 1000u : 0;
         out->holds_left = (uint8_t)(SM_HOLD_MAX - s_holds_used);
+        out->activity_s = (s_activity.active && act > 0)
+                              ? ((uint32_t)act + 999u) / 1000u : 0;
         xSemaphoreGive(s_lock);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t sleep_manager_activity(uint32_t seconds)
+{
+    if (seconds < 1 || seconds > 600)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_task == NULL || s_lock == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bool was_active;
+    bool counting;
+    uint32_t now;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    now = sm_now_ms();
+    was_active = s_activity.active;
+    counting = sm_activity_apply(&s_policy, s_run, &s_crit, &s_activity, now,
+                                 seconds * 1000u, SM_ACTIVITY_CAP_MS);
+
+    if (counting)
+    {
+        publish_pending(now);
+    }
+
+    xSemaphoreGive(s_lock);
+
+    if (!counting)
+    {
+        return ESP_ERR_INVALID_STATE; /* nothing counts: nothing to hold */
+    }
+
+    if (!was_active)
+    {
+        /* once per countdown: the reads come every second during a backfill */
+        ESP_LOGI(TAG, "the log is being read while a countdown runs: held "
+                 "awake %lu s at a time, %u min at most",
+                 (unsigned long)seconds, SM_ACTIVITY_CAP_MS / 60000u);
     }
 
     return ESP_OK;
