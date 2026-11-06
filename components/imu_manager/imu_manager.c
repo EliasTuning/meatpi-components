@@ -42,6 +42,8 @@
  */
 #include "imu_manager.h"
 
+#include <string.h>
+
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -58,8 +60,15 @@
 static const char *TAG = "imu_manager";
 
 /* bank-0 registers the vendored driver doesn't name */
+#define ICM42670_REG_MCLK_RDY    0x00 /* bit 3: the internal clock runs  */
 #define ICM42670_REG_INT_CONFIG  0x06
+#define ICM42670_REG_ACCEL_CFG0  0x21
 #define ICM42670_REG_INT_STATUS2 0x3B /* R/C: SMD_INT bit3, WOM bits 2:0 */
+#define ICM42670_REG_WHO_AM_I    0x75
+
+#define MCLK_RDY_RUNNING  0x08 /* MCLK_RDY<3>                            */
+#define PWR_MGMT0_IDLE    0x10 /* keep the RC oscillator on with the
+                                  sensors off or in LP on the WU osc     */
 
 /* MREG1 */
 #define ICM42670_MREG1_APEX_CONFIG9 0x48 /* SMD_SENSITIVITY_SEL [3:1]    */
@@ -74,6 +83,7 @@ static const char *TAG = "imu_manager";
 #define WOM_CONFIG_EN_OR_PREV_FIRST    0x03 /* EN, PREVIOUS ref, OR, 1st */
 #define INT_STATUS2_SMD_INT            0x08
 #define INT_STATUS2_WOM_MASK           0x07 /* bit2=X bit1=Y bit0=Z      */
+#define APEX_CONFIG9_SMD_SENS_MASK     0x0E /* SMD_SENSITIVITY_SEL [3:1] */
 
 #define IMU_TICK_MS        200
 #define IMU_WOM_PUB_GAP_MS 500 /* WOM event publish throttle             */
@@ -85,6 +95,7 @@ static StackType_t s_stack[3072] EXT_RAM_BSS_ATTR;
 static imu_policy_t s_policy;
 static volatile imu_manager_activity_t s_activity = IMU_MANAGER_UNKNOWN;
 static bool s_started;
+static uint8_t s_wom_thr_chip[3]; /* the thresholds read back at start   */
 
 /* event subscribers (fan-out under s_sub_lock; publish from the task) */
 static QueueHandle_t s_subs[IMU_MANAGER_MAX_SUBSCRIBERS];
@@ -193,6 +204,46 @@ static void detector_task(void *arg)
 
 /* ---- detector bring-up (DS-000451) -------------------------------------------- */
 
+/* Keep the chip's internal clock (MCLK) running: PWR_MGMT0.IDLE powers
+ * the RC oscillator on whatever the sensor modes, then MCLK_RDY<3> says
+ * it runs. The MREG banks (the WoM thresholds, the APEX parameters) are
+ * reachable only then; the legacy driver refused an MREG access without
+ * MCLK_RDY, the InvenSense driver requests the clock around each one.
+ * IDLE stays set for the device's life (2026-11-06). */
+static esp_err_t mclk_on(void)
+{
+    uint8_t pwr = 0;
+    esp_err_t err = icm42670_read_register(s_dev, ICM42670_PWR_MGMT0, &pwr);
+
+    if (err == ESP_OK && !(pwr & PWR_MGMT0_IDLE))
+    {
+        err = icm42670_write_register(s_dev, ICM42670_PWR_MGMT0,
+                                      (uint8_t)(pwr | PWR_MGMT0_IDLE));
+    }
+
+    for (int i = 0; err == ESP_OK && i < 20; i++)
+    {
+        uint8_t v = 0;
+
+        err = icm42670_read_register(s_dev, ICM42670_REG_MCLK_RDY, &v);
+
+        if (err == ESP_OK && (v & MCLK_RDY_RUNNING))
+        {
+            return ESP_OK;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    if (err == ESP_OK)
+    {
+        ESP_LOGE(TAG, "internal clock (MCLK) did not start");
+        err = ESP_ERR_TIMEOUT;
+    }
+
+    return err;
+}
+
 static esp_err_t detectors_configure(void)
 {
     const imu_settings_t *settings = imu_settings_config();
@@ -217,6 +268,24 @@ static esp_err_t detectors_configure(void)
     if (err == ESP_OK)
     {
         err = icm42670_acce_set_pwr(s_dev, ACCE_PWR_LOWPOWER);
+        vTaskDelay(pdMS_TO_TICKS(1)); /* no writes for 200 us after OFF -> LP */
+    }
+
+    /* --- the internal clock, permanently (2026-11-06): every MREG1
+     * access below (the SMD sensitivity, the WoM thresholds) needs MCLK
+     * running, and accel LP mode on the wake-up oscillator does not
+     * provide it (DS-000451 section 13: LP mode with WUOSC does not
+     * support MREG access, "power on the RC oscillator using register
+     * field IDLE"). Until this line the threshold writes landed at
+     * random: the bench unit held 32/1/1 for a setting of 32, a unit
+     * from power-up keeps the reset value 0 on the axes whose write was
+     * lost, and imu.bump then fires on every sample (the Nissan Ariya
+     * report: axes 7 every 600 ms whatever the threshold). The RC
+     * oscillator's current is insignificant here (meatpi): IDLE stays
+     * set, which also keeps `imu -x` truthful. ------------------------------- */
+    if (err == ESP_OK)
+    {
+        err = mclk_on();
     }
 
     /* --- SMD: DMP SRAM reset, then the SW init procedure (both
@@ -261,9 +330,20 @@ static esp_err_t detectors_configure(void)
          * positives (datasheet: high values hurt transport use cases) */
         if (err == ESP_OK)
         {
-            err = icm42670_write_mreg_register(
-                s_dev, 1, ICM42670_MREG1_APEX_CONFIG9,
-                (uint8_t)(settings->smd_sensitivity << 1));
+            uint8_t cfg9 = 0;
+
+            err = icm42670_read_mreg_register(s_dev, 1,
+                                              ICM42670_MREG1_APEX_CONFIG9,
+                                              &cfg9);
+
+            if (err == ESP_OK)
+            {
+                cfg9 = (uint8_t)((cfg9 & ~APEX_CONFIG9_SMD_SENS_MASK) |
+                                 ((settings->smd_sensitivity << 1) &
+                                  APEX_CONFIG9_SMD_SENS_MASK));
+                err = icm42670_write_mreg_register(
+                    s_dev, 1, ICM42670_MREG1_APEX_CONFIG9, cfg9);
+            }
         }
     }
 
@@ -276,34 +356,48 @@ static esp_err_t detectors_configure(void)
     }
 
     /* --- WoM: per-axis thresholds (MREG bank 1), PREVIOUS-sample
-     * reference so an orientation change can't latch it --------------------- */
-    if (err == ESP_OK && settings->wom)
-    {
-        err = icm42670_write_mreg_register(s_dev, 1,
-                                           ICM42670_MREG1_ACCEL_WOM_X_THR,
-                                           settings->wom_threshold);
-
-        if (err == ESP_OK)
-        {
-            err = icm42670_write_mreg_register(
-                s_dev, 1, ICM42670_MREG1_ACCEL_WOM_Y_THR,
-                settings->wom_threshold);
-        }
-
-        if (err == ESP_OK)
-        {
-            err = icm42670_write_mreg_register(
-                s_dev, 1, ICM42670_MREG1_ACCEL_WOM_Z_THR,
-                settings->wom_threshold);
-        }
-    }
-
+     * reference so an orientation change can't latch it. Off first:
+     * WOM_MODE/INT_MODE/INT_DUR cannot change while WOM_EN is set (a
+     * soft reboot finds it set) and the thresholds belong before the
+     * enable. Every threshold is read back: a mismatch leaves WoM OFF
+     * (a chip at the reset value 0 fires on every sample) and fails the
+     * start. ------------------------------------------------------------------ */
     if (err == ESP_OK)
     {
-        err = icm42670_write_register(s_dev, ICM42670_WOM_CONFIG,
-                                      settings->wom
-                                          ? WOM_CONFIG_EN_OR_PREV_FIRST
-                                          : 0x00);
+        err = icm42670_write_register(s_dev, ICM42670_WOM_CONFIG, 0x00);
+    }
+
+    if (err == ESP_OK && settings->wom)
+    {
+        for (int i = 0; err == ESP_OK && i < 3; i++)
+        {
+            uint8_t reg = (uint8_t)(ICM42670_MREG1_ACCEL_WOM_X_THR + i);
+            uint8_t back = 0;
+
+            err = icm42670_write_mreg_register(s_dev, 1, reg,
+                                               settings->wom_threshold);
+
+            if (err == ESP_OK)
+            {
+                err = icm42670_read_mreg_register(s_dev, 1, reg, &back);
+            }
+
+            if (err == ESP_OK && back != settings->wom_threshold)
+            {
+                ESP_LOGE(TAG, "WoM threshold %c: wrote %u, the chip holds "
+                         "%u; WoM stays off", "XYZ"[i],
+                         settings->wom_threshold, back);
+                err = ESP_ERR_INVALID_RESPONSE;
+            }
+
+            s_wom_thr_chip[i] = back;
+        }
+
+        if (err == ESP_OK)
+        {
+            err = icm42670_write_register(s_dev, ICM42670_WOM_CONFIG,
+                                          WOM_CONFIG_EN_OR_PREV_FIRST);
+        }
     }
 
     /* --- INT1 routing: kept so status latching matches the verified
@@ -383,6 +477,13 @@ esp_err_t imu_manager_start(void)
         return err;
     }
 
+    /* drop whatever INT_STATUS2 latched before this boot (a soft reboot
+     * does not reset the chip): without this read the first poll
+     * published a stale bump 0.4 s after every such start (2026-11-06) */
+    uint8_t stale = 0;
+
+    (void)icm42670_read_register(s_dev, ICM42670_REG_INT_STATUS2, &stale);
+
     s_task = xTaskCreateStatic(detector_task, "imu_detector",
                                sizeof(s_stack) / sizeof(s_stack[0]),
                                NULL, 5, s_stack, &s_tcb);
@@ -393,11 +494,12 @@ esp_err_t imu_manager_start(void)
     }
 
     s_started = true;
-    ESP_LOGI(TAG, "started (SMD %s sens %u; WoM %s thr %u ~%umg; "
-             "stationary after %lus; polling %d ms)",
+    ESP_LOGI(TAG, "started (SMD %s sens %u; WoM %s thr %u ~%umg, chip "
+             "%u/%u/%u; stationary after %lus; polling %d ms)",
              settings->smd ? "on" : "off", settings->smd_sensitivity,
              settings->wom ? "on" : "off", settings->wom_threshold,
              (unsigned)(settings->wom_threshold * 39 / 10),
+             s_wom_thr_chip[0], s_wom_thr_chip[1], s_wom_thr_chip[2],
              (unsigned long)(settings->stationary_ms / 1000), IMU_TICK_MS);
     imu_events_start();
     return ESP_OK;
@@ -504,4 +606,56 @@ esp_err_t imu_manager_device_id(uint8_t *id)
     }
 
     return icm42670_get_deviceid(s_dev, id);
+}
+
+esp_err_t imu_manager_read_regs(imu_manager_regs_t *out)
+{
+    if (out == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_dev == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    const struct { uint8_t reg; uint8_t *dst; } BANK0[] =
+    {
+        { ICM42670_REG_WHO_AM_I,   &out->who_am_i      },
+        { ICM42670_REG_MCLK_RDY,   &out->mclk_rdy      },
+        { ICM42670_REG_INT_CONFIG, &out->int_config    },
+        { ICM42670_PWR_MGMT0,      &out->pwr_mgmt0     },
+        { ICM42670_REG_ACCEL_CFG0, &out->accel_config0 },
+        { ICM42670_APEX_CONFIG0,   &out->apex_config0  },
+        { ICM42670_APEX_CONFIG1,   &out->apex_config1  },
+        { ICM42670_WOM_CONFIG,     &out->wom_config    },
+        { ICM42670_INT_SOURCE1,    &out->int_source1   },
+    };
+    esp_err_t err = ESP_OK;
+
+    for (size_t i = 0; err == ESP_OK && i < sizeof(BANK0) / sizeof(BANK0[0]);
+         i++)
+    {
+        err = icm42670_read_register(s_dev, BANK0[i].reg, BANK0[i].dst);
+    }
+
+    /* MREG1: truthful only while MCLK runs (mclk_on() at start keeps it
+     * so; the caller reads out->mclk_rdy to know) */
+    for (int i = 0; err == ESP_OK && i < 3; i++)
+    {
+        err = icm42670_read_mreg_register(
+            s_dev, 1, (uint8_t)(ICM42670_MREG1_ACCEL_WOM_X_THR + i),
+            &out->wom_thr[i]);
+    }
+
+    if (err == ESP_OK)
+    {
+        err = icm42670_read_mreg_register(s_dev, 1, ICM42670_MREG1_APEX_CONFIG9,
+                                          &out->apex_config9);
+    }
+
+    return err;
 }

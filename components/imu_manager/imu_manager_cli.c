@@ -37,8 +37,44 @@ static struct
 {
     struct arg_lit *id;
     struct arg_lit *read;
+    struct arg_lit *regs;
     struct arg_end *end;
 } s_args;
+
+/* -x/--regs: the detector registers as the chip holds them (2026-11-06:
+ * the imu.bump flood of a Nissan Ariya owner: the WoM thresholds never
+ * reached the chip, this dump is what showed it) */
+static int imu_regs(void)
+{
+    imu_manager_regs_t r;
+    esp_err_t err = imu_manager_read_regs(&r);
+
+    if (err != ESP_OK)
+    {
+        cmdline_printf("Error: register read failed: %s\n",
+                       esp_err_to_name(err));
+        return 1;
+    }
+
+    cmdline_printf("WHO_AM_I 0x%02X  MCLK_RDY 0x%02X (%s)\n", r.who_am_i,
+                   r.mclk_rdy, (r.mclk_rdy & 0x08) ? "running" : "off");
+    cmdline_printf("PWR_MGMT0 0x%02X (accel %u gyro %u idle %u lp_clk %s)\n",
+                   r.pwr_mgmt0, (unsigned)(r.pwr_mgmt0 & 0x03),
+                   (unsigned)((r.pwr_mgmt0 >> 2) & 0x03),
+                   (unsigned)((r.pwr_mgmt0 >> 4) & 0x01),
+                   (r.pwr_mgmt0 & 0x80) ? "rc" : "wuosc");
+    cmdline_printf("ACCEL_CONFIG0 0x%02X  INT_CONFIG 0x%02X  INT_SOURCE1 0x%02X\n",
+                   r.accel_config0, r.int_config, r.int_source1);
+    cmdline_printf("APEX_CONFIG0 0x%02X  APEX_CONFIG1 0x%02X  WOM_CONFIG 0x%02X\n",
+                   r.apex_config0, r.apex_config1, r.wom_config);
+    cmdline_printf("MREG1: WOM_THR X %u Y %u Z %u (x3.9 mg)  APEX_CONFIG9 0x%02X "
+                   "(SMD sensitivity %u)%s\n",
+                   r.wom_thr[0], r.wom_thr[1], r.wom_thr[2], r.apex_config9,
+                   (unsigned)((r.apex_config9 >> 1) & 0x07),
+                   (r.mclk_rdy & 0x08) ? "" : "  [MCLK off: MREG1 values stale]");
+    cmdline_printf("OK\n");
+    return 0;
+}
 
 static int imu_read(void)
 {
@@ -92,6 +128,11 @@ static int cmd_imu(int argc, char **argv)
         return 0;
     }
 
+    if (s_args.regs->count > 0)
+    {
+        return imu_regs();
+    }
+
     return imu_read(); /* bare and -r/--read: the full v6 summary */
 }
 
@@ -101,13 +142,14 @@ esp_err_t imu_manager_register_cli(void)
     {
         .command = "imu",
         .help = "IMU control and status",
-        .hint = "Options: -i/--id, -r/--read",
+        .hint = "Options: -i/--id, -r/--read, -x/--regs",
         .func = cmd_imu,
         .argtable = &s_args,
     };
 
     s_args.id = arg_lit0("i", "id", "Get IMU device ID");
     s_args.read = arg_lit0("r", "read", "Read activity, accel, temperature");
-    s_args.end = arg_end(2);
+    s_args.regs = arg_lit0("x", "regs", "Dump the detector registers");
+    s_args.end = arg_end(3);
     return cmdline_manager_register(&CMD);
 }

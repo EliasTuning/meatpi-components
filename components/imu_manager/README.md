@@ -45,8 +45,17 @@ implemented in `imu_manager.c` via the driver's raw register access (it
 has no WoM/APEX API). SMD recipe per DS-000451 v1.0: accel LP 50 Hz →
 DMP SRAM reset → `DMP_INIT_EN` (self-clears, polled) →
 `SMD_SENSITIVITY_SEL` in MREG1 `APEX_CONFIG9` → `SMD_ENABLE` +
-`DMP_ODR=50 Hz` in `APEX_CONFIG1`. WoM: per-axis thresholds in MREG1,
-`WOM_CONFIG` = enabled/previous-ref/OR/first-event. INT1 routing is kept
+`DMP_ODR=50 Hz` in `APEX_CONFIG1`. WoM: `WOM_CONFIG` off, per-axis thresholds in MREG1 (each one
+read back, a mismatch leaves WoM off and fails the start), then
+`WOM_CONFIG` = enabled/previous-ref/OR/first-event. **MREG access
+needs the chip's internal clock** (DS-000451 section 13: accel LP
+mode on the wake-up oscillator does not support it), so the start
+sets `PWR_MGMT0.IDLE` right after the power modes and leaves it set:
+the RC oscillator's current is insignificant here (meatpi
+2026-11-06). Before that the threshold writes landed at random (the
+bench unit held 32/1/1 for a setting of 32; a unit from power-up kept
+the reset value 0 on the lost axes and `imu.bump` fired every 600 ms
+whatever the setting, issue report of 2026-11-06, Nissan Ariya). INT1 routing is kept
 (status latching matches the verified config) but the pin is unlistened;
 the polling task reads `INT_STATUS2` (read-clear) to tell the detectors
 apart.
@@ -68,6 +77,10 @@ apart.
 
 - Accel runs permanently in **low-power mode at 50 Hz** feeding both
   detectors (`ACCEL_ODR` must be ≥ `DMP_ODR`); reads work anytime.
+- The internal clock (MCLK) runs permanently (`PWR_MGMT0.IDLE`): the
+  MREG banks are reachable at any time, `imu -x` is truthful, and the
+  SMD sensitivity write lands too (it shared the fault: in LP mode on
+  the wake-up oscillator it never reached the chip).
 - **Gyro stays OFF in v1**: nothing consumes it and it dominates the
   chip's power budget. Add a read API + lazy power-up when a consumer
   exists.
@@ -120,3 +133,8 @@ Activity task 3 KB PSRAM stack; driver handle ~100 B heap. (estimated)
 ## CLI
 
 `imu_manager_register_cli()` (main, CLI builds) registers the `imu` command with cmdline_manager (`imu_manager_cli.c`).
+`imu -x/--regs` (2026-11-06) dumps the detector registers as the chip
+holds them: WHO_AM_I, MCLK_RDY, PWR_MGMT0, ACCEL_CONFIG0, INT_CONFIG,
+INT_SOURCE1, APEX_CONFIG0/1, WOM_CONFIG and the MREG1 thresholds and
+SMD sensitivity. The first thing to ask of a unit whose `imu.bump`
+rate or threshold looks wrong.

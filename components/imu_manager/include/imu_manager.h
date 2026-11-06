@@ -119,6 +119,31 @@ esp_err_t imu_manager_read_temp(float *temp);
 /** WHO_AM_I (0x67 for ICM-42670-P): diagnostics. */
 esp_err_t imu_manager_device_id(uint8_t *id);
 
+/**
+ * Raw register snapshot for diagnostics (`imu -x`, 2026-11-06: the
+ * dump that showed the WoM thresholds never reaching the chip). Bank 0
+ * as the chip answers it, then the MREG1 detector registers: those are
+ * truthful only while MCLK runs (`mclk_rdy` bit 3), which the start
+ * guarantees by keeping PWR_MGMT0.IDLE set.
+ */
+typedef struct
+{
+    uint8_t who_am_i;         /* 0x75                                    */
+    uint8_t mclk_rdy;         /* 0x00: bit 3 = the internal clock runs   */
+    uint8_t int_config;       /* 0x06                                    */
+    uint8_t pwr_mgmt0;        /* 0x1F                                    */
+    uint8_t accel_config0;    /* 0x21                                    */
+    uint8_t apex_config0;     /* 0x25                                    */
+    uint8_t apex_config1;     /* 0x26                                    */
+    uint8_t wom_config;       /* 0x27                                    */
+    uint8_t int_source1;      /* 0x2C                                    */
+    uint8_t wom_thr[3];       /* MREG1 0x4B..0x4D: X, Y, Z               */
+    uint8_t apex_config9;     /* MREG1 0x48: SMD_SENSITIVITY_SEL [3:1]   */
+} imu_manager_regs_t;
+
+/** Read the snapshot above. ESP_ERR_INVALID_STATE before start. */
+esp_err_t imu_manager_read_regs(imu_manager_regs_t *out);
+
 /** Register GET /api/imu (composition root calls it in HTTP builds). */
 esp_err_t imu_manager_register_http(void);
 
