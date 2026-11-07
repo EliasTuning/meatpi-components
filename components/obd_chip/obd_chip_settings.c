@@ -55,12 +55,16 @@ static const settings_field_t OBD_FIELDS[] =
        from the device). Optional key with a default: no version bump. */
     SETTINGS_BOOL    ("cli",            true),
     SETTINGS_STR_ENUM("monitor_policy", "manual,auto_interrupt", "manual"),
-    /* chip sleep-config provisioning (defaults = the legacy fallbacks;
-       the chip's autonomous controls stay OFF: the future sleep_manager
-       arms them) */
-    /* user-facing ranges (meatpi 2026-09-06, 12 V battery): wake while
-       charging (12.0–15.0 V), sleep once the engine is off (12.0–14.0 V),
-       hold at most an hour, wake must sit above sleep (on_validate) */
+    /* RESERVED since 2026-11-07: the chip's autonomous voltage controls
+       stay OFF (the ESP32 owns the sleep policy), and the sleep triggers
+       bench proved the stored thresholds inert while they are off, so the
+       bring-up neither writes these to the chip nor compares them with it
+       any more (STSLVLW/STSLVLS/STSLUIT gone from the provisioning). Kept
+       in the schema, validated and parsed as before, for a chip-side
+       policy that may want them one day (no version bump, no migration).
+       The ranges (meatpi 2026-09-06, 12 V battery): wake while charging
+       (12.0 to 15.0 V), sleep once the engine is off (12.0 to 14.0 V), hold
+       at most an hour, wake must sit above sleep (on_validate). */
     SETTINGS_INT     ("wake_voltage_mv",  12000, 15000, 13500),
     SETTINGS_INT     ("sleep_voltage_mv", 12000, 14000, 13200),
     SETTINGS_INT     ("sleep_time_min",   1, 60, 2),

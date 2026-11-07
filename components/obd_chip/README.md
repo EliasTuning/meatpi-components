@@ -379,25 +379,38 @@ settings API / CLI / backup for the future sleep_manager work.
 | `auto_update` | bool | `true` | flash the packaged chip fw (V2.3.24) after bring-up on a chip below the current list (current = V2.3.22 or V2.3.24, the v4.52p list; 2026-10-28), never the same version or a newer chip (2026-11-01): legacy parity |
 | `cli` | bool | `true` | the `obd_chip` console command (standard §6b; 2026-10-28, optional key, no version bump) |
 | `monitor_policy` | enum manual/auto_interrupt | `manual` | `auto_interrupt` reserved (§5 open question) |
-| `wake_voltage_mv` | int 12000–15000 (must exceed `sleep_voltage_mv`) | `13500` | chip VL wake threshold, provisioned at boot (`STSLVLW`) |
-| `sleep_voltage_mv` | int 12000–14000 | `13200` | chip VL sleep threshold, provisioned at boot (`STSLVLS`) |
-| `sleep_time_min` | int 1–60 | `2` | chip VL sleep hold; programmed as `min*60+30` s (the ESP sleeps first: legacy guard) |
+| `wake_voltage_mv` | int 12000–15000 (must exceed `sleep_voltage_mv`) | `13500` | RESERVED since 2026-11-07: not written to the chip, not compared with it (was `STSLVLW` at boot; see "Boot provisioning") |
+| `sleep_voltage_mv` | int 12000–14000 | `13200` | RESERVED since 2026-11-07 (was `STSLVLS` at boot) |
+| `sleep_time_min` | int 1–60 | `2` | RESERVED since 2026-11-07 (was the `STSLVLS` hold, `min*60+30` s) |
 
 ## Boot provisioning (task §11.5: ANSWERED by meatpi 2026-07-04: "follow legacy init")
 
 `start()` after `ATE0`: read `STSLCS` (pure parser `obd_chip_stslcs.c`,
 grammar = the legacy `main/obd.c` sscanf patterns, fixture = a real
-MIC3624 capture) and, ONLY when something differs, rewrite the chip's
-stored sleep config: ensure NATIVE control mode (`ATPP 0E SV 7A`+`ON`),
-program the VL thresholds/time from settings with every autonomous
-control left **OFF** (`STSLVLW`/`STSLVLS`/`STSLVl off,off`/
-`STSLU off, off`: byte-exact legacy strings), stop the chip waking itself
-on bus activity while the ESP32 sleeps (`ATPP 0F SV 95`+`ON`: the Activity
-Monitor options with bit 6 off, not the baud; legacy's
-`elm327_disable_wake_commands`), `STSLUIT 1200`,
-then `ATZ` + re-bring-up (baud restore + `ATE0`). A matching chip skips
-everything: verified live: provisioning ran once after flashing, the
-next boots go straight to `started`.
+MIC3624 capture) and, ONLY when a control is on, rewrite the chip's stored
+sleep config: ensure NATIVE control mode (`ATPP 0E SV 7A`+`ON`), switch
+every autonomous control **OFF** (`STSLVl off,off`, `STSLU off, off`:
+byte-exact legacy strings), stop the chip waking itself on bus activity
+while the ESP32 sleeps (`ATPP 0F SV 95`+`ON`: the Activity Monitor options
+with bit 6 off, not the baud; legacy's `elm327_disable_wake_commands`),
+then `ATZ` + re-bring-up (baud restore + `ATE0`). A chip with the controls
+off skips everything: provisioning ran once after flashing, the next
+boots go straight to `started`.
+
+**The stored thresholds are not written any more (2026-11-07, Ali).**
+Until then the block also programmed the voltage thresholds and the UART
+timeout from the settings (`STSLVLW >wake, 1`, `STSLVLS <sleep, time`,
+`STSLUIT 1200`) and re-provisioned when the chip's stored values differed
+from them (legacy's reprogram condition). `test.ps1 sleeptrig` (the app
+repo's `testing/sleeptrig.md`) proved those values inert while the controls
+are off: 12.5 V held 170 s against a stored `<13.20V FOR 150 s` and the
+chip stayed awake, 14.0 V held 30 s against a stored `>13.50V FOR 1 s` on a
+chip asleep by command and it stayed asleep, 25 min of UART silence against
+a stored 1200 s and it stayed awake. So the compare looks at the four
+control states only, the three settings fields are reserved, and whatever
+the chip holds as thresholds stays as it is (the bench chip: 13.20 / 13.50 V,
+150 s, 1200 s). Fewer EEPROM writes per provisioning, and a settings number
+nobody sees no longer costs one.
 
 PP 0F has its own read-back since 2026-11-02 (Ali: a chip image or a tool
 could put it back to the vendor's D5, and STSLCS does not report it): the
@@ -514,7 +527,11 @@ subscribe and transaction API for the CAN self-test.
   bus: `CAN SELFTEST PASS`), rows in the app repo's TESTING.md; since
   2026-11-02 `.\test.ps1 obdbringup` (the warm start, the PP 0F guard) and
   since 2026-11-07 `.\test.ps1 sleepword` (the sleep word at the entry and
-  in a re-sleep, the PPSW repair's settle and read-back).
+  in a re-sleep, the PPSW repair's settle and read-back) and `.\test.ps1
+  sleeptrig` (the chip's own sleep triggers off: the stored thresholds and
+  UART timeout inert; `-ProvisionLeg`: a hidden settings change provisions
+  nothing, a control switched on provisions the controls off and leaves
+  the thresholds alone).
 - **Host (`host_test/`, 23 tests):** pure framing, prompt splits at every
   chunk boundary, echo strip, post-prompt bytes not consumed, noise
   interleave, **meatpi's real 36-line proprietary-PID log replayed at chunk

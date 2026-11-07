@@ -143,11 +143,11 @@ void obd_stslcs_parse(const char *response, obd_stslcs_t *out);
  *  skipped. False when no such line. Pure, host-tested (2026-11-07). */
 bool obd_parse_ppsw(const char *resp, uint8_t *value);
 
-/** The legacy reprogram condition: true when the chip's stored sleep
- *  config must be rewritten (autonomous controls on, or thresholds/time
- *  differ from settings). */
-bool obd_stslcs_needs_provision(const obd_stslcs_t *c, float wake_v,
-                                float sleep_v, uint32_t sleep_time_s);
+/** True when the chip's stored sleep config must be rewritten: any of its
+ *  autonomous controls (UART or voltage, sleep or wake) is ON. The stored
+ *  thresholds and times are not compared since 2026-11-07: they are inert
+ *  while the controls are off (`test.ps1 sleeptrig`). */
+bool obd_stslcs_needs_provision(const obd_stslcs_t *c);
 
 /* Firmware-file line iterator (pure): yields trimmed non-empty lines. */
 typedef struct

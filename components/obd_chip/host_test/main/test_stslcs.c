@@ -58,24 +58,31 @@ void test_stslcs_provision_policy(void)
 {
     obd_stslcs_t c;
 
-    /* matching config, all controls off -> nothing to do */
+    /* all four controls off -> nothing to do, whatever the stored values */
     obd_stslcs_parse(SAMPLE, &c);
-    TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c, 13.5f, 13.2f, 150));
+    TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c));
 
     /* any autonomous control ON -> reprovision */
     c.uart_wake.en = 1;
-    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c, 13.5f, 13.2f, 150));
+    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c));
     c.uart_wake.en = 0;
+    c.uart_sleep.en = 1;
+    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c));
+    c.uart_sleep.en = 0;
     c.vl_sleep.en = 1;
-    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c, 13.5f, 13.2f, 150));
+    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c));
     c.vl_sleep.en = 0;
+    c.vl_wake.en = 1;
+    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c));
+    c.vl_wake.en = 0;
 
-    /* threshold drift -> reprovision; epsilon tolerates float noise */
-    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c, 13.6f, 13.2f, 150));
-    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c, 13.5f, 12.9f, 150));
-    TEST_ASSERT_TRUE(obd_stslcs_needs_provision(&c, 13.5f, 13.2f, 630));
-    TEST_ASSERT_FALSE(
-        obd_stslcs_needs_provision(&c, 13.5001f, 13.2001f, 150));
+    /* the stored thresholds and times are inert while the controls are off
+       (test.ps1 sleeptrig, 2026-11-07): a drift is NOT a reason to write */
+    c.vl_wake.voltage = 13.6f;
+    c.vl_sleep.voltage = 12.9f;
+    c.vl_sleep.time = 630;
+    c.uart_sleep.time = 60;
+    TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c));
 }
 
 void test_stslcs_ignores_garbage(void)
@@ -84,7 +91,7 @@ void test_stslcs_ignores_garbage(void)
 
     obd_stslcs_parse("?\r\nSTSLCS\r\nrandom noise line\r\n", &c);
     TEST_ASSERT_EQUAL_STRING("", c.ctrl_mode);
-    TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c, 0.0f, 0.0f, 0));
+    TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c));
 }
 
 void test_stslcs_midline_gt_is_not_the_prompt(void)
@@ -108,7 +115,7 @@ void test_stslcs_midline_gt_is_not_the_prompt(void)
 
     obd_stslcs_parse(acc.buf, &c);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 13.50f, c.vl_wake.voltage);
-    TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c, 13.5f, 13.2f, 150));
+    TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c));
 }
 
 /* VTPPSWS, the vendor's PowerEn switch (2026-11-07): the bench chip's "10"

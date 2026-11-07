@@ -27,7 +27,6 @@
  *        ARE the accepted line grammar), and the VTPPSWS read of the
  *        vendor's PowerEn switch (2026-11-07). No IDF deps; host-tested.
  */
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -192,18 +191,16 @@ void obd_stslcs_parse(const char *response, obd_stslcs_t *out)
     }
 }
 
-bool obd_stslcs_needs_provision(const obd_stslcs_t *c, float wake_v,
-                                float sleep_v, uint32_t sleep_time_s)
+bool obd_stslcs_needs_provision(const obd_stslcs_t *c)
 {
-    /* the legacy reprogram condition: any autonomous control left ON,
-       or stored thresholds/time differ from the settings. Voltage
-       compare needs an epsilon here: the chip echoes text, we hold
-       millivolt-derived floats. */
+    /* any autonomous control left ON. Until 2026-11-07 the stored
+       thresholds and time were compared with the settings too and written
+       on a difference (legacy's reprogram condition); the sleep triggers
+       bench proved them inert while the controls are off (the chip neither
+       sleeps under the stored threshold nor wakes over it nor sleeps on the
+       stored UART timeout), so a hidden number no longer costs EEPROM. */
     return c->uart_wake.en == 1 || c->uart_sleep.en == 1 ||
-           c->vl_wake.en == 1 || c->vl_sleep.en == 1 ||
-           fabsf(c->vl_wake.voltage - wake_v) > 0.005f ||
-           fabsf(c->vl_sleep.voltage - sleep_v) > 0.005f ||
-           c->vl_sleep.time != sleep_time_s;
+           c->vl_wake.en == 1 || c->vl_sleep.en == 1;
 }
 
 /* ---- VTPPSWS: the vendor's PowerEn switch (2026-11-07) ------------------------ */

@@ -156,18 +156,25 @@ static void wire_note(const char *what, int baud)
 /**
  * Boot chip provisioning (legacy main/obd.c obd_init, meatpi 2026-07-04:
  * "follow legacy init"): read STSLCS; ensure sleep control is NATIVE
- * (ATPP 0E) and the stored VL thresholds/time match settings, with all
- * autonomous controls left OFF (the future sleep_manager arms them);
- * keep the chip from waking itself on bus activity while the ESP32 sleeps
- * (ATPP 0F SV 95: the Activity Monitor options with bit 6 off). Any change
- * ends in ATZ + re-bring-up. Runs on the bare UART, echo already off.
- * Log-and-degrade.
+ * (ATPP 0E) and every autonomous control OFF (the ESP32 owns the sleep
+ * policy); keep the chip from waking itself on bus activity while the
+ * ESP32 sleeps (ATPP 0F SV 95: the Activity Monitor options with bit 6
+ * off). Any change ends in ATZ + re-bring-up. Runs on the bare UART, echo
+ * already off. Log-and-degrade.
+ *
+ * Until 2026-11-07 the block also wrote the voltage thresholds and the
+ * UART timeout from the obd_chip settings (STSLVLW, STSLVLS, STSLUIT) and
+ * re-provisioned when the stored values differed from them. The sleep
+ * triggers bench (the app repo's testing/sleeptrig.md) proved those values
+ * inert while the controls are off, so they are neither compared nor
+ * written any more: fewer EEPROM writes, and a settings number nobody sees
+ * (the UI never shows them) no longer costs a provisioning. Whatever the
+ * chip holds there stays as it is.
  */
-static void chip_provision(const obd_config_t *cfg)
+static void chip_provision(void)
 {
     static char resp[1024] EXT_RAM_BSS_ATTR; /* STSLCS is multi-line */
     obd_stslcs_t st;
-    char cmd[48];
     bool reset_needed = false;
     bool pp0f_written = false;
 
@@ -188,18 +195,12 @@ static void chip_provision(const obd_config_t *cfg)
         reset_needed = true;
     }
 
-    if (obd_stslcs_needs_provision(&st, cfg->wake_voltage,
-                                   cfg->sleep_voltage, cfg->sleep_time_s))
+    if (obd_stslcs_needs_provision(&st))
     {
-        ESP_LOGI(TAG, "provisioning sleep config (wake >%.2fV, sleep "
-                 "<%.2fV for %lus, controls off)", cfg->wake_voltage,
-                 cfg->sleep_voltage, (unsigned long)cfg->sleep_time_s);
-        snprintf(cmd, sizeof(cmd), "STSLVLW >%.2f, 1\r",
-                 cfg->wake_voltage);
-        bare_probe(cmd, resp, sizeof(resp), 1000);
-        snprintf(cmd, sizeof(cmd), "STSLVLS <%.2f, %lu\r",
-                 cfg->sleep_voltage, (unsigned long)cfg->sleep_time_s);
-        bare_probe(cmd, resp, sizeof(resp), 1000);
+        ESP_LOGI(TAG, "provisioning sleep config: a control is on (uart "
+                 "sleep %d wake %d, voltage sleep %d wake %d); all four off",
+                 st.uart_sleep.en, st.uart_wake.en, st.vl_sleep.en,
+                 st.vl_wake.en);
         /* byte-exact legacy strings, including the odd casing/space */
         bare_probe("STSLVl off,off\r", resp, sizeof(resp), 1000);
         bare_probe("STSLU off, off\r", resp, sizeof(resp), 1000);
@@ -215,9 +216,6 @@ static void chip_provision(const obd_config_t *cfg)
            rewrite keeps the PP area (bench 2026-11-02). */
         bare_probe("ATPP 0F SV 95\r", resp, sizeof(resp), 1000);
         bare_probe("ATPP 0F ON\r", resp, sizeof(resp), 1000);
-        vTaskDelay(pdMS_TO_TICKS(10));
-
-        bare_probe("STSLUIT 1200\r", resp, sizeof(resp), 1000);
         vTaskDelay(pdMS_TO_TICKS(10));
         reset_needed = true;
     }
@@ -336,7 +334,6 @@ static bool chip_soft_reset(char *resp, size_t resp_len)
  *  sequence learns it). ESP_OK = the chip is up and the RX task runs. */
 esp_err_t obd_bringup_run(int *active_baud)
 {
-    const obd_config_t *cfg = obd_settings_config();
     char resp[64];
 
     memset(s_wire, 0, sizeof(s_wire)); /* this round's verdicts only */
@@ -518,7 +515,7 @@ esp_err_t obd_bringup_run(int *active_baud)
     /* echo off first (deterministic responses), then the legacy chip
        provisioning (task §11-5 answered by meatpi: "follow legacy init") */
     bare_probe("ATE0\r", resp, sizeof(resp), 1000);
-    chip_provision(cfg);
+    chip_provision();
 
     /* the memory function off (issue #1023, bench 2026-11-01): it is ON
        after every reset (the vendor's pin strap) and then writes every
