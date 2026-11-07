@@ -44,6 +44,8 @@
 #define SM_BOOT_GRACE_MS    15000u   /* meatpi: flash window on loops  */
 #define SM_NAP_US           (2u * 1000u * 1000u)
 #define SM_RESLEEP_MAX      6        /* OBD re-sleeps before recovery  */
+#define SM_RESLEEP_BOOT_MS  1500u    /* the chip's boot after the re-sleep's
+                                        pulse, then the sleep word (2026-11-07) */
 #define SM_AUTOPID_IDLE_MS  20000u
 
 /* ---- sleep_manager_policy.c: PURE (host-tested) -------------------------- */

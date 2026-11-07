@@ -169,6 +169,44 @@ uint32_t obd_chip_client_idle_ms(void)
 
 /* ---- chip management ------------------------------------------------------------- */
 
+/* The sleep word (2026-11-07, 4.x parity: legacy's elm327_sleep sent
+ * `STSLEEP0`, the documented ST sleep command, and pulled the PowerEn pin
+ * behind it, at the sleep entry and at every re-sleep). In the chip's
+ * provisioned state (native control mode, the external, UART and voltage
+ * sleep triggers off) the OBDLink and MIC documentation give the ST sleep
+ * command as the one way to sleep it; the pin works through the vendor's
+ * VTPPSW function alone, and a chip whose PowerEn function is off or
+ * inverted never slept under v6 (bench 2026-11-01, E3a: six reset pulses
+ * and a recovery reboot per attempt). A command, not a stored setting: no
+ * EEPROM. The chip answers `OK` with a prompt (bench 2026-11-07: `4F 4B
+ * 0D 0D 3E`) and sleeps on its own a second or two later, READY following
+ * that late, so the answer is the verdict here and the first nap's READY
+ * check the ground truth, as before the word. A refusal (a chip mid-
+ * monitor answers `?`, a dead wire nothing, a claim a stuck holder still
+ * has) is one W line and the pin as before. Nothing to say to a chip that
+ * is asleep already or never came up. */
+static void sleep_by_command(void)
+{
+    if (!s_started || !obd_pin_ready())
+    {
+        return;
+    }
+
+    char resp[32] = "";
+    esp_err_t err = obd_chip_request("STSLEEP0", resp, sizeof(resp),
+                                     pdMS_TO_TICKS(OBD_SLEEP_WORD_MS));
+
+    if (err == ESP_OK && obd_parse_is_ok(resp))
+    {
+        ESP_LOGI(TAG, "chip asleep by command (STSLEEP0 answered OK)");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "chip did not take STSLEEP0 (%s '%.16s'): the pin alone",
+                 esp_err_to_name(err), resp);
+    }
+}
+
 esp_err_t obd_chip_sleep(bool sleep)
 {
     if (sleep)
@@ -177,6 +215,7 @@ esp_err_t obd_chip_sleep(bool sleep)
            takes seconds; after DONE this is a flag test). Proceed on a
            wedged bring-up: sleeping is the stronger intent. */
         (void)obd_core_bringup_wait(OBD_BRINGUP_WAIT_MS);
+        sleep_by_command();
         obd_pin_sleep();
     }
     else

@@ -427,9 +427,13 @@ esp_err_t obd_bringup_run(int *active_baud)
     }
 
     /* legacy elm327_powerpin_commands: fw >= V2.3.22 must run with the
-       power-pin switch config at 10 (v4.52p: V2.3.22 or V2.3.24; until
-       2026-10-28 only a .22 chip got the check). The version is kept for
-       GET /api/obd_chip on the way. */
+       power-pin switch config at 10 (low sleeps, high wakes; v4.52p:
+       V2.3.22 or V2.3.24; until 2026-10-28 only a .22 chip got the check).
+       The version is kept for GET /api/obd_chip on the way. A wrong value
+       is the one EEPROM write of this path: the write acknowledged, left
+       OBD_PPSW_SETTLE_MS to settle (legacy's 100 + 500 ms) and read back
+       BEFORE the reset pulse (2026-11-07; until then the pulse came 0 ms
+       after the OK). An unreadable value is left alone: no blind write. */
     bool have_ver = bare_probe("VTVERS\r", resp, sizeof(resp), 1500);
 
     if (have_ver)
@@ -449,17 +453,51 @@ esp_err_t obd_bringup_run(int *active_baud)
         }
     }
 
-    if (have_ver && obd_fw_version_is_current(resp) &&
-        bare_probe("VTPPSWS\r", resp, sizeof(resp), 1500) &&
-        strstr(resp, "10") == NULL)
+    if (have_ver && obd_fw_version_is_current(resp))
     {
-        ESP_LOGW(TAG, "PPSW is not 10, setting to 10");
-        bare_probe("VTPPSW10\r", resp, sizeof(resp), 1500);
-        obd_pin_reset_pulse(); /* legacy hard-resets after the change */
-        vTaskDelay(pdMS_TO_TICKS(1500));
-        obd_uart_write((const uint8_t *)"\r", 1);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        obd_uart_flush_input();
+        uint8_t ppsw = 0;
+
+        resp[0] = '\0';
+
+        if (!bare_probe("VTPPSWS\r", resp, sizeof(resp), 1500) ||
+            !obd_parse_ppsw(resp, &ppsw))
+        {
+            ESP_LOGW(TAG, "PPSW unreadable ('%.12s'): left as it is", resp);
+        }
+        else if (ppsw != 0x10)
+        {
+            ESP_LOGW(TAG, "PPSW is %02X, setting to 10", ppsw);
+            resp[0] = '\0';
+
+            if (!bare_probe("VTPPSW10\r", resp, sizeof(resp), 1500) ||
+                !obd_parse_is_ok(resp))
+            {
+                ESP_LOGW(TAG, "VTPPSW10 not acknowledged ('%.12s'): no reset, "
+                         "the value left as it is", resp);
+            }
+            else
+            {
+                vTaskDelay(pdMS_TO_TICKS(OBD_PPSW_SETTLE_MS));
+                resp[0] = '\0';
+
+                if (bare_probe("VTPPSWS\r", resp, sizeof(resp), 1500) &&
+                    obd_parse_ppsw(resp, &ppsw) && ppsw == 0x10)
+                {
+                    ESP_LOGI(TAG, "PPSW reads 10 after the write");
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "PPSW reads '%.12s' after the write, not 10",
+                             resp);
+                }
+
+                obd_pin_reset_pulse(); /* legacy hard-resets after the change */
+                vTaskDelay(pdMS_TO_TICKS(1500));
+                obd_uart_write((const uint8_t *)"\r", 1);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                obd_uart_flush_input();
+            }
+        }
     }
 
     /* legacy: wait for the READY pin (LOW = ready) before declaring the

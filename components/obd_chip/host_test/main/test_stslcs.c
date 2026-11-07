@@ -110,3 +110,33 @@ void test_stslcs_midline_gt_is_not_the_prompt(void)
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 13.50f, c.vl_wake.voltage);
     TEST_ASSERT_FALSE(obd_stslcs_needs_provision(&c, 13.5f, 13.2f, 150));
 }
+
+/* VTPPSWS, the vendor's PowerEn switch (2026-11-07): the bench chip's "10"
+   as the probe read it ('10..>' = "10\r\r>"), the fault the sleep word
+   bench injects ("0F"), the echo of a bring-up before ATE0, stray bytes
+   ahead of a reset's answer, and what is not a value. */
+void test_ppsw_parse(void)
+{
+    uint8_t v = 0;
+
+    TEST_ASSERT_TRUE(obd_parse_ppsw("10", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x10, v);
+    TEST_ASSERT_TRUE(obd_parse_ppsw("10\r\r", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x10, v);
+    TEST_ASSERT_TRUE(obd_parse_ppsw("0F\r", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x0F, v);
+    TEST_ASSERT_TRUE(obd_parse_ppsw("VTPPSWS\r01\r", &v)); /* the echo */
+    TEST_ASSERT_EQUAL_HEX8(0x01, v);
+    TEST_ASSERT_TRUE(obd_parse_ppsw("\r\n 10 \r", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x10, v);
+    TEST_ASSERT_TRUE(obd_parse_ppsw("a5", &v));
+    TEST_ASSERT_EQUAL_HEX8(0xA5, v);
+    TEST_ASSERT_FALSE(obd_parse_ppsw("?", &v));
+    TEST_ASSERT_FALSE(obd_parse_ppsw("OK", &v));
+    TEST_ASSERT_FALSE(obd_parse_ppsw("1", &v));
+    TEST_ASSERT_FALSE(obd_parse_ppsw("100", &v));
+    TEST_ASSERT_FALSE(obd_parse_ppsw("", &v));
+    TEST_ASSERT_FALSE(obd_parse_ppsw("ELM327 v2.3", &v));
+    TEST_ASSERT_FALSE(obd_parse_ppsw(NULL, &v));
+    TEST_ASSERT_FALSE(obd_parse_ppsw("10", NULL));
+}

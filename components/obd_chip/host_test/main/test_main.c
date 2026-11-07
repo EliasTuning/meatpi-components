@@ -25,6 +25,8 @@ void test_stslcs_parse_elm327_and_armed_wake(void);
 void test_stslcs_provision_policy(void);
 void test_stslcs_ignores_garbage(void);
 void test_stslcs_midline_gt_is_not_the_prompt(void);
+void test_sleep_word_ack(void);
+void test_ppsw_parse(void);
 
 void app_main(void)
 {
@@ -50,5 +52,7 @@ void app_main(void)
     RUN_TEST(test_stslcs_provision_policy);
     RUN_TEST(test_stslcs_ignores_garbage);
     RUN_TEST(test_stslcs_midline_gt_is_not_the_prompt);
+    RUN_TEST(test_sleep_word_ack);
+    RUN_TEST(test_ppsw_parse);
     UNITY_END();
 }

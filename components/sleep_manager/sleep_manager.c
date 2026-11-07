@@ -191,12 +191,12 @@ static void nap_and_verify(void)
             s_resleeps++;
             ESP_LOGW(TAG, "OBD chip awake during sleep; re-sleeping "
                      "(%u/%u)", s_resleeps, SM_RESLEEP_MAX);
-            /* hard reset FIRST (legacy parity): a chip mid-monitor
-             * (ATMA) ignores the sleep pin, without the reset every
-             * retry fails and the loop ends in a recovery reboot
-             * (sleep matrix `elm_monitor`, 2026-07-21) */
+            /* the reset pulse FIRST: a chip mid-monitor (ATMA) ignores
+             * the sleep pin and the sleep word (`elm_monitor`, 2026-07-21;
+             * legacy's re-sleep: a soft ATZ, STSLEEP0, the pin); then the
+             * chip's boot time, so the word finds it listening (2026-11-07) */
             (void)obd_chip_hard_reset();
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(SM_RESLEEP_BOOT_MS));
             (void)obd_chip_sleep(true);
             vTaskDelay(pdMS_TO_TICKS(100));
         }

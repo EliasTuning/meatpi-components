@@ -11,7 +11,9 @@ wake-by-reboot, not resume-in-place (every manager restarts clean).
 
 SLEEPING = repeated **light sleep** with a 2 s timer wake; voltage is
 still sampled between naps and each nap verifies the OBD chip stayed
-asleep (≤6 re-sleeps, then an INTERNAL_RECOVERY reboot). Optional
+asleep (≤6 re-sleeps, then an INTERNAL_RECOVERY reboot; a re-sleep is the
+reset pulse, the chip's 1.5 s boot, then `obd_chip_sleep(true)`: the
+`STSLEEP0` word and the pin, since 2026-11-07). Optional
 periodic check-in reboot (`periodic_wakeup` + `wakeup_interval_min`),
 gated below 11.9 V so a dying battery is never drained for telemetry.
 
@@ -88,7 +90,9 @@ BEFORE radios stop) → wait for autopid idle (≤20 s, only if enabled) →
 **main's prepare callback** (`main/main_sleep.c`: autopid,
 data_logger, mqtt, vpn, mdns, wifi, ble, external_storage, the
 composition root owns the order, so this component depends on none of
-them) → CAN transceiver standby (GPIO38) → obd_chip_sleep(true) → USB
+them) → CAN transceiver standby (GPIO38) → obd_chip_sleep(true) (since
+2026-11-07 the `STSLEEP0` word to the chip first, what 4.x sent at every
+sleep, then the sleep pin; the chip's README "The sleep word") → USB
 power rail held low (GPIO10, open-drain + hold). Pins via Kconfig
 (`WICAN_SLEEP_*_GPIO`, defaults = WiCAN Pro).
 

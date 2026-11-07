@@ -39,8 +39,9 @@
  * wait for autopid idle → main's prepare callback (ordered component
  * stops, composition-root glue, so this component doesn't depend on
  * wifi/ble/mqtt/...) → CAN transceiver standby → OBD chip sleep
- * (verified each nap, ≤6 re-sleeps then recovery reboot) → USB power
- * rail held low.
+ * (the STSLEEP0 word, then the pin, since 2026-11-07; verified each nap,
+ * ≤6 re-sleeps then recovery reboot; a re-sleep is the reset pulse, the
+ * chip's 1.5 s boot, the word, the pin) → USB power rail held low.
  *
  * Boot-loop guard (legacy parity): ≥3 unexpected resets while the
  * battery reads below the error threshold forces sleep instead of

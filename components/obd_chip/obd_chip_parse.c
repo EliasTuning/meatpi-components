@@ -213,6 +213,36 @@ bool obd_parse_is_chip_error(const char *resp)
            strstr(resp, "BUFFER FULL") != NULL;
 }
 
+bool obd_parse_is_ok(const char *resp)
+{
+    if (resp == NULL)
+    {
+        return false;
+    }
+
+    const char *p = resp;
+
+    while (*p == '\r' || *p == '\n' || *p == ' ')
+    {
+        p++;
+    }
+
+    if (p[0] != 'O' || p[1] != 'K')
+    {
+        return false;
+    }
+
+    for (p += 2; *p != '\0'; p++)
+    {
+        if (*p != '\r' && *p != '\n' && *p != ' ')
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 /* Monitor-class commands stream frames until ANY non-CR byte is sent (stop
  * with SPACE: CR would repeat the last command and can re-enter monitor
  * mode). Table pending meatpi's authoritative list (task §11); extend here. */

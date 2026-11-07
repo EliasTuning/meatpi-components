@@ -95,7 +95,7 @@ zero-copy only with numbers.
 | `obd_chip_claim/release(type,timeout)` | COMMAND / MONITOR / EXCLUSIVE arbitration. |
 | `obd_chip_is_monitor_cmd(cmd)` | Table-driven monitor-class test (pure). |
 | `obd_chip_monitor_stop()` | The stop byte: **SPACE, never CR** (CR = repeat-last-command → can re-enter ATMA). |
-| `obd_chip_sleep(on)` / `obd_chip_status_ok()` | Sleep pin (hold survives resets; wake = release sequence) / READY pin. |
+| `obd_chip_sleep(on)` / `obd_chip_status_ok()` | Sleep: the sleep word `STSLEEP0` first (2026-11-07, 4.x parity: see "The sleep word" below), then the sleep pin (hold survives resets); wake = the release sequence / READY pin. |
 | `obd_chip_park()` | (2026-10-05) Leave the chip asleep from a boot that never initialised this component (the firmware's crash park). Pins only. The chip meets a boot in one of two states: **awake** (a power-on, or the run before had it up), then it is hardware-reset first (a session or a monitor left open is closed, and a chip mid-monitor ignores the sleep pin) and put to sleep with the hold, about 0.6 s; or **asleep** (the boot follows a sleep and the sleep pin's hold is still on: READY reads high), then it is left asleep and its sleep pin is never driven high. Either way the next normal boot finds it asleep and wakes it as after any sleep. |
 | `obd_chip_get_version(...)` | `VTVERS` → e.g. `MIC3624 V2.3.24`. |
 | `obd_chip_firmware_update(fs_path)` / `obd_chip_firmware_update_builtin(rule)` | EXCLUSIVE; the verified legacy flow (below). No forced rewrite since 2026-11-01 (Ali): a chip is written only when the image's version is above the one it reports. A file's version is its NAME (`V2.3.24.txt`; `ESP_ERR_INVALID_ARG` without one); the packaged image takes the rule, `OBD_FW_RULE_STARTUP` (the bring-up: a chip on the v4.52p accept list, V2.3.22 or V2.3.24, is left alone) or `OBD_FW_RULE_NEWER` (the user's entries). |
@@ -324,6 +324,45 @@ baud nobody listens at, a reboot loop's banner being the likely text, and
 one interruption the download mode does not survive (issue #1023: a unit
 flashed with the engine off, under the sleep threshold).
 
+**The sleep word (2026-11-07, Ali, after the review of the sleep path
+against 4.52p: `internal/OBD_CHIP_SLEEP_V6_VS_V4.md`).** `obd_chip_sleep(true)`
+sends `STSLEEP0`, the documented ST sleep command, through the request
+path and pulls the PowerEn pin behind it; legacy's `elm327_sleep()` did
+the same at every sleep entry and every re-sleep. Why the word: in the
+chip's provisioned state (native control mode, the external, UART and
+voltage sleep triggers OFF) the OBDLink and MIC documentation give the ST
+sleep command as the one way to sleep it; the pin works through the
+vendor's `VTPPSW` function alone, and a chip whose PowerEn function is off
+or inverted never slept under v6 (bench 2026-11-01, E3a: six reset pulses
+and a recovery reboot per attempt, then the whole sleep delay awake). A
+command, not a stored setting: no EEPROM. The chip answers `OK` with a
+prompt (bench 2026-11-07: `4F 4B 0D 0D 3E`) and sleeps on its own a second
+or two later, READY following that late (still awake 1.5 s after the OK),
+so the answer is the verdict, I `chip asleep by command (STSLEEP0 answered
+OK)`, and the first nap's READY check the ground truth, as before the word.
+A refusal (a chip mid-monitor answers `?`, a dead wire nothing, a claim a
+stuck holder still has) is one W `chip did not take STSLEEP0 (...): the pin
+alone` and the pin as before; a chip that is asleep already or never came
+up gets no word. The nap's re-sleep (sleep_manager) pulses the reset, waits
+the chip's 1.5 s boot and calls this, so the word finds the chip listening;
+the crash park stays pin-only (no driver in that boot). What the bench
+taught about the PowerEn switch the same day: `VT PPSW xy` is x = the
+WAKE trigger, y = the SLEEP trigger (0 low level, 1 high level, 2 rising,
+3 falling, F none): `10` = high wakes, low sleeps; `0F` = a LOW level wakes
+and nothing sleeps, so a chip set to `0F` is woken by our own pin at every
+entry and re-sleep (the chip's `STSLLT` read `SLEEP: CMD WAKE: PWR EN`);
+`FF` is refused by the chip; `2F` (a rising edge wakes, nothing sleeps) is
+the stand-in for a chip the pin cannot sleep; the bare `VT PPSW` disables
+the pin function altogether (the vendor's sheet, in the app repo's
+`internal/MIC_PPSW_POWEREN_INSTRUCTIONS.md`). A command-slept chip holds
+its sleep through an ESP reboot and ignores 2 Mbaud words on its UART, but
+the pin's wake level undoes it at once (`10` with the pin high). Bench:
+`.\test.ps1 sleepword` (the app repo's `testing/sleepword.md`): a healthy
+`sleep test` reads the I line before `components down`, and with `VTPPSW2F`
+on the chip the command alone sleeps it (an `ATI` after it gets nothing),
+the naps find it asleep, and the night that used to end in a recovery
+reboot ends in the timed wake.
+
 ## Settings (`"obd_chip"`, version 3)
 
 The UART baud is **not a setting**: `OBD_CHIP_BAUD` (2 Mbaud) in
@@ -391,7 +430,11 @@ trigger a reprovision-every-boot loop (`obd_parse_feed`, host-tested).
    output; reset is CONDITIONAL (READY says awake → soft `ATZ`,
    asleep/stuck → hardware pulse); `STWBR` persists a successful `STSBR`
    switch as the chip's power-on baud; fw ≥ V2.3.22 gets the power-pin
-   check (`VTPPSWS` → `VTPPSW10` + reset when wrong); a READY-wait loop
+   check (`VTPPSWS` → `VTPPSW10` when wrong; since 2026-11-07 the write
+   must answer `OK`, gets 600 ms to settle (legacy's 100 + 500 ms) and is
+   read back as `10` BEFORE the reset pulse, an unreadable value is left
+   alone and a refused write gets no pulse: `obd_parse_ppsw`,
+   host-tested; until then the pulse came 0 ms after the OK); a READY-wait loop
    (10 × 200 ms, then one forced reset) gates the bring-up; sleep parks
    BOTH the SLEEP and READY pins (pulldown + RTC pulldown + hold).
    UART ring buffers: legacy 18 K / 18 K, and they live in **PSRAM** in
@@ -468,15 +511,19 @@ subscribe and transaction API for the CAN self-test.
 - **Bench (2026-10-28):** `.\test.ps1 obdfw` (the firmware update paths:
   `OBD FW PASS` 25 checks) and `.\test.ps1 canselftest` (the wire tools,
   the report and the CAN self-test routes on the real chip and the bench
-  bus: `CAN SELFTEST PASS`), rows in the app repo's TESTING.md.
-- **Host (`host_test/`, 17 tests):** pure framing, prompt splits at every
+  bus: `CAN SELFTEST PASS`), rows in the app repo's TESTING.md; since
+  2026-11-02 `.\test.ps1 obdbringup` (the warm start, the PP 0F guard) and
+  since 2026-11-07 `.\test.ps1 sleepword` (the sleep word at the entry and
+  in a re-sleep, the PPSW repair's settle and read-back).
+- **Host (`host_test/`, 23 tests):** pure framing, prompt splits at every
   chunk boundary, echo strip, post-prompt bytes not consumed, noise
   interleave, **meatpi's real 36-line proprietary-PID log replayed at chunk
   sizes 1…4096**, overflow flagging, error/monitor classification, fw-file
   iterator + FFF1 marker, the EEPROM guard (rewrites, pass-throughs,
   refusals, raw-chunk semantics, and since 2026-10-01 a mixed-protocol
   profile chain `ATSP6;...;ATSP7;...` whose BOTH protocol switches come out
-  as `ATTP`), the STSLCS parser + provisioning policy.
+  as `ATTP`), the STSLCS parser + provisioning policy, the PP parser, the
+  `OK` acknowledgement and the VTPPSWS value (2026-11-07).
 - **On-target (`test_apps/`, live bench):** all green 2026-07-03, see
   `test_apps/README.md` for markers and the bench doc pointer.
 

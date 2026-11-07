@@ -242,8 +242,14 @@ esp_err_t obd_chip_monitor_stop(void);
 
 /* ---- chip management ----------------------------------------------------------------- */
 
-/** Drive the sleep pin (true = sleep, with pulldown+hold so it survives
- *  resets; false = the wake release sequence). */
+/** Sleep (true): the sleep word first, `STSLEEP0` (2026-11-07: what 4.x sent
+ *  at every sleep entry and re-sleep; the pin alone works only through the
+ *  vendor's PPSW function), when the driver is up and the chip reads awake,
+ *  the chip's `OK` as the verdict (READY follows a second or two later; the
+ *  first nap's check is the ground truth), one W line when the chip does
+ *  not take it; then the sleep pin (pulldown + hold, survives resets). Wake
+ *  (false): the release sequence. The nap's re-sleep calls this 1.5 s after
+ *  its reset pulse, the chip's boot time. */
 esp_err_t obd_chip_sleep(bool sleep);
 
 /** Leave the chip asleep from a boot that never initialised this component
@@ -258,9 +264,11 @@ esp_err_t obd_chip_sleep(bool sleep);
 esp_err_t obd_chip_park(void);
 
 /** Hardware reset pulse (RESET low 5 ms). A chip mid-monitor (ATMA)
- *  IGNORES the sleep pin: legacy's re-sleep path hard-reset first,
- *  then slept; without it the nap loop burns all its retries and falls
- *  back to a recovery reboot (sleep matrix `elm_monitor`, 2026-07-21). */
+ *  IGNORES the sleep pin and refuses the sleep word: the nap's re-sleep
+ *  pulses first (legacy's re-sleep sent a soft `ATZ`, its READY read
+ *  awake, then `STSLEEP0`, then the pin), waits the chip's boot and calls
+ *  obd_chip_sleep(true); without the reset every retry fails and the loop
+ *  ends in a recovery reboot (sleep matrix `elm_monitor`, 2026-07-21). */
 esp_err_t obd_chip_hard_reset(void);
 
 /** READY status pin level (chip-driven). See README: on the current bench

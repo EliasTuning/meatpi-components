@@ -24,7 +24,8 @@
  * @file obd_chip_stslcs.c
  * @brief PURE STSLCS sleep-config parsing + the boot provisioning
  *        policy (ported from legacy main/obd.c: the sscanf patterns
- *        ARE the accepted line grammar). No IDF deps; host-tested.
+ *        ARE the accepted line grammar), and the VTPPSWS read of the
+ *        vendor's PowerEn switch (2026-11-07). No IDF deps; host-tested.
  */
 #include <math.h>
 #include <stdio.h>
@@ -203,4 +204,66 @@ bool obd_stslcs_needs_provision(const obd_stslcs_t *c, float wake_v,
            fabsf(c->vl_wake.voltage - wake_v) > 0.005f ||
            fabsf(c->vl_sleep.voltage - sleep_v) > 0.005f ||
            c->vl_sleep.time != sleep_time_s;
+}
+
+/* ---- VTPPSWS: the vendor's PowerEn switch (2026-11-07) ------------------------ */
+
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+
+    return -1;
+}
+
+bool obd_parse_ppsw(const char *resp, uint8_t *value)
+{
+    if (resp == NULL || value == NULL)
+    {
+        return false;
+    }
+
+    const char *p = resp;
+
+    while (*p != '\0')
+    {
+        while (*p == '\r' || *p == '\n' || *p == ' ')
+        {
+            p++;
+        }
+
+        const char *line = p;
+
+        while (*p != '\0' && *p != '\r' && *p != '\n')
+        {
+            p++;
+        }
+
+        size_t n = (size_t)(p - line);
+
+        while (n > 0 && line[n - 1] == ' ')
+        {
+            n--;
+        }
+
+        if (n == 2 && hex_digit(line[0]) >= 0 && hex_digit(line[1]) >= 0)
+        {
+            *value = (uint8_t)((hex_digit(line[0]) << 4) | hex_digit(line[1]));
+            return true;
+        }
+    }
+
+    return false;
 }

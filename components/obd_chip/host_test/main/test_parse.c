@@ -485,3 +485,23 @@ void test_pp_parse(void)
     TEST_ASSERT_FALSE(obd_parse_pp("10F:95 N", 0x0F, &v, &on)); /* not a token */
     TEST_ASSERT_FALSE(obd_parse_pp(NULL, 0x0F, &v, &on));
 }
+
+/* The chip's acknowledgement and nothing else (the sleep word, the PPSW
+   write; 2026-11-07): "OK" as the extract leaves it, with the line ends of
+   the raw wire, and the answers that are not it (the beta.8 review's
+   "NOT OK", a prompt-less banner, the unknown-command marker). */
+void test_sleep_word_ack(void)
+{
+    TEST_ASSERT_TRUE(obd_parse_is_ok("OK"));
+    TEST_ASSERT_TRUE(obd_parse_is_ok("OK\r"));
+    TEST_ASSERT_TRUE(obd_parse_is_ok("\r\nOK\r\n"));
+    TEST_ASSERT_TRUE(obd_parse_is_ok(" OK "));
+    TEST_ASSERT_FALSE(obd_parse_is_ok("NOT OK"));
+    TEST_ASSERT_FALSE(obd_parse_is_ok("OK?"));
+    TEST_ASSERT_FALSE(obd_parse_is_ok("OKAY"));
+    TEST_ASSERT_FALSE(obd_parse_is_ok("?"));
+    TEST_ASSERT_FALSE(obd_parse_is_ok("ELM327 v2.3"));
+    TEST_ASSERT_FALSE(obd_parse_is_ok(""));
+    TEST_ASSERT_FALSE(obd_parse_is_ok("\r"));
+    TEST_ASSERT_FALSE(obd_parse_is_ok(NULL));
+}

@@ -86,6 +86,11 @@ bool obd_parse_pp(const char *atpps, uint8_t pp, uint8_t *value, bool *on);
 /** '?' alone / "UNABLE TO CONNECT" / "CAN ERROR"-style chip errors. */
 bool obd_parse_is_chip_error(const char *resp);
 
+/** The chip's acknowledgement and nothing else: `OK` alone, with any CR,
+ *  LF or space around it; "NOT OK", "OK?" and a banner are not it (the
+ *  sleep word, the PPSW write; 2026-11-07). Pure, host-tested. */
+bool obd_parse_is_ok(const char *resp);
+
 /** Case/whitespace-insensitive prefix classification of monitor commands. */
 bool obd_parse_is_monitor_cmd(const char *cmd);
 
@@ -131,6 +136,12 @@ typedef struct
 
 /** Parse a full STSLCS response (any line endings) into @p out. */
 void obd_stslcs_parse(const char *response, obd_stslcs_t *out);
+
+/** `VTPPSWS`, the chip's PowerEn switch, as its two hex digits (`10`: low
+ *  sleeps, high wakes; `0F`: no function): the first line that is exactly
+ *  two hex digits, an echo or the stray bytes of a reset ahead of it
+ *  skipped. False when no such line. Pure, host-tested (2026-11-07). */
+bool obd_parse_ppsw(const char *resp, uint8_t *value);
 
 /** The legacy reprogram condition: true when the chip's stored sleep
  *  config must be rewritten (autonomous controls on, or thresholds/time
@@ -213,6 +224,18 @@ int obd_core_claim_state(void);
 #define OBD_BRINGUP_WAIT_MS 20000 /* > worst case: hard-reset path + full
                                      2-baud x 3-retry walk + provisioning */
 bool obd_core_bringup_wait(uint32_t timeout_ms);
+
+/* The sleep word (2026-11-07, 4.x parity): `STSLEEP0` ahead of the PowerEn
+ * pin in obd_chip_sleep(true); the request's budget. The chip answers at
+ * once and sleeps on its own a second or two later (READY follows that
+ * late: bench 2026-11-07, still awake 1.5 s after the OK), so the answer
+ * is the verdict and the first nap's READY check the ground truth. */
+#define OBD_SLEEP_WORD_MS   1000
+
+/* `VTPPSW10` at the bring-up (the one EEPROM write of that path): legacy's
+ * 100 + 500 ms before any reset; the value is read back inside that window
+ * and only then the reset pulse (2026-11-07). */
+#define OBD_PPSW_SETTLE_MS  600
 
 /** The boot sequence on the bare UART (obd_chip_bringup.c): wake, reset
  *  (verified), baud negotiation, provisioning, RX task start. Called by the
