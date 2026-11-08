@@ -41,6 +41,11 @@ void test_examples_are_valid_scripts(void);
 void test_examples_only_use_documented_bindings(void);
 void test_examples_json_lists_without_sources(void);
 
+void test_gpio_denylist(void);
+void test_gpio_can_alias_needs_stop(void);
+void test_pwm_span(void);
+void test_gpio_touch_release(void);
+
 void test_accepts_plain_names(void)
 {
     TEST_ASSERT_TRUE(se_script_name_ok("vin"));
@@ -141,6 +146,11 @@ void app_main(void)
     RUN_TEST(test_examples_are_valid_scripts);
     RUN_TEST(test_examples_only_use_documented_bindings);
     RUN_TEST(test_examples_json_lists_without_sources);
+
+    RUN_TEST(test_gpio_denylist);
+    RUN_TEST(test_gpio_can_alias_needs_stop);
+    RUN_TEST(test_pwm_span);
+    RUN_TEST(test_gpio_touch_release);
 
     UNITY_END();
 }

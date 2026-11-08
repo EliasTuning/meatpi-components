@@ -11,6 +11,8 @@ idf_component_register(
          "test_obd.c"
          "test_reflash.c"
          "test_doc.c"
+         "test_gpio.c"
+         "${comp_dir}/script_engine_gpio.c"
          "${comp_dir}/script_engine_name.c"
          "${comp_dir}/script_engine_obd.c"
          "${comp_dir}/script_engine_doc.c"

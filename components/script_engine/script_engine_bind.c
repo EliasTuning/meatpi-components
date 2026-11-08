@@ -45,6 +45,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "esp_attr.h"
@@ -62,6 +63,7 @@
 
 #include "script_engine_doc.h"
 #include "script_engine_obd.h"
+#include "script_engine_gpio.h"
 #include "script_engine_private.h"
 
 /* ---- helpers --------------------------------------------------------------- */
@@ -234,6 +236,297 @@ static int b_can_tx(bvm *vm)
     esp_err_t err = can_manager_send(id, ext, false, data, (uint8_t)dlc);
     be_pushbool(vm, err == ESP_OK);
     be_return(vm);
+}
+
+/* Set when this run called can_stop(); the epilogue brings the bus back. */
+static bool s_bus_stopped;
+
+static QueueHandle_t s_rx_q;
+static int s_rx_idx = -1;
+
+static void can_rx_drop(void)
+{
+    if (s_rx_idx >= 0)
+    {
+        (void)can_manager_unsubscribe_queue(s_rx_idx);
+        s_rx_idx = -1;
+    }
+
+    if (s_rx_q != NULL)
+    {
+        vQueueDelete(s_rx_q);
+        s_rx_q = NULL;
+    }
+}
+
+void se_script_epilogue(void)
+{
+    can_rx_drop();
+    se_gpio_release_all();
+
+    if (s_bus_stopped)
+    {
+        (void)can_manager_start();
+        s_bus_stopped = false;
+    }
+}
+
+static int b_can_start(bvm *vm)
+{
+    se_check_budget(vm);
+
+    esp_err_t err = can_manager_start();
+    bool up = err == ESP_OK && can_manager_core_handle() != NULL;
+
+    if (up)
+    {
+        s_bus_stopped = false;
+    }
+
+    be_pushbool(vm, up);
+    be_return(vm);
+}
+
+static int b_can_stop(bvm *vm)
+{
+    se_check_budget(vm);
+
+    esp_err_t err = can_manager_stop();
+
+    if (err == ESP_OK)
+    {
+        s_bus_stopped = true;
+    }
+
+    be_pushbool(vm, err == ESP_OK);
+    be_return(vm);
+}
+
+static void set_int_global(bvm *vm, const char *name, bint v)
+{
+    be_pushint(vm, v);
+    be_setglobal(vm, name);
+    be_pop(vm, 1);
+}
+
+static int b_can_rx(bvm *vm)
+{
+    se_check_budget(vm);
+
+    if (be_top(vm) < 2 || !be_isint(vm, 2))
+    {
+        be_raise(vm, "can_error", "can_rx(id, timeout_ms[, ext])");
+    }
+
+    uint32_t id = id_arg(vm, 1);
+    bint ms = be_toint(vm, 2);
+    bool ext = id > 0x7FF;
+
+    if (be_top(vm) >= 3 && be_isint(vm, 3))
+    {
+        ext = be_toint(vm, 3) != 0;
+    }
+
+    if (ms < 0 || ms > SE_SLEEP_MAX_MS)
+    {
+        be_raise(vm, "can_error", "timeout_ms is 0..60000");
+    }
+
+    if (can_manager_core_handle() == NULL)
+    {
+        be_raise(vm, "can_error", "CAN bus is stopped");
+    }
+
+    can_rx_drop();
+    s_rx_q = xQueueCreate(4, sizeof(can_core_frame_t));
+
+    if (s_rx_q == NULL)
+    {
+        be_raise(vm, "can_error", "no memory");
+    }
+
+    uint32_t mask = ext ? 0x1FFFFFFFUL : 0x7FFUL;
+    esp_err_t err = can_manager_subscribe_queue(s_rx_q, id, mask, ext,
+                                                false, &s_rx_idx);
+
+    if (err != ESP_OK)
+    {
+        can_rx_drop();
+        be_raise(vm, "can_error", "CAN bus is stopped");
+    }
+
+    (void)can_manager_subscriber_name(s_rx_idx, "script");
+
+    can_core_frame_t frame;
+    bool got = false;
+    TickType_t left = pdMS_TO_TICKS((uint32_t)ms);
+
+    if (ms > 0 && left == 0)
+    {
+        left = 1;
+    }
+
+    do
+    {
+        TickType_t slice = left > pdMS_TO_TICKS(50) ? pdMS_TO_TICKS(50) : left;
+
+        if (xQueueReceive(s_rx_q, &frame, slice) == pdTRUE)
+        {
+            got = true;
+            break;
+        }
+
+        if (left <= slice)
+        {
+            break;
+        }
+
+        left -= slice;
+        se_check_budget(vm);
+    }
+    while (left > 0);
+
+    can_rx_drop();
+
+    if (!got)
+    {
+        be_return_nil(vm);
+    }
+
+    char hex[8 * 3 + 1];
+    size_t o = 0;
+
+    for (uint8_t i = 0; i < frame.dlc && i < 8 && o + 3 < sizeof(hex); i++)
+    {
+        o += (size_t)snprintf(hex + o, sizeof(hex) - o,
+                              i ? " %02X" : "%02X", frame.data[i]);
+    }
+
+    hex[o] = '\0';
+    set_int_global(vm, "can_rx_id", (bint)frame.id);
+    set_int_global(vm, "can_rx_ext", frame.ext ? 1 : 0);
+    set_int_global(vm, "can_rx_dlc", frame.dlc);
+    be_pushstring(vm, hex);
+    be_return(vm);
+}
+
+static bool pin_from(bvm *vm, int idx, int *pin)
+{
+    if (be_isint(vm, idx))
+    {
+        *pin = (int)be_toint(vm, idx);
+        return true;
+    }
+
+    if (be_isstring(vm, idx))
+    {
+        const char *s = be_tostring(vm, idx);
+
+        if (strcmp(s, "CAN_TX") == 0)
+        {
+            *pin = se_can_tx_gpio();
+            return true;
+        }
+
+        if (strcmp(s, "CAN_RX") == 0)
+        {
+            *pin = se_can_rx_gpio();
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static int b_digital_write(bvm *vm)
+{
+    se_check_budget(vm);
+
+    int pin = 0;
+
+    if (be_top(vm) < 2 || !pin_from(vm, 1, &pin) || !be_isint(vm, 2))
+    {
+        be_raise(vm, "gpio_error", "digitalWrite(pin, HIGH|LOW)");
+    }
+
+    const char *why = se_gpio_check(pin, can_manager_core_handle() != NULL);
+
+    if (why != NULL)
+    {
+        be_raise(vm, "gpio_error", why);
+    }
+
+    se_gpio_touch(pin);
+    se_gpio_write(pin, be_toint(vm, 2) ? 1 : 0);
+    be_return_nil(vm);
+}
+
+static bool berry_num(bvm *vm, int idx, double *out)
+{
+    if (be_isreal(vm, idx))
+    {
+        *out = be_toreal(vm, idx);
+        return true;
+    }
+
+    if (be_isint(vm, idx))
+    {
+        *out = (double)be_toint(vm, idx);
+        return true;
+    }
+
+    return false;
+}
+
+static int b_digital_pwm(bvm *vm)
+{
+    se_check_budget(vm);
+
+    int pin = 0;
+    double on_ms = 0;
+    double off_ms = 0;
+
+    if (be_top(vm) < 3 || !pin_from(vm, 1, &pin) ||
+        !berry_num(vm, 2, &on_ms) || !berry_num(vm, 3, &off_ms))
+    {
+        be_raise(vm, "gpio_error",
+                 "digitalPWM(pin, ontime_ms, offtime_ms[, rounds])");
+    }
+
+    int rounds = 1;
+
+    if (be_top(vm) >= 4 && !be_isnil(vm, 4))
+    {
+        if (!be_isint(vm, 4))
+        {
+            be_raise(vm, "gpio_error", "rounds is an integer");
+        }
+
+        rounds = (int)be_toint(vm, 4);
+    }
+
+    uint32_t on_us = 0;
+    uint32_t off_us = 0;
+    const char *err = NULL;
+
+    if (!se_pwm_span_ok(on_ms, off_ms, rounds, &on_us, &off_us, &err))
+    {
+        be_raise(vm, "gpio_error",
+                 err != NULL && strcmp(err, "cap") == 0
+                     ? "digitalPWM longer than 100 ms"
+                     : "digitalPWM times or rounds");
+    }
+
+    const char *why = se_gpio_check(pin, can_manager_core_handle() != NULL);
+
+    if (why != NULL)
+    {
+        be_raise(vm, "gpio_error", why);
+    }
+
+    se_gpio_touch(pin);
+    se_gpio_pwm(pin, on_us, off_us, (uint32_t)rounds);
+    be_return_nil(vm);
 }
 
 static int b_emit(bvm *vm)
@@ -875,6 +1168,11 @@ static const struct
     { "uds",               b_uds },
     { "uds_ext",           b_uds_ext },
     { "can_tx",            b_can_tx },
+    { "can_start",         b_can_start },
+    { "can_stop",          b_can_stop },
+    { "can_rx",            b_can_rx },
+    { "digitalWrite",      b_digital_write },
+    { "digitalPWM",        b_digital_pwm },
     { "emit",              b_emit },
     { "dtc_scan",          b_dtc_scan },
     { "dtc_clear",         b_dtc_clear },
@@ -960,4 +1258,11 @@ void se_bindings_register(bvm *vm)
     be_pushint(vm, 0);
     be_setglobal(vm, "uds_xfer_blocks");
     be_pop(vm, 1);
+    set_int_global(vm, "can_rx_id", 0);
+    set_int_global(vm, "can_rx_ext", 0);
+    set_int_global(vm, "can_rx_dlc", 0);
+    set_int_global(vm, "HIGH", 1);
+    set_int_global(vm, "LOW", 0);
+    set_int_global(vm, "CAN_TX", se_can_tx_gpio());
+    set_int_global(vm, "CAN_RX", se_can_rx_gpio());
 }

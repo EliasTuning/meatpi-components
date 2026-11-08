@@ -4,6 +4,7 @@ idf_component_register(
          "script_engine_obd.c"
          "script_engine_settings.c"
          "script_engine_bind.c"
+         "script_engine_gpio.c"
          "script_engine_doc.c"
          "script_engine_examples.c"
          "script_engine_http.c"
@@ -17,4 +18,5 @@ idf_component_register(
                   settings_manager log_manager esp_timer esp_mm
                   http_server_manager esp_http_server espressif__cjson
                   cmdline_manager console
+                  esp_driver_gpio esp_hw_support esp_system
 )

@@ -179,6 +179,7 @@ static void do_run(void)
      * kill all land here (tester-present disarmed, transport freed). */
     se_obd_autorelease();
     se_bus_hold_release(); /* and the exclusive-bus hold, if it took one */
+    se_script_epilogue();  /* GPIO back to inputs; CAN restarted if stopped */
 
     berry_port_set_capture(NULL, 0);
 }

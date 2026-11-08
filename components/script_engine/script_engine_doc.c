@@ -48,6 +48,7 @@ static const struct
     { "session", "UDS conversation on a claimed bus" },
     { "dtc",     "Trouble codes" },
     { "can",     "Raw CAN" },
+    { "gpio",    "GPIO" },
     { "events",  "Events & rules" },
     { "file",    "SD-card files & ECU flashing" },
 };
@@ -124,9 +125,36 @@ static const se_bind_doc_t BIND_DOCS[] =
 
     { "can_tx", "can_tx(id, ext, hexbytes)", "can", "true when sent",
       "Put one raw CAN frame on the WiCAN's own CAN controller (up to 8 data bytes; "
-      "ext = 1 for a 29-bit id). Needs the CAN bus setting on; false when it is off or "
-      "nobody acknowledged. No raw receive: answers come back through uds() or obd_isotp_rx().",
+      "ext = 1 for a 29-bit id). Needs the CAN bus setting on and the bus running; "
+      "false when it is off or nobody acknowledged.",
       "can_tx(0x7DF, 0, '02 01 0C')" },
+    { "can_start", "can_start()", "can", "true when the bus is running",
+      "Start the CAN controller and transceiver from the CAN settings. False when "
+      "CAN is disabled in settings. A script that stopped the bus is restarted at "
+      "the end of the run anyway.",
+      "can_start()" },
+    { "can_stop", "can_stop()", "can", "true when the bus is parked",
+      "Stop the CAN controller and park the transceiver, which frees the CAN TX "
+      "and RX pins for digitalWrite() and digitalPWM(). The bus is started again "
+      "when the script ends.",
+      "can_stop()" },
+    { "can_rx", "can_rx(id, timeout_ms[, ext])", "can", "hex string, or nil",
+      "Wait up to timeout_ms milliseconds (1000 = 1 s, at most 60 s) for one frame "
+      "with that id. nil when nothing arrives. Sets can_rx_id, can_rx_ext and can_rx_dlc. "
+      "ext defaults to 1 when id is above 0x7FF.",
+      "var f = can_rx(0x7E8, 1000)" },
+    { "digitalWrite", "digitalWrite(pin, value)", "gpio", "nil",
+      "Drive a GPIO high or low (HIGH = 1, LOW = 0). pin is a GPIO number or "
+      "CAN_TX / CAN_RX (also the strings 'CAN_TX' and 'CAN_RX'). Flash, PSRAM, USB, "
+      "strapping and the transceiver standby pin are refused. CAN_TX and CAN_RX "
+      "need can_stop() first. Pins return to inputs when the script ends.",
+      "digitalWrite(CAN_TX, HIGH)" },
+    { "digitalPWM", "digitalPWM(pin, ontime_ms, offtime_ms[, rounds])", "gpio", "nil",
+      "Block the device and pulse pin: ontime_ms high, offtime_ms low, rounds times "
+      "(default 1). Times are milliseconds and may be fractional (1.6, 0.4); the "
+      "shortest step is 1 us. The whole pulse must be 100 ms or less. Same pins as "
+      "digitalWrite(), including CAN_TX and CAN_RX after can_stop().",
+      "digitalPWM(CAN_TX, 1.6, 0.4, 10)" },
 
     { "emit", "emit(source, name, key, value)", "events", "true when queued",
       "Publish an event for the rules engine. The convention is emit('script', "
@@ -183,6 +211,13 @@ static const struct
     { "uds_pending", "How many 0x78 responsePending replies the last obd_request() waited through." },
     { "uds_xfer_crc", "CRC-32 of the data the last obd_transfer_file() sent." },
     { "uds_xfer_blocks", "Blocks the last obd_transfer_file() sent." },
+    { "can_rx_id", "Id of the last frame can_rx() returned." },
+    { "can_rx_ext", "1 when that frame used a 29-bit id." },
+    { "can_rx_dlc", "Data length of that frame." },
+    { "HIGH", "1, for digitalWrite()." },
+    { "LOW", "0, for digitalWrite()." },
+    { "CAN_TX", "GPIO of the CAN controller TX pin." },
+    { "CAN_RX", "GPIO of the CAN controller RX pin." },
     { "evt_source", "Source of the event that triggered this run ('' when run by hand)." },
     { "evt_name", "Name of that event, e.g. 'bit' for status.bit." },
     { "evt_<field>", "One global per field of the trigger event: evt_bit and evt_set for "
@@ -242,6 +277,14 @@ static const struct
       "Every if / for / while / def / try block ends with end, strings are quoted, "
       "calls have parentheses. The line number is in the message." },
     { "bad hex", "Requests are hex bytes like '22 F1 90' (spaces optional, at most 8 for can_tx)." },
+    { "pin refused",
+      "That GPIO is flash, PSRAM, USB, a strapping pin, or the CAN standby pin." },
+    { "CAN pin in use",
+      "can_stop() before digitalWrite() or digitalPWM() on CAN_TX or CAN_RX." },
+    { "digitalPWM longer than 100 ms",
+      "rounds * (ontime_ms + offtime_ms) must be 100 ms or less." },
+    { "CAN bus is stopped",
+      "can_start() before can_tx() or can_rx(), and CAN must be enabled in settings." },
     { "attribute_error",
       "A name or method does not exist: check the spelling, and import string / json / "
       "math before using their functions." },
@@ -273,6 +316,8 @@ cJSON *se_doc_reference(const se_doc_ctx_t *ctx)
     cJSON_AddNumberToObject(lim, "file_max", SE_SCRIPT_FILE_MAX);
     cJSON_AddNumberToObject(lim, "out_max", SE_OUT_MAX);
     cJSON_AddNumberToObject(lim, "sleep_max_ms", SE_SLEEP_MAX_MS);
+    cJSON_AddNumberToObject(lim, "pwm_max_us", SE_PWM_MAX_US);
+    cJSON_AddNumberToObject(lim, "can_rx_max_ms", SE_SLEEP_MAX_MS);
     cJSON_AddNumberToObject(lim, "name_max", SE_NAME_MAX);
     cJSON_AddNumberToObject(lim, "resp_max_bytes", SE_RESP_MAX_BYTES);
     cJSON_AddNumberToObject(lim, "max_runtime_ms", ctx ? ctx->max_runtime_ms : 0);

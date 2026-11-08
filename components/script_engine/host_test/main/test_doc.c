@@ -183,7 +183,7 @@ void test_examples_only_use_documented_bindings(void)
 {
     /* every "name(" call of a device binding an example makes must be a
        documented binding: a renamed binding shows up here first */
-    static const char *const DEVICE_PREFIXES[] = { "uds", "obd_", "dtc_", "can_tx", "emit", "sleep_ms", "millis", "log(" };
+    static const char *const DEVICE_PREFIXES[] = { "uds", "obd_", "dtc_", "can_", "emit", "sleep_ms", "millis", "log(" };
 
     for (size_t i = 0; i < se_example_count(); i++)
     {

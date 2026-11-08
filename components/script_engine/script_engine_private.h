@@ -71,6 +71,10 @@ bool     se_settings_exclusive(void);      /* scripts hold the bus (autopid off)
  * ECU access when the setting is on; the runner releases it after EVERY run
  * next to se_obd_autorelease(). */
 void se_bus_hold_release(void);
+
+/* After every run: drop a can_rx subscription, release GPIO, restart CAN
+ * if the script called can_stop(). */
+void se_script_epilogue(void);
 bool     se_settings_is_configured(void);  /* boot apply ran (standard §4.3) */
 
 /* Provided by the berry component's ESP port. */

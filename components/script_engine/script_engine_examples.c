@@ -242,9 +242,9 @@ static const char CAN_FRAME[] =
     "# Send raw CAN frames. can_tx(id, ext, hexbytes) puts one frame on the\n"
     "# WiCAN's own CAN controller (up to 8 data bytes; ext = 1 for a 29-bit\n"
     "# id). It needs the CAN bus turned on (Settings -> CAN bus) and answers\n"
-    "# false when the bus is off or nobody acknowledged the frame. There is no\n"
-    "# raw receive: answers to OBD requests come back through uds(), and a\n"
-    "# claimed conversation can read raw ISO-TP payloads with obd_isotp_rx().\n"
+    "# false when the bus is off or nobody acknowledged the frame. A single\n"
+    "# frame comes back with can_rx(id, timeout_ms). UDS answers still come\n"
+    "# through uds(), and a claimed conversation can use obd_isotp_rx().\n"
     "var ok = can_tx(0x7DF, 0, '02 01 0C 00 00 00 00 00')   # an OBD-II RPM request as a raw frame\n"
     "log('11-bit frame sent: ' + str(ok) + (ok ? '' : '  (is the CAN bus on?)'))\n"
     "\n"
@@ -254,7 +254,19 @@ static const char CAN_FRAME[] =
     "\n"
     "# a 29-bit id with three data bytes\n"
     "ok = can_tx(0x18DA10F1, 1, '02 3E 00')\n"
-    "log('29-bit frame sent: ' + str(ok))\n";
+    "log('29-bit frame sent: ' + str(ok))\n"
+    "\n"
+    "var f = can_rx(0x7E8, 1000)    # wait 1 s for id 0x7E8\n"
+    "log('frame: ' + str(f))\n";
+
+static const char GPIO_PULSE[] =
+    "# Park the CAN controller, pulse its TX pin, then the script end\n"
+    "# starts the bus again. Times are milliseconds (1.6 and 0.4). The\n"
+    "# whole pulse must stay within 100 ms. CAN_RX works the same way.\n"
+    "can_stop()\n"
+    "digitalPWM(CAN_TX, 1.6, 0.4, 10)\n"
+    "digitalWrite(CAN_TX, LOW)\n"
+    "can_start()\n";
 
 static const se_example_t EXAMPLES[] =
 {
@@ -277,8 +289,11 @@ static const se_example_t EXAMPLES[] =
       "Read the trigger event's fields and emit an event other rules can use.",
       "", 2, ON_EVENT },
     { "can_frame", "Raw CAN frames",
-      "Send 11-bit and 29-bit frames and see why answers come back through uds().",
+      "Send 11-bit and 29-bit frames and wait for one answer with can_rx().",
       "can", 2, CAN_FRAME },
+    { "gpio_pulse", "Pulse a CAN pin",
+      "Stop the bus, pulse CAN_TX for 1.6 ms on and 0.4 ms off, start the bus.",
+      "can", 2, GPIO_PULSE },
 };
 
 size_t se_example_count(void)

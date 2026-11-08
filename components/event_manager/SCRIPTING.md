@@ -143,7 +143,7 @@ surfaces, that's a design smell to raise first.
 ## 5. Landed 2026-07-07 pm (what closed §4 items 1/3/4)
 
 - `script_engine`: Berry VM on a PSRAM runner task; bindings log/sleep_ms/
-  millis/uds/uds_ext/can_tx/emit (+ 2026-07-08: dtc_scan/dtc_clear, the
+  millis/uds/uds_ext/can_tx/can_start/can_stop/can_rx/digitalWrite/digitalPWM/emit (+ 2026-07-08: dtc_scan/dtc_clear, the
   autopid DTC surface, gated by the dtc_enabled/dtc_allow_clear settings;
   TASK_dtc.md §9, and dtc_desc(code) → uploaded-database description,
   TASK_dtc_db.md); budget + kill. GET /api/scripts (list),
