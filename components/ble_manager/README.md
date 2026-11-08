@@ -33,6 +33,35 @@ before the change with `tools/testbench/ble/ble_addr_probe_pi.py`
 pipe (`br_ble_obd`, bridge_manager v2) is the fourth piece: on 4.x
 Bluetooth on WAS the ELM pipe to the chip.
 
+## A bonded phone's reconnect: the encryption can land before the connect (2026-11-08)
+
+With this NimBLE (IDF 6.1) the peripheral's CONNECT event is not reported at
+the connection-complete event: `ble_gap_rx_conn_complete()` only starts a
+Read Remote Version exchange and `ble_gap_event_connect_call()` reports the
+connect when that completes, about three connection intervals later. A
+bonded iPhone starts encryption within one interval, so its ENC_CHANGE
+reaches the GATT backend BEFORE its CONNECT. The backend's `s_secured` flag
+followed ENC_CHANGE and the CONNECT handler cleared it: on the iPad's
+reconnect of 2026-11-08 14:11 the console read `pairing success` 92 ms
+before `client connected`, the subscribe went through on what the flag
+called a plain link (NimBLE's ATT server gates the CCCD on the real state,
+which was encrypted), the app's first writes were refused as unpaired
+(`data write rejected: link not securely paired`), the one-second security
+request went out on an encrypted link and iOS paired again (a second PIN
+prompt), and Car Scanner reported "connection failed" after 12 s. The RealDash
+report of 2026-11-07 ("four to five attempts at every app start" on an iPhone)
+is this.
+
+Since the fix: the CONNECT handler reads the link's live security state
+(`ble_gap_conn_find`, `sec_state.encrypted && authenticated`) instead of
+assuming a plain link, logs `link already encrypted with the bond at the
+connect` and raises the channels' SECURED event when it is; the security
+request timer checks the live state as well; `blm_gatt_secured()` re-syncs
+the flag from the live state whenever it reads false on a connected link.
+Proven on the iPad the same afternoon: the reconnect at 14:22 logged the
+same order, then the new line, the subscribe at +0.3 s, the first write at
++0.9 s, no rejection, no pairing request, no PIN.
+
 ## Session log lines (2026-11-08)
 
 A field report about an app ("RealDash takes four tries", "Car Scanner

@@ -137,11 +137,13 @@ static void phy_request(void)
 static esp_timer_handle_t s_secreq_timer;
 
 /* esp_timer's task: the host API takes its own lock, any task may call it */
+static bool link_is_secured(void); /* below: the link's live security state */
+
 static void secreq_fire(void *arg)
 {
     (void)arg;
 
-    if (!s_connected || s_secured || !blm_core_pairing_allowed())
+    if (!s_connected || s_secured || !blm_core_pairing_allowed() || link_is_secured())
     {
         return;
     }
@@ -156,6 +158,32 @@ static void secreq_fire(void *arg)
     {
         ESP_LOGW(TAG, "security request not sent (%d)", rc);
     }
+}
+
+/* The link's security state as NimBLE holds it: what its ATT server gates
+   every read, write and CCCD on. The s_secured flag follows the ENC_CHANGE
+   event, and with this NimBLE (IDF 6.1) that event can come BEFORE the
+   CONNECT event: for the peripheral role ble_gap_rx_conn_complete() only
+   starts a Read Remote Version exchange and CONNECT is reported when it
+   completes (ble_gap_event_connect_call), about three connection intervals
+   later; a bonded iPhone encrypts within one. On 2026-11-08 the iPad's
+   reconnect logged `pairing success` 92 ms before `client connected`, the
+   CONNECT handler then cleared the flag, the app's writes were refused as
+   unpaired although the link was encrypted, and the security request sent
+   on that encrypted link made iOS pair again (a second PIN prompt); the app
+   gave up. The flag is set from this state at the connect and re-synced
+   whenever it reads false. */
+static bool link_is_secured(void)
+{
+    struct ble_gap_conn_desc desc;
+
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE ||
+        ble_gap_conn_find(s_conn_handle, &desc) != 0)
+    {
+        return false;
+    }
+
+    return desc.sec_state.encrypted && desc.sec_state.authenticated;
 }
 
 /* the link's peer and window for the session log lines (ble_manager.c) */
@@ -221,7 +249,9 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
             s_conn_handle = event->connect.conn_handle;
             s_connected = true;
-            s_secured = false;
+            /* already encrypted with its bond? (a bonded iPhone gets there
+               before this event is reported, see link_is_secured) */
+            s_secured = link_is_secured();
             s_phy_tx = BLE_HCI_LE_PHY_1M; /* every link starts on 1M */
             s_phy_rx = BLE_HCI_LE_PHY_1M;
             blm_tx_on_link_reset();
@@ -271,7 +301,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                pairs or encrypts on its own at connect (a bonded Android, the
                simulator's bench central) is secured first and gets no
                request at all (see BLM_SECREQ_DELAY_US). */
-            if (blm_core_config()->security_request && blm_core_pairing_allowed())
+            if (!s_secured && blm_core_config()->security_request &&
+                blm_core_pairing_allowed())
             {
                 secreq_arm();
             }
@@ -283,6 +314,13 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             }
 
             blm_channel_on_link(BLE_MANAGER_CH_CONNECTED);
+
+            if (s_secured)
+            {
+                ESP_LOGI(TAG, "link already encrypted with the bond at the connect");
+                blm_core_on_secured();
+                blm_channel_on_link(BLE_MANAGER_CH_SECURED);
+            }
             break;
 
         case BLE_GAP_EVENT_DISCONNECT:
@@ -773,6 +811,11 @@ bool blm_gatt_connected(void)
 
 bool blm_gatt_secured(void)
 {
+    if (!s_secured && s_connected && link_is_secured())
+    {
+        s_secured = true; /* the ENC_CHANGE came before the CONNECT */
+    }
+
     return s_secured;
 }
 
