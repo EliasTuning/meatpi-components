@@ -386,3 +386,53 @@ bool wm_vpn_pause_applies(const bool *flags, size_t count, int idx)
 
     return flags[idx];
 }
+
+/* A network list as a sender's setting carries it (2026-11-08, the data
+ * destinations and the Home Assistant webhook: "active on these WiFi
+ * networks"): network names separated by commas, blanks around a comma
+ * ignored, each name compared whole and case-sensitively (an SSID is
+ * bytes, not words). An empty or missing list names nothing: the caller
+ * decides what that means (the senders read it as "every network"). A
+ * name that itself contains a comma cannot be listed: documented. */
+bool wm_ssid_list_has(const char *list, const char *ssid)
+{
+    if (list == NULL || ssid == NULL || ssid[0] == '\0')
+    {
+        return false;
+    }
+
+    size_t want = strlen(ssid);
+    const char *p = list;
+
+    while (*p != '\0')
+    {
+        const char *end = strchr(p, ',');
+        const char *stop = (end != NULL) ? end : p + strlen(p);
+        const char *a = p;
+        const char *b = stop;
+
+        while (a < b && *a == ' ')
+        {
+            a++;
+        }
+
+        while (b > a && b[-1] == ' ')
+        {
+            b--;
+        }
+
+        if ((size_t)(b - a) == want && memcmp(a, ssid, want) == 0)
+        {
+            return true;
+        }
+
+        if (end == NULL)
+        {
+            break;
+        }
+
+        p = end + 1;
+    }
+
+    return false;
+}

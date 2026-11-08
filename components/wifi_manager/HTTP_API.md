@@ -15,6 +15,7 @@ Live connection state (wraps the component's status getters; cheap).
 {
   "enabled": true,
   "sta_connected": true,
+  "ssid": "HomeWiFi",
   "ip": "10.42.0.62",
   "ap_started": true,
   "clients": 1,
@@ -23,6 +24,10 @@ Live connection state (wraps the component's status getters; cheap).
 }
 ```
 - `ip` is `""` while disconnected.
+- `ssid` (2026-11-08) is the network the station is on, `""` while
+  disconnected: what the senders' "active on" lists (the destinations, the
+  Home Assistant webhook) are compared against; the UI marks it in their
+  network dropdowns.
 - `ap_ip` (2026-07-08) is the AP's live gateway address: reflects the
   configurable `ap_ip` setting; omitted when the AP interface has no
   address (AP off).

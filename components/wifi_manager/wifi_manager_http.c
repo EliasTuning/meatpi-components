@@ -80,6 +80,16 @@ static esp_err_t wifi_status_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(resp, "sta_connected",
                           wifi_manager_is_sta_connected());
     cJSON_AddStringToObject(resp, "ip", ip);
+
+    /* the network the station is on (2026-11-08: the destinations and the
+       Home Assistant card name it beside their "Active on" choice); ""
+       while disconnected */
+    {
+        char ssid[33] = "";
+
+        (void)wifi_manager_get_sta_ssid(ssid, sizeof(ssid));
+        cJSON_AddStringToObject(resp, "ssid", ssid);
+    }
     cJSON_AddBoolToObject(resp, "ap_started", wifi_manager_is_ap_started());
     /* the factory AP password is public: the web UI warns and gates Submit */
     {

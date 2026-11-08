@@ -76,6 +76,24 @@ esp_err_t wifi_manager_get_sta_ip(char *buf, size_t buf_len)
     return wm_status_copy_ip(buf, buf_len);
 }
 
+bool wifi_manager_sta_on_network(const char *list)
+{
+    if (list == NULL || list[0] == '\0')
+    {
+        return true; /* no restriction */
+    }
+
+    char ssid[WM_SSID_LEN];
+
+    if (wifi_manager_get_sta_ssid(ssid, sizeof(ssid)) != ESP_OK ||
+        ssid[0] == '\0')
+    {
+        return false; /* no station session: on no WiFi network at all */
+    }
+
+    return wm_ssid_list_has(list, ssid);
+}
+
 uint16_t wifi_manager_get_ap_station_count(void)
 {
     return wm_status_ap_clients();

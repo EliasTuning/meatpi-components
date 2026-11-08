@@ -40,6 +40,7 @@ void test_trial_events_when_idle_or_done_are_not_ours(void);
 void test_trial_clock_wrap(void);
 void test_trial_channel_hint_kept_and_bounded(void);
 void test_vpn_pause_applies(void);
+void test_ssid_list_has(void);
 
 void app_main(void)
 {
@@ -80,5 +81,6 @@ void app_main(void)
     RUN_TEST(test_trial_clock_wrap);
     RUN_TEST(test_trial_channel_hint_kept_and_bounded);
     RUN_TEST(test_vpn_pause_applies);
+    RUN_TEST(test_ssid_list_has);
     UNITY_END();
 }

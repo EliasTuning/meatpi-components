@@ -454,3 +454,30 @@ void test_vpn_pause_applies(void)
     TEST_ASSERT_TRUE(wm_vpn_pause_applies(collapsed, 2, 1));
     TEST_ASSERT_FALSE(wm_vpn_pause_applies(collapsed, 2, 0));
 }
+
+/* the sender's network list (2026-11-08): whole names, commas, blanks */
+void test_ssid_list_has(void)
+{
+    /* nothing listed, nothing asked: never a match */
+    TEST_ASSERT_FALSE(wm_ssid_list_has("", "HomeWiFi"));
+    TEST_ASSERT_FALSE(wm_ssid_list_has(NULL, "HomeWiFi"));
+    TEST_ASSERT_FALSE(wm_ssid_list_has("HomeWiFi", ""));
+    TEST_ASSERT_FALSE(wm_ssid_list_has("HomeWiFi", NULL));
+
+    /* one name, several names, blanks around the commas */
+    TEST_ASSERT_TRUE(wm_ssid_list_has("HomeWiFi", "HomeWiFi"));
+    TEST_ASSERT_TRUE(wm_ssid_list_has("HomeWiFi,Garage", "Garage"));
+    TEST_ASSERT_TRUE(wm_ssid_list_has("HomeWiFi, Garage ,Office", "Garage"));
+    TEST_ASSERT_TRUE(wm_ssid_list_has(" HomeWiFi ", "HomeWiFi"));
+    TEST_ASSERT_FALSE(wm_ssid_list_has("HomeWiFi,Garage", "Office"));
+
+    /* whole names only: no prefix, no suffix, no case folding */
+    TEST_ASSERT_FALSE(wm_ssid_list_has("HomeWiFi", "Home"));
+    TEST_ASSERT_FALSE(wm_ssid_list_has("HomeWiFi", "HomeWiFi2"));
+    TEST_ASSERT_FALSE(wm_ssid_list_has("HomeWiFi,Garage", "homewifi"));
+
+    /* a name with a space inside keeps it; empty entries are skipped */
+    TEST_ASSERT_TRUE(wm_ssid_list_has("My Home, Garage", "My Home"));
+    TEST_ASSERT_TRUE(wm_ssid_list_has(",,Garage,", "Garage"));
+    TEST_ASSERT_FALSE(wm_ssid_list_has(",,", "Garage"));
+}

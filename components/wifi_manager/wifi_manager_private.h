@@ -178,6 +178,12 @@ bool wm_netmask_valid(uint32_t mask);
  *  @p flags / @p count the config's per-candidate flags and list length. */
 bool wm_vpn_pause_applies(const bool *flags, size_t count, int idx);
 
+/** A sender's network list (2026-11-08): true when @p ssid is one of the
+ *  comma-separated names in @p list (blanks around the commas ignored,
+ *  names compared whole). False for an empty list or name. Pure,
+ *  host-tested; the public wifi_manager_sta_on_network() wraps it. */
+bool wm_ssid_list_has(const char *list, const char *ssid);
+
 /** The DHCP/DNS host name to give the STA netif: @p configured (the
  *  `hostname` setting) when non-empty, else `wican_<device_id>` - the
  *  same name mdns_manager advertises as `<host>.local`, so a router's

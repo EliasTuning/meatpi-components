@@ -114,6 +114,16 @@ esp_err_t wifi_manager_get_sta_ssid(char *buf, size_t buf_len);
  *  tunnel down meanwhile; false without a station session. */
 bool wifi_manager_sta_vpn_pause(void);
 
+/** "Active on these networks" (2026-11-08: the data destinations and the
+ *  Home Assistant webhook): @p list = network names separated by commas
+ *  as the sender's `networks` setting stores them. An empty or NULL list
+ *  means no restriction: true. Otherwise true only while the station is
+ *  connected to one of the named networks (compared whole, blanks around
+ *  the commas ignored); false without a station session, so a device on
+ *  the ESPNetLink or USB Ethernet alone does not count as "on" a WiFi
+ *  network. Cheap: a status flag and one string compare per name. */
+bool wifi_manager_sta_on_network(const char *list);
+
 /** Number of stations currently associated to our AP. */
 uint16_t wifi_manager_get_ap_station_count(void);
 

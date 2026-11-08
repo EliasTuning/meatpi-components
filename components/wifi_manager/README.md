@@ -45,6 +45,7 @@ by the future button/input manager).
 | `wifi_manager_is_enabled/is_sta_connected/is_ap_started()` | Status flags (event-bit backed). |
 | `wifi_manager_sta_reconnect()` | Drop a STA association the caller knows is dead (AP rebooted inside the beacon-loss window); the normal selection path re-joins. |
 | `wifi_manager_get_sta_ip(buf,len)` | Current STA IPv4 ("" if none): caller buffer, no shared statics. |
+| `wifi_manager_sta_on_network(list)` | (2026-11-08) "Active on these networks" for the senders (data_destinations, ha_webhooks): `list` = station network names separated by commas as their `networks` setting stores them; an empty or NULL list = no restriction (true); else true only while the station is connected to one of the named networks (whole names, blanks around the commas ignored, case-sensitive), false without a station session. The pure matcher `wm_ssid_list_has()` (wifi_manager_select.c) is host-tested. |
 | `wifi_manager_get_ap_station_count()` | Associated AP clients. |
 | `wifi_manager_get_sta_dns(...)` | Main/backup DNS as strings ("N/A" fallback). |
 | `wifi_manager_get_event_group()` | Event group with `WIFI_MANAGER_BIT_*` for waiters. |
