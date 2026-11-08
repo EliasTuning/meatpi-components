@@ -1,7 +1,8 @@
 /**
  * @file script_engine_gpio.c
- * @brief Pin checks and the blocking pulse generator for digitalWrite /
- *        digitalPWM. The pulse loop runs from IRAM with interrupts off.
+ * @brief Pin checks for digitalWrite / digitalPWM and the RMT pulse sender.
+ *        digitalPWM is timed by the RMT peripheral: the CPU only loads the
+ *        symbols and waits, the hardware drives every edge.
  */
 #include "script_engine_gpio.h"
 
@@ -12,14 +13,9 @@
 #include "sdkconfig.h"
 
 #include "driver/gpio.h"
-#include "esp_attr.h"
-#include "esp_cpu.h"
+#include "driver/rmt_encoder.h"
+#include "driver/rmt_tx.h"
 #include "esp_log.h"
-#include "esp_task_wdt.h"
-#include "rom/ets_sys.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "soc/gpio_struct.h"
 
 static const char *TAG = "script_gpio";
 
@@ -79,41 +75,61 @@ const char *se_gpio_check(int pin, bool bus_running)
     return NULL;
 }
 
-bool se_pwm_span_ok(double on_ms, double off_ms, int rounds,
-                    uint32_t *on_us, uint32_t *off_us, const char **err)
+/* One RMT duration is 15 bits. The tick is picked so both levels fit:
+ * 0.1 us for levels up to 3.2 ms, else 1 us (32 ms), else 10 us (327 ms). */
+#define RMT_MAX_TICKS    32767U
+#define PWM_MAX_LEVEL_US 300000.0
+
+bool se_pwm_plan(double on_ms, double off_ms, int rounds,
+                 se_pwm_plan_t *plan, const char **err)
 {
-    if (rounds < 1)
+    static const uint32_t RES[] = { 10000000U, 1000000U, 100000U };
+
+    if (rounds < 1 || rounds > SE_PWM_MAX_ROUNDS)
     {
         *err = "rounds";
         return false;
     }
 
-    if (!(on_ms > 0.0) || !(off_ms > 0.0) || on_ms > 100.0 || off_ms > 100.0)
+    double on_us = on_ms * 1000.0;
+    double off_us = off_ms * 1000.0;
+
+    if (!(on_us >= 1.0) || !(off_us >= 1.0) ||
+        on_us > PWM_MAX_LEVEL_US || off_us > PWM_MAX_LEVEL_US)
     {
         *err = "time";
         return false;
     }
 
-    double on = on_ms * 1000.0;
-    double off = off_ms * 1000.0;
-
-    if (on < 1.0 || off < 1.0)
+    for (size_t i = 0; i < sizeof(RES) / sizeof(RES[0]); i++)
     {
-        *err = "time";
-        return false;
+        double on_t = on_us * RES[i] / 1e6;
+        double off_t = off_us * RES[i] / 1e6;
+
+        if (on_t + 0.5 > RMT_MAX_TICKS || off_t + 0.5 > RMT_MAX_TICKS)
+        {
+            continue;
+        }
+
+        uint64_t total_us = (uint64_t)rounds *
+                            (uint64_t)(on_us + off_us + 0.5);
+
+        if (total_us > SE_PWM_MAX_US)
+        {
+            *err = "cap";
+            return false;
+        }
+
+        plan->res_hz = RES[i];
+        plan->on_ticks = (uint32_t)(on_t + 0.5);
+        plan->off_ticks = (uint32_t)(off_t + 0.5);
+        plan->rounds = (uint32_t)rounds;
+        plan->total_us = (uint32_t)total_us;
+        return true;
     }
 
-    uint64_t total = (uint64_t)rounds * ((uint64_t)(on + 0.5) + (uint64_t)(off + 0.5));
-
-    if (total > 100000ULL)
-    {
-        *err = "cap";
-        return false;
-    }
-
-    *on_us = (uint32_t)(on + 0.5);
-    *off_us = (uint32_t)(off + 0.5);
-    return true;
+    *err = "time";
+    return false;
 }
 
 #define SE_GPIO_TOUCH_MAX 8
@@ -144,122 +160,8 @@ int se_gpio_touched_count(void)
 
 #ifdef ESP_PLATFORM
 
-static inline void IRAM_ATTR pin_level(int pin, int level)
-{
-    if (pin < 32)
-    {
-        if (level)
-        {
-            GPIO.out_w1ts = (1U << pin);
-        }
-        else
-        {
-            GPIO.out_w1tc = (1U << pin);
-        }
-    }
-    else
-    {
-        if (level)
-        {
-            GPIO.out1_w1ts.val = (1U << (pin - 32));
-        }
-        else
-        {
-            GPIO.out1_w1tc.val = (1U << (pin - 32));
-        }
-    }
-}
-
-static void IRAM_ATTR pulse_loop(int pin, uint32_t on_us, uint32_t off_us,
-                                 uint32_t rounds)
-{
-    uint32_t per_us = esp_rom_get_cpu_ticks_per_us();
-
-    if (per_us == 0)
-    {
-        per_us = 1;
-    }
-
-    uint32_t on_c = on_us * per_us;
-    uint32_t off_c = off_us * per_us;
-    uint32_t t = esp_cpu_get_cycle_count();
-
-    for (uint32_t i = 0; i < rounds; i++)
-    {
-        pin_level(pin, 1);
-        t += on_c;
-
-        while ((int32_t)(esp_cpu_get_cycle_count() - t) < 0)
-        {
-        }
-
-        pin_level(pin, 0);
-        t += off_c;
-
-        while ((int32_t)(esp_cpu_get_cycle_count() - t) < 0)
-        {
-        }
-    }
-}
-
-#if !defined(CONFIG_FREERTOS_UNICORE) && (CONFIG_FREERTOS_NUMBER_OF_CORES > 1)
-
-static volatile int s_hold;
-static TaskHandle_t s_halt_task;
-
-static void halt_task(void *arg)
-{
-    (void)arg;
-
-    for (;;)
-    {
-        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        portDISABLE_INTERRUPTS();
-        s_hold = 1;
-
-        while (s_hold == 1)
-        {
-        }
-
-        portENABLE_INTERRUPTS();
-    }
-}
-
-static void halt_other_core(void)
-{
-    if (s_halt_task == NULL)
-    {
-        int other = xPortGetCoreID() ^ 1;
-
-        if (xTaskCreatePinnedToCore(halt_task, "gpio_halt", 2048, NULL,
-                                    configMAX_PRIORITIES - 1, &s_halt_task,
-                                    other) != pdPASS)
-        {
-            ESP_LOGW(TAG, "other core not halted");
-            s_halt_task = NULL;
-            return;
-        }
-    }
-
-    s_hold = 0;
-    xTaskNotifyGive(s_halt_task);
-
-    while (s_hold != 1)
-    {
-    }
-}
-
-static void release_other_core(void)
-{
-    s_hold = 0;
-}
-
-#else
-
-static void halt_other_core(void) {}
-static void release_other_core(void) {}
-
-#endif
+#define RMT_BLOCK_SYMBOLS 48
+#define RMT_LOOP_MAX      1023
 
 void se_gpio_write(int pin, int level)
 {
@@ -267,20 +169,97 @@ void se_gpio_write(int pin, int level)
     gpio_set_level((gpio_num_t)pin, level ? 1 : 0);
 }
 
-void se_gpio_pwm(int pin, uint32_t on_us, uint32_t off_us, uint32_t rounds)
+static bool send_train(rmt_channel_handle_t ch, rmt_encoder_handle_t enc,
+                       const rmt_symbol_word_t *sym, size_t n, int loops,
+                       int wait_ms)
 {
+    rmt_transmit_config_t tx = { .loop_count = loops };
+
+    tx.flags.eot_level = 0;
+
+    if (rmt_transmit(ch, enc, sym, n * sizeof(rmt_symbol_word_t), &tx) != ESP_OK)
+    {
+        return false;
+    }
+
+    return rmt_tx_wait_all_done(ch, wait_ms) == ESP_OK;
+}
+
+bool se_gpio_pwm(int pin, const se_pwm_plan_t *plan)
+{
+    gpio_set_level((gpio_num_t)pin, 0);
     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)pin, 0);
 
-    (void)esp_task_wdt_reset();
-    halt_other_core();
-    portDISABLE_INTERRUPTS();
-    pulse_loop(pin, on_us, off_us, rounds);
-    portENABLE_INTERRUPTS();
-    release_other_core();
-    (void)esp_task_wdt_reset();
+    rmt_tx_channel_config_t cc =
+    {
+        .gpio_num = (gpio_num_t)pin,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = plan->res_hz,
+        .mem_block_symbols = RMT_BLOCK_SYMBOLS,
+        .trans_queue_depth = 1,
+    };
+    rmt_channel_handle_t ch = NULL;
 
+    if (rmt_new_tx_channel(&cc, &ch) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "no RMT channel");
+        return false;
+    }
+
+    rmt_copy_encoder_config_t ec = { 0 };
+    rmt_encoder_handle_t enc = NULL;
+    bool ok = false;
+
+    if (rmt_new_copy_encoder(&ec, &enc) == ESP_OK && rmt_enable(ch) == ESP_OK)
+    {
+        rmt_symbol_word_t sym[RMT_BLOCK_SYMBOLS];
+        int wait_ms = (int)(plan->total_us / 1000U) + 100;
+        uint32_t left = plan->rounds;
+
+        for (int i = 0; i < RMT_BLOCK_SYMBOLS; i++)
+        {
+            sym[i].level0 = 1;
+            sym[i].duration0 = plan->on_ticks;
+            sym[i].level1 = 0;
+            sym[i].duration1 = plan->off_ticks;
+        }
+
+        ok = true;
+
+        if (left <= RMT_LOOP_MAX)
+        {
+            /* one symbol, repeated by the hardware loop counter */
+            ok = send_train(ch, enc, sym, 1, (int)left, wait_ms);
+            left = 0;
+        }
+        else
+        {
+            /* a full block as one train; the loop counter repeats the block */
+            uint32_t loops = left / RMT_BLOCK_SYMBOLS;
+
+            ok = send_train(ch, enc, sym, RMT_BLOCK_SYMBOLS, (int)loops, wait_ms);
+            left -= loops * RMT_BLOCK_SYMBOLS;
+
+            if (ok && left > 0)
+            {
+                ok = send_train(ch, enc, sym, left, 1, wait_ms);
+            }
+        }
+
+        (void)rmt_disable(ch);
+    }
+
+    if (enc != NULL)
+    {
+        (void)rmt_del_encoder(enc);
+    }
+
+    (void)rmt_del_channel(ch);
+
+    /* the channel gave the pad back: drive it low ourselves */
     gpio_set_level((gpio_num_t)pin, 0);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
+    return ok;
 }
 
 void se_gpio_release_all(void)
@@ -305,12 +284,11 @@ void se_gpio_write(int pin, int level)
     (void)level;
 }
 
-void se_gpio_pwm(int pin, uint32_t on_us, uint32_t off_us, uint32_t rounds)
+bool se_gpio_pwm(int pin, const se_pwm_plan_t *plan)
 {
     (void)pin;
-    (void)on_us;
-    (void)off_us;
-    (void)rounds;
+    (void)plan;
+    return true;
 }
 
 void se_gpio_release_all(void)

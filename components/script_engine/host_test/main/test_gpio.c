@@ -28,26 +28,46 @@ void test_gpio_can_alias_needs_stop(void)
 
 void test_pwm_span(void)
 {
-    uint32_t on = 0;
-    uint32_t off = 0;
+    se_pwm_plan_t p;
     const char *err = NULL;
 
-    TEST_ASSERT_TRUE(se_pwm_span_ok(1.6, 0.4, 1, &on, &off, &err));
-    TEST_ASSERT_EQUAL_UINT32(1600, on);
-    TEST_ASSERT_EQUAL_UINT32(400, off);
+    /* 1.6 / 0.4 ms: 0.1 us ticks */
+    TEST_ASSERT_TRUE(se_pwm_plan(1.6, 0.4, 1, &p, &err));
+    TEST_ASSERT_EQUAL_UINT32(10000000, p.res_hz);
+    TEST_ASSERT_EQUAL_UINT32(16000, p.on_ticks);
+    TEST_ASSERT_EQUAL_UINT32(4000, p.off_ticks);
+    TEST_ASSERT_EQUAL_UINT32(2000, p.total_us);
 
-    /* 50 * (1.6 + 0.4) ms = 100 ms, the cap */
-    TEST_ASSERT_TRUE(se_pwm_span_ok(1.6, 0.4, 50, &on, &off, &err));
-    TEST_ASSERT_FALSE(se_pwm_span_ok(1.6, 0.4, 51, &on, &off, &err));
-    TEST_ASSERT_EQUAL_STRING("cap", err);
+    /* a level above 3.2 ms moves to 1 us ticks */
+    TEST_ASSERT_TRUE(se_pwm_plan(5.0, 1.0, 1, &p, &err));
+    TEST_ASSERT_EQUAL_UINT32(1000000, p.res_hz);
+    TEST_ASSERT_EQUAL_UINT32(5000, p.on_ticks);
+    TEST_ASSERT_EQUAL_UINT32(1000, p.off_ticks);
 
-    TEST_ASSERT_FALSE(se_pwm_span_ok(1.6, 0.4, 0, &on, &off, &err));
-    TEST_ASSERT_EQUAL_STRING("rounds", err);
+    /* above 32 ms: 10 us ticks */
+    TEST_ASSERT_TRUE(se_pwm_plan(40.0, 1.0, 1, &p, &err));
+    TEST_ASSERT_EQUAL_UINT32(100000, p.res_hz);
+    TEST_ASSERT_EQUAL_UINT32(4000, p.on_ticks);
+    TEST_ASSERT_EQUAL_UINT32(100, p.off_ticks);
 
-    TEST_ASSERT_FALSE(se_pwm_span_ok(0, 0.4, 1, &on, &off, &err));
+    TEST_ASSERT_FALSE(se_pwm_plan(400.0, 1.0, 1, &p, &err));
     TEST_ASSERT_EQUAL_STRING("time", err);
 
-    TEST_ASSERT_FALSE(se_pwm_span_ok(0.0001, 0.4, 1, &on, &off, &err));
+    /* 500 * (1.6 + 0.4) ms = 1 s, the cap */
+    TEST_ASSERT_TRUE(se_pwm_plan(1.6, 0.4, 500, &p, &err));
+    TEST_ASSERT_FALSE(se_pwm_plan(1.6, 0.4, 501, &p, &err));
+    TEST_ASSERT_EQUAL_STRING("cap", err);
+
+    TEST_ASSERT_FALSE(se_pwm_plan(1.6, 0.4, 0, &p, &err));
+    TEST_ASSERT_EQUAL_STRING("rounds", err);
+    TEST_ASSERT_FALSE(se_pwm_plan(0.002, 0.002, SE_PWM_MAX_ROUNDS + 1, &p, &err));
+    TEST_ASSERT_EQUAL_STRING("rounds", err);
+    TEST_ASSERT_TRUE(se_pwm_plan(0.002, 0.002, SE_PWM_MAX_ROUNDS, &p, &err));
+
+    TEST_ASSERT_FALSE(se_pwm_plan(0, 0.4, 1, &p, &err));
+    TEST_ASSERT_EQUAL_STRING("time", err);
+
+    TEST_ASSERT_FALSE(se_pwm_plan(0.0001, 0.4, 1, &p, &err));
     TEST_ASSERT_EQUAL_STRING("time", err);
 }
 

@@ -18,5 +18,5 @@ idf_component_register(
                   settings_manager log_manager esp_timer esp_mm
                   http_server_manager esp_http_server espressif__cjson
                   cmdline_manager console
-                  esp_driver_gpio esp_hw_support esp_system
+                  esp_driver_gpio esp_driver_rmt esp_hw_support esp_system
 )

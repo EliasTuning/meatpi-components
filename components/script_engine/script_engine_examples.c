@@ -262,7 +262,7 @@ static const char CAN_FRAME[] =
 static const char GPIO_PULSE[] =
     "# Park the CAN controller, pulse its TX pin, then the script end\n"
     "# starts the bus again. Times are milliseconds (1.6 and 0.4). The\n"
-    "# whole pulse must stay within 100 ms. CAN_RX works the same way.\n"
+    "# whole pulse must stay within 1 s. CAN_RX works the same way.\n"
     "can_stop()\n"
     "digitalPWM(CAN_TX, 1.6, 0.4, 10)\n"
     "digitalWrite(CAN_TX, LOW)\n"

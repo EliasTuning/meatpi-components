@@ -3,6 +3,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/** One digitalPWM() call may run up to one second. */
+#define SE_PWM_MAX_US     1000000U
+/** 48 symbols x 1023 hardware loops (the S3 RMT loop counter limit). */
+#define SE_PWM_MAX_ROUNDS 49104
+
 /** Configured CAN controller pins (Kconfig on device, GPIO2 / GPIO1 on host). */
 int se_can_tx_gpio(void);
 int se_can_rx_gpio(void);
@@ -16,16 +21,31 @@ bool se_gpio_denied(int pin);
  */
 const char *se_gpio_check(int pin, bool bus_running);
 
+/** The RMT timing of one digitalPWM() call. */
+typedef struct
+{
+    uint32_t res_hz;     /**< RMT tick rate: 10 MHz, 1 MHz or 100 kHz.   */
+    uint32_t on_ticks;   /**< high time in ticks (1..32767).              */
+    uint32_t off_ticks;  /**< low time in ticks (1..32767).               */
+    uint32_t rounds;
+    uint32_t total_us;   /**< rounds * (on + off), for the wait timeout.  */
+} se_pwm_plan_t;
+
 /**
- * on/off are milliseconds. Fills microseconds. false sets @p err to
- * "rounds", "time" or "cap" (total longer than 100 ms).
+ * on/off are milliseconds. Picks the finest tick that fits both levels in
+ * the 15-bit RMT duration (0.1 us up to 3.2 ms, 1 us up to 32 ms, 10 us up
+ * to 300 ms). false sets @p err to "rounds", "time" or "cap" (total longer
+ * than one second).
  */
-bool se_pwm_span_ok(double on_ms, double off_ms, int rounds,
-                    uint32_t *on_us, uint32_t *off_us, const char **err);
+bool se_pwm_plan(double on_ms, double off_ms, int rounds,
+                 se_pwm_plan_t *plan, const char **err);
 
 void se_gpio_touch(int pin);
 void se_gpio_release_all(void);
 int  se_gpio_touched_count(void);
 
 void se_gpio_write(int pin, int level);
-void se_gpio_pwm(int pin, uint32_t on_us, uint32_t off_us, uint32_t rounds);
+
+/** Blocks until the RMT has sent the pulses. false: no RMT channel free or
+ *  the transmission failed. */
+bool se_gpio_pwm(int pin, const se_pwm_plan_t *plan);

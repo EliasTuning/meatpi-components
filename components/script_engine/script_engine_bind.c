@@ -505,15 +505,14 @@ static int b_digital_pwm(bvm *vm)
         rounds = (int)be_toint(vm, 4);
     }
 
-    uint32_t on_us = 0;
-    uint32_t off_us = 0;
+    se_pwm_plan_t plan;
     const char *err = NULL;
 
-    if (!se_pwm_span_ok(on_ms, off_ms, rounds, &on_us, &off_us, &err))
+    if (!se_pwm_plan(on_ms, off_ms, rounds, &plan, &err))
     {
         be_raise(vm, "gpio_error",
                  err != NULL && strcmp(err, "cap") == 0
-                     ? "digitalPWM longer than 100 ms"
+                     ? "digitalPWM longer than 1 s"
                      : "digitalPWM times or rounds");
     }
 
@@ -525,7 +524,12 @@ static int b_digital_pwm(bvm *vm)
     }
 
     se_gpio_touch(pin);
-    se_gpio_pwm(pin, on_us, off_us, (uint32_t)rounds);
+
+    if (!se_gpio_pwm(pin, &plan))
+    {
+        be_raise(vm, "gpio_error", "no RMT channel");
+    }
+
     be_return_nil(vm);
 }
 

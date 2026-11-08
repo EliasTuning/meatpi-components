@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include "script_engine_doc.h"
+#include "script_engine_gpio.h"
 
 /* ---- groups (the reference's sections, in display order) ---------------- */
 
@@ -150,10 +151,11 @@ static const se_bind_doc_t BIND_DOCS[] =
       "need can_stop() first. Pins return to inputs when the script ends.",
       "digitalWrite(CAN_TX, HIGH)" },
     { "digitalPWM", "digitalPWM(pin, ontime_ms, offtime_ms[, rounds])", "gpio", "nil",
-      "Block the device and pulse pin: ontime_ms high, offtime_ms low, rounds times "
-      "(default 1). Times are milliseconds and may be fractional (1.6, 0.4); the "
-      "shortest step is 1 us. The whole pulse must be 100 ms or less. Same pins as "
-      "digitalWrite(), including CAN_TX and CAN_RX after can_stop().",
+      "Pulse pin: ontime_ms high, offtime_ms low, rounds times (default 1). The "
+      "RMT peripheral times every edge in hardware (0.1 us steps up to 3.2 ms, "
+      "1 us up to 32 ms), so 1.6 and 0.4 are exact. The call waits until it is "
+      "done; the whole pulse must be 1 s or less (at most 49104 rounds). Same pins "
+      "as digitalWrite(), including CAN_TX and CAN_RX after can_stop().",
       "digitalPWM(CAN_TX, 1.6, 0.4, 10)" },
 
     { "emit", "emit(source, name, key, value)", "events", "true when queued",
@@ -281,8 +283,10 @@ static const struct
       "That GPIO is flash, PSRAM, USB, a strapping pin, or the CAN standby pin." },
     { "CAN pin in use",
       "can_stop() before digitalWrite() or digitalPWM() on CAN_TX or CAN_RX." },
-    { "digitalPWM longer than 100 ms",
-      "rounds * (ontime_ms + offtime_ms) must be 100 ms or less." },
+    { "digitalPWM longer than 1 s",
+      "rounds * (ontime_ms + offtime_ms) must be 1 s or less." },
+    { "no RMT channel",
+      "All RMT transmitters are in use by another feature; try again later." },
     { "CAN bus is stopped",
       "can_start() before can_tx() or can_rx(), and CAN must be enabled in settings." },
     { "attribute_error",
