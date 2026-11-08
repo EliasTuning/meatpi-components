@@ -48,6 +48,7 @@
 
 #include "dev_status_manager.h"
 #include "http_client_manager.h"
+#include "wifi_manager.h" /* "active on" (2026-11-08) */
 
 #include "ha_webhooks_private.h"
 
@@ -271,6 +272,29 @@ static void poster_task(void *arg)
             dev_status_manager_wait_any(DEV_STATUS_NETWORK_CONNECTED_MASK,
                                         pdMS_TO_TICKS(3000));
             continue;
+        }
+
+        /* "active on these networks" (2026-11-08): the pushes wait while
+           the station is not on one of the named WiFi networks (or on no
+           WiFi at all); one I line per transition, nothing counted as a
+           failure, the interval not consumed */
+        static bool s_net_paused;
+
+        if (!wifi_manager_sta_on_network(c.networks))
+        {
+            if (!s_net_paused)
+            {
+                ESP_LOGI(TAG, "not on a selected network: pushes wait");
+                s_net_paused = true;
+            }
+
+            continue;
+        }
+
+        if (s_net_paused)
+        {
+            ESP_LOGI(TAG, "on a selected network again: pushes resume");
+            s_net_paused = false;
         }
 
         /* NO autopid gate here: status (+config) goes out whenever the

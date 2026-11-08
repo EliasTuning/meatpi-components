@@ -39,6 +39,7 @@ extern "C" {
 
 #define HW_URL_LEN       192   /* legacy cap */
 #define HW_CERTSET_LEN   32
+#define HW_NETS_LEN      200   /* "active on" list (2026-11-08) */
 #define HW_STATUS_LEN    16
 #define HW_ERR_LEN       160
 #define HW_TS_LEN        32
@@ -56,6 +57,9 @@ typedef struct
                                         integration >= 2026-07-10)        */
     bool     manual_override;        /* pin URL against HA auto-push       */
     char     cert_set[HW_CERTSET_LEN]; /* cert_manager set; "" = bundle   */
+    char     networks[HW_NETS_LEN];  /* "active on" (2026-11-08): "" =
+                                        every network, else the WiFi
+                                        networks' names, comma-separated  */
 } hw_config_t;
 
 /** Runtime stats: RAM only, never persisted (poster has no flash). */

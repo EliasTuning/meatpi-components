@@ -146,6 +146,7 @@ static cJSON *config_to_json(const hw_config_t *c)
     /* defaults if nothing stored yet */
     const char *data_mode = c->data_mode_full ? "full" : "changed";
     const char *cert_set = c->cert_set;
+    const char *networks = c->networks;
     bool gzip = c->gzip;
     bool cli = true;
     cJSON *cur = NULL;
@@ -154,6 +155,7 @@ static cJSON *config_to_json(const hw_config_t *c)
     {
         const cJSON *dm = cJSON_GetObjectItemCaseSensitive(cur, "data_mode");
         const cJSON *cs = cJSON_GetObjectItemCaseSensitive(cur, "cert_set");
+        const cJSON *nw = cJSON_GetObjectItemCaseSensitive(cur, "networks");
         const cJSON *gz = cJSON_GetObjectItemCaseSensitive(cur, "gzip");
         const cJSON *cl = cJSON_GetObjectItemCaseSensitive(cur, "cli");
 
@@ -165,6 +167,14 @@ static cJSON *config_to_json(const hw_config_t *c)
         if (cJSON_IsString(cs) && cs->valuestring != NULL)
         {
             cert_set = cs->valuestring;
+        }
+
+        /* the stored "active on" list, pending restart or not: a push
+           that lands between the user's save and the restart must not
+           write the older live value over it (2026-11-08) */
+        if (cJSON_IsString(nw) && nw->valuestring != NULL)
+        {
+            networks = nw->valuestring;
         }
 
         gzip = cJSON_IsTrue(gz);
@@ -180,6 +190,7 @@ static cJSON *config_to_json(const hw_config_t *c)
     /* preserved user settings */
     cJSON_AddStringToObject(o, "data_mode", data_mode);
     cJSON_AddStringToObject(o, "cert_set", cert_set);
+    cJSON_AddStringToObject(o, "networks", networks);
     cJSON_AddBoolToObject(o, "gzip", gzip);
     cJSON_AddBoolToObject(o, "cli", cli);
 

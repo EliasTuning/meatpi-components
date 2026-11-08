@@ -49,6 +49,10 @@ static const settings_field_t HW_FIELDS[] =
         than 2026-07-10 can't inflate)                                    */
     SETTINGS_BOOL("manual_override",   false),
     SETTINGS_STR ("cert_set",          HW_CERTSET_LEN - 1, ""),
+    /* "active on" (2026-11-08): "" = every network, else the WiFi networks
+       (Settings > WiFi) the pushes go out on, names separated by commas;
+       an added key with a default, no version bump */
+    SETTINGS_STR ("networks",          HW_NETS_LEN - 1, ""),
     SETTINGS_BOOL("cli",               true),
 };
 /* clang-format on */
@@ -87,6 +91,7 @@ static void config_from_json(const cJSON *s, hw_config_t *c)
     c->manual_override = cJSON_IsTrue(
         cJSON_GetObjectItemCaseSensitive(s, "manual_override"));
     copy_str(c->cert_set, sizeof(c->cert_set), s, "cert_set");
+    copy_str(c->networks, sizeof(c->networks), s, "networks");
 }
 
 /** v1 -> v2: the `gzip` field was added (default off). */

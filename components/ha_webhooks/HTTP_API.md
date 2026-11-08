@@ -45,7 +45,8 @@ Current config + runtime stats.
   "url": "http://ha:8123/api/webhook/<id>",
   "urls": ["…", "…"],
   "enabled": true, "interval": 15, "manual_override": false,
-  "data_mode": "changed",
+  "data_mode": "changed", "gzip": false,
+  "networks": "", "on_network": true,
   "status": "ok", "last_post": "2026-07-09T12:00:00Z", "retries": 0,
   "success_count": 42, "fail_count": 1,
   "last_error": "", "last_error_time": ""
@@ -150,9 +151,21 @@ failures retry next cycle with `retries`/`last_error` tracked.
 
 `enabled`, `url`, `url2`, `interval_s` (1..3600), `data_mode`
 (changed/full), `gzip` (v2, default false), `manual_override`,
-`cert_set`, `cli`. Reboot-to-apply EXCEPT the URL/enable, which the
+`cert_set`, `networks`, `cli`. Reboot-to-apply EXCEPT the URL/enable, which the
 discovery push (`POST /api/webhook`) applies live. Passwords: none.
 v1→v2 migration adds `gzip:false`.
+
+`networks` (2026-11-08, "active on", an added key with a default: no
+version bump): `""` = every network, else the names of station networks
+(Settings > WiFi: the main one and the backups) separated by commas,
+blanks around the commas ignored, names compared whole. The pushes wait
+while the station is not on one of them, or is on no WiFi at all (the
+ESPNetLink or USB Ethernet alone): nothing is counted as a failure, the
+interval is not consumed, one I line per transition. `GET /api/webhook`
+carries `networks` and `on_network` (true with an empty list). A
+registration push keeps the stored list (a push between the user's save
+and the restart does not write the older live value over it). A network
+name that itself contains a comma cannot be listed.
 
 ## The rest of the Level-1/2 contract (owned elsewhere)
 

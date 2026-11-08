@@ -89,6 +89,17 @@ identical on every product built from the V6 core.
   autopid sets compress better.
 - **TLS**: built-in bundle by default; `cert_set` for a private-cert HA;
   raw-IP HTTPS auto-skips CN.
+- **Active on (2026-11-08, Ali).** `networks` names the station networks
+  the pushes go out on (`""` = every network, else names separated by
+  commas); the poster asks `wifi_manager_sta_on_network()` before every
+  attempt and waits while the station is on another network or on no WiFi
+  at all, nothing counted as a failure, one I line per transition (`not on
+  a selected network: pushes wait` / `on a selected network again`).
+  `GET /api/webhook` and the `webhook` command show the list and whether
+  the station is on one of its networks now; the UI's card has the
+  dropdown with check boxes beside the other settings and its stats line
+  reads `Waiting for <names>` while the pushes wait. The registration push
+  keeps the stored list.
 - **Not the generic path.** For routing individual PIDs to arbitrary
   endpoints, use `event_manager` rules (`autopid.param → http.post`). This
   component is the fixed, always-on HA telemetry channel: different shape,

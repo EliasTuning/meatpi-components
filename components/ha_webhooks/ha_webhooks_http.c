@@ -33,6 +33,7 @@
 
 #include "cJSON.h"
 #include "http_server_manager.h"
+#include "wifi_manager.h" /* "active on" (2026-11-08) */
 
 #include "ha_webhooks_private.h"
 
@@ -96,6 +97,11 @@ static cJSON *response_obj(void)
     cJSON_AddStringToObject(o, "data_mode",
                             c.data_mode_full ? "full" : "changed");
     cJSON_AddBoolToObject(o, "gzip", c.gzip);
+    /* "active on" (2026-11-08): the list and whether the station is on
+       one of its networks now (true with an empty list) */
+    cJSON_AddStringToObject(o, "networks", c.networks);
+    cJSON_AddBoolToObject(o, "on_network",
+                          wifi_manager_sta_on_network(c.networks));
     cJSON_AddStringToObject(o, "status",
                             s.status[0] ? s.status : "disabled");
     cJSON_AddStringToObject(o, "last_post", s.last_post);

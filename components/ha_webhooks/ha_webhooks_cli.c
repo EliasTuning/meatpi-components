@@ -27,6 +27,7 @@
  *        the `cli` setting (§6b). main wires nothing.
  */
 #include "cmdline_manager.h"
+#include "wifi_manager.h" /* "active on" (2026-11-08) */
 
 #include "ha_webhooks.h"
 #include "ha_webhooks_private.h"
@@ -59,6 +60,9 @@ static int cmd_webhook(int argc, char **argv)
     cmdline_printf("data_mode: %s\n", c.data_mode_full ? "full" : "changed");
     cmdline_printf("override:  %s\n", c.manual_override ? "yes" : "no");
     cmdline_printf("cert_set:  %s\n", c.cert_set[0] ? c.cert_set : "(bundle)");
+    cmdline_printf("networks:  %s%s\n", c.networks[0] ? c.networks : "(all)",
+                   wifi_manager_sta_on_network(c.networks)
+                       ? "" : "  (not on one now: pushes wait)");
     cmdline_printf("status:    %s\n", s.status[0] ? s.status : "disabled");
     cmdline_printf("last_post: %s\n", s.last_post[0] ? s.last_post : "-");
     cmdline_printf("success:   %u  fail: %u  retries: %u\n",
