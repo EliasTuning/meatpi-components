@@ -50,6 +50,7 @@ extern "C" {
 #define DD_SMALL_LEN    64    /* header/query name, basic user/pass, model  */
 #define DD_QUERY_LEN    256   /* extra "k=v&k2=v2" string                   */
 #define DD_CERTSET_LEN  25
+#define DD_NETS_LEN     200   /* "active on" list: six names of 32 + commas */
 #define DD_ERR_LEN      96
 #define DD_TS_LEN       32
 
@@ -105,6 +106,10 @@ typedef struct
     char      car_model[DD_SMALL_LEN];      /* ABRP car_model               */
     bool      retain;                       /* mqtt                         */
     bool      full_first;                   /* http(s): config+status once  */
+    char      networks[DD_NETS_LEN];        /* "active on" (2026-11-08):
+                                               "" = every network, else the
+                                               WiFi networks' names, comma-
+                                               separated                    */
 } dd_dest_t;
 
 /** The applied table. */
@@ -121,6 +126,8 @@ typedef struct
     uint32_t success;
     uint32_t fail;
     uint32_t skipped_offline;   /* due laps skipped: link/broker down     */
+    uint32_t skipped_network;   /* due laps skipped: not on a selected
+                                   network (2026-11-08)                   */
     uint32_t consec_failures;
     uint32_t backoff_ms;        /* 0 = none                               */
     int64_t  next_due_us;       /* 0 = due now                            */
@@ -188,6 +195,12 @@ void dd_sched_after(dd_state_t *st, uint32_t period_s, bool ok,
 
 /** Book a lap skipped because the link/broker was down (no backoff). */
 void dd_sched_skip(dd_state_t *st, uint32_t period_s, int64_t now_us);
+
+/** Book a lap skipped because the station is not on one of the row's
+ *  networks (2026-11-08): `skipped_network`, the next lap a period away,
+ *  no backoff, like a down link. */
+void dd_sched_skip_network(dd_state_t *st, uint32_t period_s,
+                           int64_t now_us);
 
 /** RFC 3986 percent-encoding (unreserved chars pass). false when @p out
  *  is too small. */

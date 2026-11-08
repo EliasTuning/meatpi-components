@@ -439,6 +439,40 @@ void setUp(void)
 {
 }
 
+/* "active on these networks" (2026-11-08): the list is carried as typed
+   (wifi_manager matches it), absent = "" = every network */
+static void test_parse_networks(void)
+{
+    TEST_ASSERT_EQUAL(ESP_OK, parse("{\"name\":\"d1\"}"));
+    TEST_ASSERT_EQUAL_STRING("", s_d.networks);
+    TEST_ASSERT_EQUAL(ESP_OK, parse("{\"name\":\"d2\",\"type\":\"http\","
+                                    "\"url\":\"http://h/p\","
+                                    "\"networks\":\"HomeWiFi, Garage\"}"));
+    TEST_ASSERT_EQUAL_STRING("HomeWiFi, Garage", s_d.networks);
+    /* a non-string is ignored, like every other optional key */
+    TEST_ASSERT_EQUAL(ESP_OK, parse("{\"name\":\"d3\",\"networks\":7}"));
+    TEST_ASSERT_EQUAL_STRING("", s_d.networks);
+}
+
+/* a lap skipped for the network: its own counter, the next lap a period
+   away, no backoff and no failure, like a down link */
+static void test_sched_skip_network_counts_no_backoff(void)
+{
+    dd_state_t st;
+
+    memset(&st, 0, sizeof(st));
+    dd_sched_skip_network(&st, 5, 1000000);
+    dd_sched_skip_network(&st, 5, 6000000);
+    TEST_ASSERT_EQUAL_UINT32(2, st.skipped_network);
+    TEST_ASSERT_EQUAL_UINT32(0, st.skipped_offline);
+    TEST_ASSERT_EQUAL_UINT32(0, st.fail);
+    TEST_ASSERT_EQUAL_UINT32(0, st.consec_failures);
+    TEST_ASSERT_EQUAL_UINT32(0, st.backoff_ms);
+    TEST_ASSERT_EQUAL_INT64(11000000, st.next_due_us);
+    TEST_ASSERT_FALSE(dd_sched_due(&st, 10999999));
+    TEST_ASSERT_TRUE(dd_sched_due(&st, 11000000));
+}
+
 void tearDown(void)
 {
 }
@@ -447,6 +481,8 @@ void app_main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_parse_defaults_mqtt);
+    RUN_TEST(test_parse_networks);
+    RUN_TEST(test_sched_skip_network_counts_no_backoff);
     RUN_TEST(test_parse_http_scheme_prepended);
     RUN_TEST(test_parse_rejections);
     RUN_TEST(test_parse_abrp_defaults);

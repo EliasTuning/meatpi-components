@@ -60,6 +60,7 @@
 #include "autopid.h"
 #include "log_manager.h"
 #include "mqtt_manager.h"
+#include "wifi_manager.h" /* "active on" (2026-11-08) */
 
 #include "data_destinations_private.h"
 
@@ -94,6 +95,8 @@ static dd_dest_t s_work EXT_RAM_BSS_ATTR;
 
 /* logged-state per destination for the offline transitions */
 static bool s_offline_logged[DD_MAX];
+/* ... and for the "not on a selected network" ones (2026-11-08) */
+static bool s_network_logged[DD_MAX];
 
 /* the device-wide ABRP pacer (poster task only): the start of the last
    ABRP request, the requests (rows and Tests alike) that waited for the
@@ -248,6 +251,43 @@ static void run_one(size_t i, const dd_dest_t *d, bool forced,
     {
         ESP_LOGI(TAG, "%s: link back", d->name);
         s_offline_logged[i] = false;
+    }
+
+    /* "active on these networks" (2026-11-08): a row restricted to named
+       WiFi networks waits while the station is on another one, or on no
+       WiFi at all (the ESPNetLink or USB Ethernet alone): a skipped lap
+       like a down link, never a failure, one I line per transition */
+    if (!wifi_manager_sta_on_network(d->networks))
+    {
+        if (forced && res != NULL)
+        {
+            res->ok = false;
+            snprintf(res->error, sizeof(res->error),
+                     "not on a selected network");
+        }
+
+        dd_sched_skip_network(&st, d->period_s, now);
+
+        if (!s_network_logged[i])
+        {
+            char ssid[33] = "";
+
+            (void)wifi_manager_get_sta_ssid(ssid, sizeof(ssid));
+            ESP_LOGI(TAG, "%s: not on a selected network (%s) - waiting",
+                     d->name, ssid[0] != '\0' ? ssid : "no WiFi");
+            s_network_logged[i] = true;
+        }
+
+        dd_config_lock();
+        s_state[i] = st;
+        dd_config_unlock();
+        return;
+    }
+
+    if (s_network_logged[i])
+    {
+        ESP_LOGI(TAG, "%s: on a selected network again", d->name);
+        s_network_logged[i] = false;
     }
 
     if (d->type == DD_TYPE_ABRP)
@@ -451,6 +491,15 @@ esp_err_t data_destinations_status(cJSON **out)
                                             DEV_STATUS_NETWORK_CONNECTED_MASK));
     cJSON_AddBoolToObject(o, "mqtt", mqtt_manager_connected());
 
+    /* the station's network (2026-11-08): what "active on" is compared
+       against; "" without a station session */
+    {
+        char ssid[33] = "";
+
+        (void)wifi_manager_get_sta_ssid(ssid, sizeof(ssid));
+        cJSON_AddStringToObject(o, "ssid", ssid);
+    }
+
     cJSON *pace = cJSON_AddObjectToObject(o, "abrp_pacer");
 
     if (pace != NULL)
@@ -493,10 +542,15 @@ esp_err_t data_destinations_status(cJSON **out)
         cJSON_AddBoolToObject(e, "has_token", d->auth_token[0] != '\0');
         cJSON_AddBoolToObject(e, "has_api_key", d->api_key[0] != '\0');
         cJSON_AddStringToObject(e, "cert_set", d->cert_set);
+        cJSON_AddStringToObject(e, "networks", d->networks);
+        cJSON_AddBoolToObject(e, "on_network",
+                              wifi_manager_sta_on_network(d->networks));
         cJSON_AddNumberToObject(e, "success", (double)st->success);
         cJSON_AddNumberToObject(e, "fail", (double)st->fail);
         cJSON_AddNumberToObject(e, "skipped_offline",
                                 (double)st->skipped_offline);
+        cJSON_AddNumberToObject(e, "skipped_network",
+                                (double)st->skipped_network);
         cJSON_AddNumberToObject(e, "consecutive_failures",
                                 (double)st->consec_failures);
         cJSON_AddNumberToObject(e, "backoff_s",

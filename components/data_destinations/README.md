@@ -45,6 +45,20 @@ stays with the rules engine (`event_manager` `timer.tick` →
   logs ONE `W` per outage (`<name>: no network - waiting`) + one `I`
   when the link is back, so a car out of WiFi range does not fill the
   log.
+- **Active on (2026-11-08, Ali: "let the user select on which WiFi SSID
+  the destination is active").** A row with a `networks` list sends only
+  while the station is on one of the named networks
+  (`wifi_manager_sta_on_network()`, names compared whole, blanks around the
+  commas ignored); on another network, or on no WiFi at all (the ESPNetLink
+  or USB Ethernet alone), the lap is a **skipped lap** of its own
+  (`skipped_network`), never a failure, never a backoff, one I line per
+  transition (`<name>: not on a selected network (<ssid>) - waiting` /
+  `on a selected network again`); a Test answers `not on a selected
+  network`. The status document carries the station's `ssid` and the
+  row's `networks` / `on_network`; the UI's row chip reads `Waiting for
+  <names>` and the options panel's dropdown with check boxes lists the
+  station networks under Settings > WiFi (a stored name that is not
+  configured any more is listed struck through).
 - **Backoff (pure, host-tested).** A delivery that fails (transport
   error, non-2xx, ABRP `status != ok`) counts in `fail` +
   `consecutive_failures`; from the 3rd consecutive failure the interval
@@ -155,6 +169,7 @@ make the order non-critical).
 | `car_model` | ≤ 63 | `""` | ABRP `car_model` id |
 | `retain` | bool | true | MQTT retained publish |
 | `full_first` | bool | true | HTTP(S): the config+status push once |
+| `networks` | ≤ 199 | `""` | "active on" (2026-11-08): `""` = every network, else the station networks' names separated by commas (the row sends only while the station is on one of them; an added key with a default, no version bump) |
 
 `on_validate` = the pure parser: an ENABLED entry without a URL, an
 `https` entry with an `http://` URL, ABRP without `auth_token`, bearer/
@@ -189,8 +204,14 @@ counters are RAM only.
 
 ## Testing
 
-- Host: `.\test.ps1 host data_destinations`, 20 Unity tests
-  (`host_test/README.md`).
+- Host: `.\test.ps1 host data_destinations`, 22 Unity tests
+  (`host_test/README.md`; the `networks` parse and the network skip since
+  2026-11-08).
+- Bench (the networks, 2026-11-08): `.\test.ps1 destnets`
+  (`tools/testbench/system/dest_networks_bench.py`, `DEST NETWORKS PASS`):
+  a row and the Home Assistant webhook restricted to another network wait
+  (counted, nothing at the receiver, the ring's line), restricted to the
+  station's own network they deliver; five planned restarts.
 - Bench: `python tools/testbench/system/data_destinations_bench.py`
   (`DATA DEST PASS`), MQTT / HTTP / HTTPS with a cert set (and without:
   the bundle must refuse the bench CA) / mutual TLS / a mock ABRP with

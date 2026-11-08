@@ -15,5 +15,6 @@ idf_component_register(
     PRIV_REQUIRES settings_manager log_manager http_server_manager
                   cmdline_manager http_client_manager mqtt_manager
                   autopid dev_status_manager battery_monitor console
+                  wifi_manager
                   esp_http_server esp_timer
 )

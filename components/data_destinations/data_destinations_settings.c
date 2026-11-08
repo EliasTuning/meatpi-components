@@ -63,6 +63,10 @@ static const settings_field_t DEST_ITEMS[] =
     SETTINGS_STR         ("car_model",      DD_SMALL_LEN - 1, ""),
     SETTINGS_BOOL        ("retain",         true),
     SETTINGS_BOOL        ("full_first",     true),
+    /* "active on" (2026-11-08): "" = every network, else the WiFi networks
+       (Settings > WiFi) the row sends on, names separated by commas; an
+       added key with a default, no version bump */
+    SETTINGS_STR         ("networks",       DD_NETS_LEN - 1, ""),
 };
 
 static const settings_field_t FIELDS[] =

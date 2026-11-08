@@ -187,6 +187,8 @@ esp_err_t dd_parse_dest(const cJSON *item, dd_dest_t *out, char *err,
     item_str(item, "query", out->query, sizeof(out->query), "");
     item_str(item, "cert_set", out->cert_set, sizeof(out->cert_set), "");
     item_str(item, "car_model", out->car_model, sizeof(out->car_model), "");
+    /* "active on" (2026-11-08): the names as typed, matched by wifi_manager */
+    item_str(item, "networks", out->networks, sizeof(out->networks), "");
 
     /* normalize per type (legacy semantics: a bare host gets the scheme
        the type implies; ABRP defaults to Iternio's endpoint) */
@@ -450,6 +452,12 @@ void dd_sched_after(dd_state_t *st, uint32_t period_s, bool ok,
 void dd_sched_skip(dd_state_t *st, uint32_t period_s, int64_t now_us)
 {
     st->skipped_offline++;
+    st->next_due_us = now_us + (int64_t)period_s * 1000000;
+}
+
+void dd_sched_skip_network(dd_state_t *st, uint32_t period_s, int64_t now_us)
+{
+    st->skipped_network++;
     st->next_due_us = now_us + (int64_t)period_s * 1000000;
 }
 

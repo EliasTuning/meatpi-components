@@ -101,6 +101,12 @@ static int cmd_destinations(int argc, char **argv)
                        (unsigned)st.fail, (unsigned)st.skipped_offline,
                        (unsigned)(st.backoff_ms / 1000), st.last_status);
 
+        if (d->networks[0] != '\0')
+        {
+            cmdline_printf("      networks %s  other_network %u\n",
+                           d->networks, (unsigned)st.skipped_network);
+        }
+
         if (st.last_error[0])
         {
             cmdline_printf("      last_err %s (%s)\n", st.last_error,
