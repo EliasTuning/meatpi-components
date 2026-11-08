@@ -183,6 +183,11 @@ bool        obd_fw_version_is_outdated(const char *vtvers, const char *image);
  *  chip was hardware-reset: the caller brings it up again). */
 bool obd_fw_last_flashed(void);
 
+/** True while the update JOB (obd_chip_fw_job.c) runs: the stream and the
+ *  fresh bring-up after it. obd_chip_update_in_progress() folds it in so
+ *  the sleep entry waits for the whole job (Ali, 2026-11-08). */
+bool obd_fw_job_running(void);
+
 /* ---- UART layer (obd_chip_uart.c, target only) ------------------------------ */
 
 esp_err_t obd_uart_init(int baud);

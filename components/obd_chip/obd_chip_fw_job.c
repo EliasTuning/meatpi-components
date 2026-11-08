@@ -50,6 +50,11 @@ typedef struct
 static fw_job_t      s_job;
 static volatile bool s_job_running;
 
+bool obd_fw_job_running(void)
+{
+    return s_job_running;
+}
+
 static void fw_job_task(void *arg)
 {
     (void)arg;

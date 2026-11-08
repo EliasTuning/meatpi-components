@@ -140,7 +140,17 @@ countdown (the reads come every second during a backfill). Surfaces:
 `activity_s` on `GET /api/sleep` (seconds left of the extension, 0 = none),
 a `held awake while the log is read` line in `sleep`, the web UI's countdown
 bar says "Kept awake while the log is being read" and the Power Saving page
-has a note. The store-and-forward bench
+has a note. **The OBD chip firmware update holds the same way (Ali,
+2026-11-08: no sleep while the chip is updated):** the state task asks
+`obd_chip_update_in_progress()` once a lap and applies the activity hold
+while it is true (the Quick Setup prompt, the Maintenance card and the
+console all run the same job; the flag covers the stream and the chip's
+fresh bring-up after it), one I line per update; `activity_why` on the
+status (`log` or `chip_update`, "" with none) says which of the two gave
+the extension, the bar reads "Kept awake while the OBD chip firmware is
+updated". The entry sequence still waits for a running job
+(`SM_FW_UPDATE_WAIT_MS`), so a countdown that was already due when the
+job started does not pull the chip's pin under a half-written image. The store-and-forward bench
 (`tools/testbench/ha/ha_history_backfill_bench.py`) holds the device at
 12.5 V while the integration pulls and reads the deadline move.
 

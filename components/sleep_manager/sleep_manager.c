@@ -85,6 +85,10 @@ static uint8_t  s_holds_used;                 /* per boot */
 /* The activity hold (2026-11-06): a log read while a countdown runs. Edited
  * under s_lock like the hold; the httpd task brings the reads. */
 static sm_activity_t s_activity;
+/* what holds it (the status's `activity_why`): "log" for a log read,
+ * "chip_update" for the OBD chip firmware update (2026-11-08) */
+static const char *s_activity_why = "";
+static bool        s_chip_hold_logged;
 
 /* ---- sleep entry / nap loop ---------------------------------------------- */
 
@@ -262,6 +266,30 @@ static void publish_pending(uint32_t now)
 
 /* ---- state task -------------------------------------------------------------- */
 
+/* The OBD chip firmware update (Ali, 2026-11-08: no sleep while it runs).
+ * The entry sequence already waits for a running job; this keeps a running
+ * countdown away from it in the first place: pushed out a minute at a
+ * time, under the activity hold's cap, while the chip is written and
+ * brought up again. Under s_lock. */
+static void hold_for_chip_update(uint32_t now)
+{
+    if (!sm_activity_apply(&s_policy, s_run, &s_crit, &s_activity, now,
+                           SM_ACTIVITY_HOLD_MS, SM_ACTIVITY_CAP_MS))
+    {
+        return; /* nothing counts: nothing to hold */
+    }
+
+    s_activity_why = "chip_update";
+
+    if (!s_chip_hold_logged)
+    {
+        ESP_LOGI(TAG, "OBD chip firmware update while a countdown runs: held "
+                 "awake %u s at a time, %u min at most",
+                 SM_ACTIVITY_HOLD_MS / 1000u, SM_ACTIVITY_CAP_MS / 60000u);
+        s_chip_hold_logged = true;
+    }
+}
+
 static void state_task(void *arg)
 {
     const sm_cfg_t *cfg = sleep_settings_config();
@@ -375,6 +403,16 @@ static void state_task(void *arg)
         }
         else
         {
+            /* the chip update's hold, read once a lap (2026-11-08) */
+            if (obd_chip_update_in_progress())
+            {
+                hold_for_chip_update(now);
+            }
+            else
+            {
+                s_chip_hold_logged = false;
+            }
+
             /* here too: with sleep disabled the floor is the only countdown */
             publish_pending(now);
 
@@ -556,6 +594,7 @@ esp_err_t sleep_manager_status(sleep_manager_status_t *out)
     out->holds_max = SM_HOLD_MAX;
     out->holds_left = SM_HOLD_MAX;
     out->activity_s = 0;
+    out->activity_why = "";
 
     if (s_lock != NULL && xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE)
     {
@@ -568,6 +607,7 @@ esp_err_t sleep_manager_status(sleep_manager_status_t *out)
         out->holds_left = (uint8_t)(SM_HOLD_MAX - s_holds_used);
         out->activity_s = (s_activity.active && act > 0)
                               ? ((uint32_t)act + 999u) / 1000u : 0;
+        out->activity_why = out->activity_s > 0 ? s_activity_why : "";
         xSemaphoreGive(s_lock);
     }
 
@@ -598,6 +638,7 @@ esp_err_t sleep_manager_activity(uint32_t seconds)
 
     if (counting)
     {
+        s_activity_why = "log";
         publish_pending(now);
     }
 

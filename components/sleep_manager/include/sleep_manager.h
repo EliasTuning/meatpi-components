@@ -114,6 +114,10 @@ typedef struct
     uint8_t               holds_max;    /**< the cap per boot (3)      */
     uint32_t              activity_s;   /**< seconds left of the extension a
                                              log read gave (0: none) */
+    const char           *activity_why; /**< what gave it (2026-11-08): "log"
+                                             (a log read) or "chip_update"
+                                             (the OBD chip firmware update);
+                                             "" while activity_s is 0 */
 } sleep_manager_status_t;
 
 /** Ordered shutdown glue the composition root provides (stop radios,

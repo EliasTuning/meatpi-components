@@ -167,7 +167,11 @@ static esp_err_t status_end(esp_err_t err, bool flashed)
 
 bool obd_chip_update_in_progress(void)
 {
-    return s_running;
+    /* the engine's run, or the job around it: its fresh bring-up after a
+       reflash is part of the update as far as the sleep entry is concerned
+       (a sleep pin pulled during that bring-up resets the chip, Ali,
+       2026-11-08: no sleep while the chip is updated) */
+    return s_running || obd_fw_job_running();
 }
 
 bool obd_fw_last_flashed(void)

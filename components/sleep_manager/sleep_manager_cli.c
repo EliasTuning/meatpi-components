@@ -112,7 +112,11 @@ static int cmd_sleep(int argc, char **argv)
 
     if (st.activity_s > 0)
     {
-        cmdline_printf("  held awake while the log is read: %lu s left\n",
+        cmdline_printf("  held awake while %s: %lu s left\n",
+                       (st.activity_why != NULL &&
+                        strcmp(st.activity_why, "chip_update") == 0)
+                           ? "the OBD chip firmware is updated"
+                           : "the log is read",
                        (unsigned long)st.activity_s);
     }
 
