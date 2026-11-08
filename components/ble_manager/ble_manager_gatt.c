@@ -551,7 +551,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
                                        ESP_BLE_SEC_ENCRYPT_MITM);
             }
 
-            blm_core_on_connect();
+            blm_core_on_connect(NULL);
             break;
         }
 
@@ -559,7 +559,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
             s_connected = false;
             s_secured = false;
             s_cli_len = 0;
-            blm_core_on_disconnect();
+            blm_core_on_disconnect(0);
             esp_ble_gap_start_advertising(&s_adv_params); /* re-advertise */
             break;
 

@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "dev_status_manager.h"
 #include "log_manager.h"
@@ -44,6 +45,30 @@ static QueueHandle_t s_sub;                 /* the ONE subscriber (bridge) */
 static uint32_t s_sub_drops;
 static ble_cli_handler_t s_cli_handler;
 static volatile bool s_pairing_allowed = true;
+
+/* the live session (2026-11-08): one log line per milestone, a summary at
+   the end (ble_manager_diag.c makes the words). The rx side is written on
+   the host task, the tx side on the IO task: two words, never shared */
+static struct
+{
+    int64_t  t0_us;             /* the connect                             */
+    uint32_t secured_at_ms;
+    uint32_t first_write_at_ms;
+    uint32_t last_write_at_ms;
+    uint32_t rx_writes;
+    uint32_t rx_bytes;
+    uint32_t tx_notifications;
+    uint32_t tx_bytes;
+    uint32_t sub_drops_at_start;
+    uint32_t tx_drops_at_start;
+    bool     subscribed;
+    bool     live;
+} s_sess;
+
+static uint32_t sess_ms(void)
+{
+    return (uint32_t)((esp_timer_get_time() - s_sess.t0_us) / 1000);
+}
 
 /* ---- lifecycle ----------------------------------------------------------------- */
 
@@ -232,6 +257,23 @@ esp_err_t ble_manager_cli_write(const char *data, size_t len)
 
 void blm_core_on_rx(const uint8_t *data, size_t len)
 {
+    if (s_sess.live)
+    {
+        uint32_t now = sess_ms();
+
+        if (s_sess.first_write_at_ms == BLM_DIAG_NEVER)
+        {
+            s_sess.first_write_at_ms = now;
+            ESP_LOGI(TAG, "first app write %lu ms after the connect (%s, %u B%s)",
+                     (unsigned long)now, blm_gatt_secured() ? "secured" : "plain",
+                     (unsigned)len, s_sub == NULL ? ", no bridge on the pipe" : "");
+        }
+
+        s_sess.last_write_at_ms = now;
+        s_sess.rx_writes++;
+        s_sess.rx_bytes += (uint32_t)len;
+    }
+
     if (s_sub == NULL)
     {
         return; /* nobody attached: bytes fall on the floor by design */
@@ -275,14 +317,106 @@ void blm_core_on_cli_line(const char *line)
     }
 }
 
-void blm_core_on_connect(void)
+void blm_core_on_connect(const blm_link_info_t *link)
 {
+    const blm_config_t *cfg = blm_core_config();
+    char peer[24], win[64];
+
+    memset(&s_sess, 0, sizeof(s_sess));
+    s_sess.t0_us = esp_timer_get_time();
+    s_sess.secured_at_ms = BLM_DIAG_NEVER;
+    s_sess.first_write_at_ms = BLM_DIAG_NEVER;
+    s_sess.last_write_at_ms = BLM_DIAG_NEVER;
+    s_sess.sub_drops_at_start = s_sub_drops;
+    s_sess.tx_drops_at_start = blm_io_tx_drops();
+    s_sess.live = true;
+
     dev_status_manager_set(DEV_STATUS_BIT_BLE_CONNECTED);
-    ESP_LOGI(TAG, "client connected");
+
+    if (link == NULL)
+    {
+        ESP_LOGI(TAG, "client connected");
+        return;
+    }
+
+    blm_diag_format_addr(link->peer, peer, sizeof(peer));
+    blm_diag_format_window(link->itvl_units, link->latency,
+                           link->timeout_units, win, sizeof(win));
+    /* the window the central opened with, and the one this device asks
+       for (conn_profile); a later `connection update` line says what the
+       central settled on */
+    ESP_LOGI(TAG, "client connected: peer %s (%s), %s; asking %u-%u ms",
+             peer, blm_diag_addr_type_name(link->peer_type), win,
+             (unsigned)(cfg->conn_min_units * 125 / 100),
+             (unsigned)(cfg->conn_max_units * 125 / 100));
 }
 
-void blm_core_on_disconnect(void)
+void blm_core_on_conn_update(const blm_link_info_t *link)
+{
+    char win[64];
+
+    blm_diag_format_window(link->itvl_units, link->latency,
+                           link->timeout_units, win, sizeof(win));
+    ESP_LOGI(TAG, "connection update: %s (%lu ms after the connect)", win,
+             (unsigned long)sess_ms());
+}
+
+void blm_core_on_secured(void)
+{
+    if (s_sess.live && s_sess.secured_at_ms == BLM_DIAG_NEVER)
+    {
+        s_sess.secured_at_ms = sess_ms();
+    }
+}
+
+void blm_core_on_data_subscribe(bool notify, bool indicate, bool restored)
+{
+    s_sess.subscribed = s_sess.subscribed || notify || indicate; /* sticky: the summary says "was subscribed" */
+    ESP_LOGI(TAG, "data pipe %s (%s%s%s, %lu ms after the connect)",
+             (notify || indicate) ? "subscribed" : "unsubscribed",
+             notify ? "notify" : indicate ? "indicate" : "none",
+             restored ? ", restored from the bond" : ", by the central",
+             blm_gatt_secured() ? "" : ", link still plain",
+             (unsigned long)sess_ms());
+}
+
+void blm_core_on_tx(size_t len)
+{
+    if (s_sess.live)
+    {
+        s_sess.tx_notifications++;
+        s_sess.tx_bytes += (uint32_t)len;
+    }
+}
+
+void blm_core_on_disconnect(int reason)
 {
     dev_status_manager_clear(DEV_STATUS_BIT_BLE_CONNECTED);
-    ESP_LOGI(TAG, "client disconnected");
+
+    if (!s_sess.live)
+    {
+        ESP_LOGI(TAG, "client disconnected");
+        return;
+    }
+
+    blm_diag_session_t s =
+    {
+        .duration_ms = sess_ms(),
+        .secured_at_ms = s_sess.secured_at_ms,
+        .first_write_at_ms = s_sess.first_write_at_ms,
+        .last_write_at_ms = s_sess.last_write_at_ms,
+        .rx_writes = s_sess.rx_writes,
+        .rx_bytes = s_sess.rx_bytes,
+        .tx_notifications = s_sess.tx_notifications,
+        .tx_bytes = s_sess.tx_bytes,
+        .sub_drops = s_sub_drops - s_sess.sub_drops_at_start,
+        .tx_drops = blm_io_tx_drops() - s_sess.tx_drops_at_start,
+        .subscribed = s_sess.subscribed,
+    };
+    char text[240];
+
+    s_sess.live = false;
+    blm_diag_format_summary(&s, text, sizeof(text));
+    ESP_LOGI(TAG, "client disconnected: %s (0x%x); %s",
+             blm_diag_reason_name(reason), (unsigned)reason, text);
 }

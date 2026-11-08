@@ -155,6 +155,51 @@ const char *blm_ident_ram_migrated(uint8_t adv_mode, uint8_t phy_mask);
 bool blm_ident_address_private(const char *word);
 const char *blm_ident_address_word(bool private_address);
 
+/* ---- link diagnostics, the pure half (ble_manager_diag.c: host-tested) -------
+   The session log lines of 2026-11-08: who connected, the connection
+   window, when the link was secured, when the app first wrote, how much
+   flowed each way, why the link ended. ble_manager.c keeps the live
+   session and writes the lines; this layer only makes the words. */
+
+#define BLM_DIAG_NEVER 0xFFFFFFFFu /* a moment that did not happen */
+
+typedef struct
+{
+    uint8_t  peer[6];        /* the peer's address, NimBLE byte order     */
+    uint8_t  peer_type;      /* NimBLE BLE_ADDR_* (0 public, 1 random..)  */
+    uint16_t itvl_units;     /* connection interval, 1.25 ms units        */
+    uint16_t latency;        /* peripheral latency, events                */
+    uint16_t timeout_units;  /* supervision timeout, 10 ms units          */
+} blm_link_info_t;
+
+typedef struct
+{
+    uint32_t duration_ms;
+    uint32_t secured_at_ms;     /* since the connect; BLM_DIAG_NEVER       */
+    uint32_t first_write_at_ms; /* the app's first FFF2 write; NEVER      */
+    uint32_t last_write_at_ms;  /* its last one; NEVER                    */
+    uint32_t rx_writes;         /* FFF2 writes and their bytes             */
+    uint32_t rx_bytes;
+    uint32_t tx_notifications;  /* FFF1 notifications and their bytes      */
+    uint32_t tx_bytes;
+    uint32_t sub_drops;         /* subscriber queue full (bridge side)     */
+    uint32_t tx_drops;          /* tx queue full (bridge -> radio)         */
+    bool     subscribed;        /* the central subscribed FFF1             */
+} blm_diag_session_t;
+
+/** The Core spec's name for a NimBLE disconnect reason (0x200 + HCI code;
+ *  0 = none given, anything else = a host-side reason). */
+const char *blm_diag_reason_name(int reason);
+/** NimBLE BLE_ADDR_* -> "public" / "random" / "public identity" / ... */
+const char *blm_diag_addr_type_name(uint8_t type);
+/** "AA:BB:CC:DD:EE:FF" from NimBLE's little-endian bytes ("unknown" for NULL). */
+int blm_diag_format_addr(const uint8_t addr[6], char *out, size_t len);
+/** "interval 30.00 ms latency 0 timeout 720 ms" from the link's units. */
+int blm_diag_format_window(uint16_t itvl_units, uint16_t latency,
+                           uint16_t timeout_units, char *out, size_t len);
+/** The one-line session summary the disconnect log line carries. */
+int blm_diag_format_summary(const blm_diag_session_t *s, char *out, size_t len);
+
 /* ---- settings (ble_manager_settings.c) --------------------------------------- */
 
 typedef struct
@@ -193,8 +238,17 @@ bool blm_settings_is_configured(void); /* boot apply ran (standard §4.3) */
 
 void blm_core_on_rx(const uint8_t *data, size_t len); /* FFF2 -> subscriber */
 void blm_core_on_cli_line(const char *line);          /* CLI IN -> handler  */
-void blm_core_on_connect(void);
-void blm_core_on_disconnect(void);
+/** A central connected (link = its address and the window it opened with;
+ *  NULL from a backend that has none) / its window changed / the link was
+ *  secured / it wrote the FFF1 CCCD / it is gone (reason as the backend
+ *  reports it, 0 = unknown). Each writes one session log line. */
+void blm_core_on_connect(const blm_link_info_t *link);
+void blm_core_on_conn_update(const blm_link_info_t *link);
+void blm_core_on_secured(void);
+void blm_core_on_data_subscribe(bool notify, bool indicate, bool restored);
+void blm_core_on_disconnect(int reason);
+/** FFF1 bytes that went to the radio (the IO task, per notification). */
+void blm_core_on_tx(size_t len);
 bool blm_core_pairing_allowed(void);
 
 /* ---- GATT layer (ble_manager_gatt_nimble.c / ble_manager_gatt.c) ------------- */
@@ -306,6 +360,7 @@ esp_err_t blm_io_start(void);
 void      blm_io_stop(void);
 esp_err_t blm_io_queue_tx(const uint8_t *data, size_t len);
 esp_err_t blm_io_cli_write(const char *data, size_t len);
+uint32_t  blm_io_tx_drops(void);   /* tx queue full, since boot          */
 
 #ifdef __cplusplus
 }

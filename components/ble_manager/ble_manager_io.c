@@ -106,7 +106,11 @@ static void tx_task(void *arg)
                 if (blm_pack_fill(send_buf, &send_len, max_data, chunk.data,
                                   chunk.len, &consumed))
                 {
-                    blm_gatt_notify_data(send_buf, (uint16_t)send_len);
+                    if (blm_gatt_notify_data(send_buf, (uint16_t)send_len) == ESP_OK)
+                    {
+                        blm_core_on_tx(send_len);
+                    }
+
                     send_len = 0;
 
                     if (--free_packets == 0 && consumed < chunk.len)
@@ -124,7 +128,11 @@ static void tx_task(void *arg)
         /* flush the partial packet (legacy tail flush) */
         if (free_packets != 0 && send_len != 0)
         {
-            blm_gatt_notify_data(send_buf, (uint16_t)send_len);
+            if (blm_gatt_notify_data(send_buf, (uint16_t)send_len) == ESP_OK)
+            {
+                blm_core_on_tx(send_len);
+            }
+
             send_len = 0;
         }
     }
@@ -189,6 +197,11 @@ esp_err_t blm_io_queue_tx(const uint8_t *data, size_t len)
     }
 
     return ESP_OK;
+}
+
+uint32_t blm_io_tx_drops(void)
+{
+    return s_tx_drops;
 }
 
 esp_err_t blm_io_cli_write(const char *data, size_t len)

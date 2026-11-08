@@ -33,6 +33,50 @@ before the change with `tools/testbench/ble/ble_addr_probe_pi.py`
 pipe (`br_ble_obd`, bridge_manager v2) is the fourth piece: on 4.x
 Bluetooth on WAS the ELM pipe to the chip.
 
+## Session log lines (2026-11-08)
+
+A field report about an app ("RealDash takes four tries", "Car Scanner
+pairs and shows nothing", "drops after a minute") used to leave two
+console lines, `client connected` and `client disconnected`, and the build
+compiles the debug level out (`CONFIG_LOG_MAXIMUM_LEVEL` 3), so nothing
+said who connected, which connection window the phone settled on, when it
+paired, when the app first wrote, how much flowed, or why the link ended.
+Those facts are what separate an app problem from a link problem from a
+pipe problem, so every session logs them at INFO, one line per milestone
+(a handful per session, standard section 10), all under the `ble_manager`
+tag:
+
+| Line | When | What it says |
+|---|---|---|
+| `client connected: peer 5A:.. (random), interval 30.00 ms latency 0 timeout 720 ms; asking 20-40 ms` | the connect | the central's on-air address and type (a phone shows a random one), the window it opened with, the window this device requests (`conn_profile`) |
+| `connection update: interval 15.00 ms latency 0 timeout 4000 ms (120 ms after the connect)` | every accepted parameter update | what the central settled on: a 30 ms or 45 ms interval is an iPhone's default, 7.5 or 15 ms a fast Android; each ELM exchange costs two to four intervals |
+| `security request sent (the link was still plain)` | one second after the connect, if nothing secured it first | the `security_request` setting at work; a bonded Android encrypts before it and the line is absent |
+| `pairing success (bonded 1)` or `pairing failed (status 0x...)` | the encryption change | as before, plus whether the keys were kept |
+| `data pipe subscribed (notify, by the central, 1900 ms after the connect)` | the FFF1 CCCD write | the ELM apps' first step; `restored from the bond` when the stack replayed a bonded phone's subscription; `link still plain` names a subscribe that slipped through unpaired |
+| `first app write 2310 ms after the connect (secured, 4 B)` | the first FFF2 write of the session | when the app started talking; `plain` would mean a write on an unsecured link (the GATT flags refuse it, so it should never read so), `no bridge on the pipe` names a device without a `ble` connection row |
+| `client disconnected: the peer ended it (0x213); 83.2 s, secured 1.8 s, first write 2.3 s, last write 0.4 s before end, pipe subscribed, app->dev 412 wr 3214 B, dev->app 1380 ntf 25160 B, drops sub 0 tx 0` | the disconnect | the reason in the Core spec's words with NimBLE's code (0x200 + the HCI code: 0x213 the phone closed it, 0x208 the radio link was lost, 0x216 this device closed it, 0x23E the connection never came up, 0x206 the phone holds a stale bond, 0x205 the pairing failed), then the whole session in numbers: its length, when it was secured, the app's first and last write, whether the pipe was subscribed, the writes and bytes app to device (`wr`), the notifications and bytes device to app (`ntf`), the drops of the subscriber queue (`sub`, bridge side) and of the radio queue (`tx`). Short words on purpose: the log manager's line is 256 bytes and a longer line is cut without its newline |
+
+Reading them: a session that is `never secured` with `no app write` is a
+central that connected, was asked to pair and left (a stale bond on the
+phone, a refused passkey, or an app that scans and probes every device;
+the bench Pi's stale bond on 2026-11-08 read `pairing failed (status
+0x007)` then `authentication failure (0x205); 1.0 s, never secured, no app
+write`, sixteen times in a row, until the bond was removed); a secured
+session with writes and `0 ntf` is a pipe with nobody on the other end
+(the Connections page, or the OBD chip down); a big `last write ... before
+end` with a supervision timeout is a phone that walked away; writes
+without a `data pipe subscribed` line is an app that never asked for
+notifications. The words come from
+`ble_manager_diag.c` (pure, `host_test/main/test_diag.c`), the live
+session sits in `ble_manager.c`, the GATT layer feeds it from its events
+(`blm_core_on_connect` with the link's `blm_link_info_t`,
+`blm_core_on_conn_update`, `blm_core_on_secured`,
+`blm_core_on_data_subscribe`, `blm_core_on_tx` from the IO task's
+notifications, `blm_core_on_disconnect` with the reason). The Bluedroid
+backend passes no link and no reason and keeps the two plain lines. The
+bench side that reads them beside the counters is
+`tools/testbench/ble/app_session_capture.py` (`testing/app_session_capture.md`).
+
 ## Bluetooth memory profile (settings v5, 2026-10-31)
 
 Bluetooth on this build costs about 38 KB of internal RAM (the bench unit:

@@ -6,7 +6,9 @@ idf_component_register(
     SRCS "test_main.c"
          "test_pack.c"
          "test_ram.c"
+         "test_diag.c"
          "${comp_dir}/ble_manager_pack.c"
+         "${comp_dir}/ble_manager_diag.c"
     INCLUDE_DIRS "${comp_dir}/include" "${comp_dir}"
     REQUIRES unity
 )

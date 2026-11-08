@@ -148,10 +148,32 @@ static void secreq_fire(void *arg)
 
     int rc = ble_gap_security_initiate(s_conn_handle);
 
-    if (rc != 0 && rc != BLE_HS_EALREADY)
+    if (rc == 0)
+    {
+        ESP_LOGI(TAG, "security request sent (the link was still plain)");
+    }
+    else if (rc != BLE_HS_EALREADY)
     {
         ESP_LOGW(TAG, "security request not sent (%d)", rc);
     }
+}
+
+/* the link's peer and window for the session log lines (ble_manager.c) */
+static bool link_info(uint16_t conn_handle, blm_link_info_t *li)
+{
+    struct ble_gap_conn_desc desc;
+
+    if (ble_gap_conn_find(conn_handle, &desc) != 0)
+    {
+        return false;
+    }
+
+    memcpy(li->peer, desc.peer_ota_addr.val, sizeof(li->peer));
+    li->peer_type = desc.peer_ota_addr.type;
+    li->itvl_units = desc.conn_itvl;
+    li->latency = desc.conn_latency;
+    li->timeout_units = desc.supervision_timeout;
+    return true;
 }
 
 static void secreq_arm(void)
@@ -254,7 +276,12 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 secreq_arm();
             }
 
-            blm_core_on_connect();
+            {
+                blm_link_info_t li;
+
+                blm_core_on_connect(link_info(s_conn_handle, &li) ? &li : NULL);
+            }
+
             blm_channel_on_link(BLE_MANAGER_CH_CONNECTED);
             break;
 
@@ -267,7 +294,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_phy_rx = 0;
             blm_tx_on_link_reset(); /* + wakes an indication waiter */
             blm_svc_reset_rx();
-            blm_core_on_disconnect();
+            blm_core_on_disconnect(event->disconnect.reason);
             blm_channel_on_link(BLE_MANAGER_CH_DISCONNECTED);
             blm_adv_start(); /* re-advertise the configured set(s) */
             break;
@@ -275,6 +302,13 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_CONN_UPDATE:
             if (event->conn_update.status == 0)
             {
+                blm_link_info_t li;
+
+                if (link_info(event->conn_update.conn_handle, &li))
+                {
+                    blm_core_on_conn_update(&li);
+                }
+
                 phy_request(); /* our 4 s supervision timeout is live now */
             }
             break;
@@ -304,7 +338,16 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
         case BLE_GAP_EVENT_SUBSCRIBE:
             /* the central wrote a CCCD (or a bonded one's was restored):
-               a stream channel's OUT mode follows it */
+               a stream channel's OUT mode follows it; the data pipe's is a
+               session milestone (the ELM apps' first step) */
+            if (event->subscribe.attr_handle == blm_svc_data_out_handle())
+            {
+                blm_core_on_data_subscribe(event->subscribe.cur_notify,
+                                           event->subscribe.cur_indicate,
+                                           event->subscribe.reason ==
+                                               BLE_GAP_SUBSCRIBE_REASON_RESTORE);
+            }
+
             blm_channel_on_subscribe(event->subscribe.attr_handle,
                                      event->subscribe.cur_notify,
                                      event->subscribe.cur_indicate);
@@ -339,7 +382,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
             if (s_secured)
             {
-                ESP_LOGI(TAG, "pairing success");
+                ESP_LOGI(TAG, "pairing success (bonded %d)", desc.sec_state.bonded);
+                blm_core_on_secured();
             }
             else
             {
