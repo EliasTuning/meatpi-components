@@ -45,7 +45,8 @@
 #define SE_SRC_MAX          8192          /* inline run / check body (bytes) */
 #define SE_OUT_MAX          4096          /* captured output per run         */
 #define SE_SCRIPT_FILE_MAX  (64 * 1024)   /* a stored /data/scripts file     */
-#define SE_SLEEP_MAX_MS     60000         /* one sleep_ms() call             */#define SE_NAME_MAX         40            /* script file name (with .be)     */
+#define SE_SLEEP_MAX_MS     60000         /* one sleep_ms() call             */
+#define SE_NAME_MAX         40            /* script file name (with .be)     */
 #define SE_RESP_MAX_BYTES   128           /* response hex is cut after this  */
 
 /** One device binding as the reference describes it. */
