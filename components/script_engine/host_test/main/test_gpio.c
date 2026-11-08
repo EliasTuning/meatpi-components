@@ -71,6 +71,13 @@ void test_pwm_span(void)
     TEST_ASSERT_EQUAL_STRING("time", err);
 }
 
+void test_pwm_default_idle(void)
+{
+    TEST_ASSERT_EQUAL_INT(1, se_pwm_default_idle(se_can_tx_gpio()));
+    TEST_ASSERT_EQUAL_INT(0, se_pwm_default_idle(se_can_rx_gpio()));
+    TEST_ASSERT_EQUAL_INT(0, se_pwm_default_idle(4));
+}
+
 void test_gpio_touch_release(void)
 {
     se_gpio_release_all();

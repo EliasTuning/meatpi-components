@@ -150,8 +150,11 @@ static const se_bind_doc_t BIND_DOCS[] =
       "strapping and the transceiver standby pin are refused. CAN_TX and CAN_RX "
       "need can_stop() first. Pins return to inputs when the script ends.",
       "digitalWrite(CAN_TX, HIGH)" },
-    { "digitalPWM", "digitalPWM(pin, ontime_ms, offtime_ms[, rounds])", "gpio", "nil",
-      "Pulse pin: ontime_ms high, offtime_ms low, rounds times (default 1). The "
+    { "digitalPWM", "digitalPWM(pin, ontime_ms, offtime_ms[, rounds[, idle]])", "gpio", "nil",
+      "Pulse pin: ontime_ms at the opposite of the idle level, offtime_ms at the idle "
+      "level, rounds times (default 1). Idle is LOW, except on CAN_TX where it is "
+      "HIGH (recessive): ontime_ms is then a dominant bit and the transceiver's "
+      "dominant timeout never trips. Pass HIGH or LOW as idle to override. The "
       "RMT peripheral times every edge in hardware (0.1 us steps up to 3.2 ms, "
       "1 us up to 32 ms), so 1.6 and 0.4 are exact. The call waits until it is "
       "done; the whole pulse must be 1 s or less (at most 49104 rounds). Same pins "

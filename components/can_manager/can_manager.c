@@ -216,6 +216,11 @@ static esp_err_t start_locked(void)
     return ESP_OK;
 }
 
+void can_manager_transceiver(bool active)
+{
+    cm_standby(!active);
+}
+
 esp_err_t can_manager_stop(void)
 {
     if (s_life != NULL)

@@ -84,6 +84,11 @@ esp_err_t can_manager_start(void);
  *  Called by main's sleep-prepare BEFORE sleep_manager's GPIO hold. */
 esp_err_t can_manager_stop(void);
 
+/** Transceiver driver on/off (its standby pin) without touching the
+ *  controller. For a script that drives the TX pin by hand after
+ *  can_manager_stop(); can_manager_start() sets it itself. */
+void can_manager_transceiver(bool active);
+
 /** The shared bus handle for the adopted elm327_* components.
  *  NULL while the bus is not running. */
 struct can_core_handle_s *can_manager_core_handle(void);

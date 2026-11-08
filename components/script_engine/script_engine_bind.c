@@ -457,6 +457,11 @@ static int b_digital_write(bvm *vm)
     }
 
     se_gpio_touch(pin);
+    if (pin == se_can_tx_gpio())
+    {
+        can_manager_transceiver(true); /* out of standby: the pin reaches the bus */
+    }
+
     se_gpio_write(pin, be_toint(vm, 2) ? 1 : 0);
     be_return_nil(vm);
 }
@@ -490,7 +495,7 @@ static int b_digital_pwm(bvm *vm)
         !berry_num(vm, 2, &on_ms) || !berry_num(vm, 3, &off_ms))
     {
         be_raise(vm, "gpio_error",
-                 "digitalPWM(pin, ontime_ms, offtime_ms[, rounds])");
+                 "digitalPWM(pin, ontime_ms, offtime_ms[, rounds[, idle]])");
     }
 
     int rounds = 1;
@@ -503,6 +508,18 @@ static int b_digital_pwm(bvm *vm)
         }
 
         rounds = (int)be_toint(vm, 4);
+    }
+
+    int idle = se_pwm_default_idle(pin);
+
+    if (be_top(vm) >= 5 && !be_isnil(vm, 5))
+    {
+        if (!be_isint(vm, 5))
+        {
+            be_raise(vm, "gpio_error", "idle is HIGH or LOW");
+        }
+
+        idle = be_toint(vm, 5) ? 1 : 0;
     }
 
     se_pwm_plan_t plan;
@@ -523,7 +540,13 @@ static int b_digital_pwm(bvm *vm)
         be_raise(vm, "gpio_error", why);
     }
 
+    plan.idle = idle;
     se_gpio_touch(pin);
+
+    if (pin == se_can_tx_gpio())
+    {
+        can_manager_transceiver(true);
+    }
 
     if (!se_gpio_pwm(pin, &plan))
     {

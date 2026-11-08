@@ -45,6 +45,7 @@ void test_gpio_denylist(void);
 void test_gpio_can_alias_needs_stop(void);
 void test_pwm_span(void);
 void test_gpio_touch_release(void);
+void test_pwm_default_idle(void);
 
 void test_accepts_plain_names(void)
 {
@@ -151,6 +152,7 @@ void app_main(void)
     RUN_TEST(test_gpio_can_alias_needs_stop);
     RUN_TEST(test_pwm_span);
     RUN_TEST(test_gpio_touch_release);
+    RUN_TEST(test_pwm_default_idle);
 
     UNITY_END();
 }

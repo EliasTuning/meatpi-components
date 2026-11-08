@@ -29,7 +29,13 @@ typedef struct
     uint32_t off_ticks;  /**< low time in ticks (1..32767).               */
     uint32_t rounds;
     uint32_t total_us;   /**< rounds * (on + off), for the wait timeout.  */
+    int      idle;       /**< pin level between and after the pulses; the
+                              pulse (ontime) is the opposite level.        */
 } se_pwm_plan_t;
+
+/** Idle level when the script gives none: HIGH on CAN_TX (recessive, so the
+ *  transceiver's dominant timeout never trips), LOW elsewhere. */
+int se_pwm_default_idle(int pin);
 
 /**
  * on/off are milliseconds. Picks the finest tick that fits both levels in

@@ -260,9 +260,10 @@ static const char CAN_FRAME[] =
     "log('frame: ' + str(f))\n";
 
 static const char GPIO_PULSE[] =
-    "# Park the CAN controller, pulse its TX pin, then the script end\n"
-    "# starts the bus again. Times are milliseconds (1.6 and 0.4). The\n"
-    "# whole pulse must stay within 1 s. CAN_RX works the same way.\n"
+    "# Park the CAN controller, send dominant bits on its TX pin, then the\n"
+    "# script end starts the bus again. Times are milliseconds: 1.6 ms\n"
+    "# dominant, 0.4 ms recessive, ten times. CAN_TX idles recessive (HIGH);\n"
+    "# pass HIGH or LOW as a fifth argument to choose the idle level.\n"
     "can_stop()\n"
     "digitalPWM(CAN_TX, 1.6, 0.4, 10)\n"
     "digitalWrite(CAN_TX, LOW)\n"
