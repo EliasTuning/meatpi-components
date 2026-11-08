@@ -751,6 +751,49 @@ Over `GET /api/obd_chip`, `POST /api/obd_chip/update`, `POST/GET
 Probe: `probe_diag.mjs` (plain and `--min`; the mock presets a chip up,
 a chip down with wire notes, a chip left on V2.3.22, and a self-test pass).
 
+### The OBD chip firmware prompt, the destinations table and Active on (2026-11-08, `internal/TASK_chip_prompt_destinations.md`)
+
+- **The OBD chip firmware prompt.** On chip firmware V2.3.22 the warm start
+  the bring-up sends kills the chip's automatic protocol search until a
+  power cycle (`internal/OBD_CHIP_ATWS_AUTO_SEARCH_2026-11-08.md`), so the
+  page asks for the update to the device's image wherever a user lands:
+  one shared helper, `chipFw` in index.html (`prompt` = the one-button
+  popup, `run` = the Maintenance card's job with its progress in a popup
+  that a tap beside it does not close, polling `GET /api/obd_chip` once a
+  second and waiting for the chip's fresh bring-up, `done` = the Done
+  popup, `banner` = the same offer as a banner). Quick Setup's vehicle step
+  (setup.js, `W.chip`) opens the popup once per visit while
+  `fw.outdated`, keeps the banner `#qs-chip-banner` and disables Detect
+  with the chip `Update the chip first`; the Status page (Ali: a device set
+  up before never re-runs the wizard) shows the banner `#chip-fw-banner`
+  on every refresh while the chip is outdated and opens the popup once per
+  browser session (`sessionStorage`, `wican-chip-prompted-<device id>`).
+  The popup rules (`.qs-pop*`, `.qs-spin`) live in index.html since both
+  pages use them. Probes: `probe_chip_prompt.mjs` (six scenes); bench:
+  `.	est.ps1 chipprompt`.
+- **Automate > Data destinations.** One status chip per row in a fixed
+  column with a fixed vocabulary (`Not applied yet`, `Destinations
+  paused`, `Paused`, `Waiting for <names>`, `Failing · retry in N s`,
+  `Waiting for network` / `the broker`, `Sending · N`, `Waiting for the
+  first send`), the row's facts as a muted line under its topic or URL
+  (`.dest-sub`), Options as a named button, the options as a panel
+  (`.dest-panel`: Active on first, the type's rows, the Delivery counters
+  last), the Links row with a banner while a link is down, a restart notice
+  while a saved table is not running yet, Test disabled on a row that is
+  not applied. Probe: `probe_destinations.mjs`.
+- **Active on.** `networkPicker()` (beside `certSetPicker`) is a dropdown
+  that reads like a select and opens a list with check boxes: All networks
+  first, the station networks under Settings > WiFi (`wifiNetworkNames()`:
+  the main one and the backups, the connected one marked from
+  `/api/wifi/status` `ssid`), a stored name that is not configured any more
+  struck through; ticking a network clears All, unticking the last puts
+  All back; the value is the `networks` setting (names separated by commas,
+  "" = all). `networksRowPicker()` swaps the generated row of the Home
+  Assistant card (`settingsForm` + `advancedExcept` naming `networks`),
+  whose stats line reads `Waiting for <names>` while `on_network` is
+  false. The sleep countdown bar reads "Kept awake while the OBD chip
+  firmware is updated" for `activity_why: chip_update`.
+
 ### The Bluetooth memory profile and the VPN hold note (2026-10-31, issue #1024)
 
 Settings > Bluetooth is built by `bleForm()` instead of a bare

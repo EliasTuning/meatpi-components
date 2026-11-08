@@ -63,10 +63,13 @@ const W={cur:null,use:"ha",agree:[false,false,false],haInstalled:false,mdataOk:f
   scan:"idle",scanStatus:null,scanResult:null,stdPick:null,stdDefault:[],
   vehPhase:null,veh:null,vehName:"",profChoice:null,profCar:null,profList:undefined,carChoice:"detect",vehNameAuto:false,
   poll:{rate:5,rateCustom:3,minEvent:1,pause:"sleep",pauseV:12.5,pauseAll:false,std:true,specific:true,dtc:false,dtcMin:60},pollSeeded:false,
+  /* the OBD chip's firmware prompt on the vehicle step (2026-11-08):
+     unknown | running | failed | done, the last error, the attempts */
+  chip:{state:"unknown",err:"",tries:0},
   /* step 10, battery and sleep: the live trace, the two readings, the chosen pair */
   pwr:{phase:"idle",trace:[],base:null,charging:null,resting:null,tC:0,tD:0,tR:0,sleep:13.1,wake:13.2,touched:false,narrow:false,measured:false,skipped:false,misses:0}};
 /* device documents fetched while the wizard is open */
-const D={wifi:null,mqtt:null,dest:null,autopid:null,autopidSchema:null,cfg:null,vehicle:null,vehicles:null,webhook:null,wifiStatus:null,sleep:undefined,sleepSchema:undefined,usbhost:undefined,espnl:undefined,acm:undefined};
+const D={chip:null,wifi:null,mqtt:null,dest:null,autopid:null,autopidSchema:null,cfg:null,vehicle:null,vehicles:null,webhook:null,wifiStatus:null,sleep:undefined,sleepSchema:undefined,usbhost:undefined,espnl:undefined,acm:undefined};
 
 const CSS=`
 .qs{display:grid;grid-template-columns:232px minmax(0,1fr);background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;min-height:560px}
@@ -153,18 +156,7 @@ const CSS=`
 .qs-rv .v{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:14px}
 .qs-rv .d2{color:var(--text-2);font-size:12.5px;line-height:1.55}
 .qs-rv .d2 i{font-style:normal;color:var(--text-3);padding:0 7px}
-.qs-pop-modal{max-width:580px;padding:26px 28px 24px}
-.qs-pop{display:flex;gap:18px;align-items:flex-start}
-.qs-pop .ci{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;background:var(--success);color:#fff;flex:none}
-.qs-pop .ci svg{width:30px;height:30px;stroke-width:3}
-.qs-pop .ci.info{background:var(--primary)}
-.qs-pop h3{margin:0 0 10px;font-size:21px;line-height:1.25}
-.qs-pop p{margin:0 0 10px;font-size:15px;line-height:1.55}
-.qs-pop p.help{font-size:14px;margin-top:4px}
-.qs-pop code{font-size:14px;padding:2px 7px;border-radius:5px;background:var(--surface-2)}
-.qs-pop-modal .acts{margin-top:8px}
-.qs-pop-modal .acts .btn{padding:12px 20px;font-size:15px}
-.qs-pop-modal .acts .btn svg{width:18px;height:18px}
+/* the popup rules (.qs-pop, .qs-pop-modal, .qs-spin) live in index.html since 2026-11-08: the Status page shows the chip firmware popup too */
 .qs-steps{display:flex;flex-direction:column;gap:12px;counter-reset:s;margin:0;padding:0}
 .qs-steps li{display:grid;grid-template-columns:26px minmax(0,1fr);gap:2px 12px;align-items:start;list-style:none}
 .qs-steps li::before{counter-increment:s;content:counter(s);grid-column:1;grid-row:1;width:24px;height:24px;border-radius:50%;background:var(--primary);color:var(--on-primary);display:grid;place-items:center;font-size:12px;font-weight:700;margin-top:1px}
@@ -178,9 +170,6 @@ const CSS=`
 .qs-check.ok .ci{background:var(--success-tint);color:var(--success)}
 .qs-check.warn .ci{background:var(--warning-tint);color:var(--warning)}
 .qs-check.crit .ci{background:var(--danger-tint);color:var(--danger)}
-.qs-spin{width:18px;height:18px;border:2.5px solid var(--border-strong);border-top-color:var(--primary);border-radius:50%;animation:qsspin .8s linear infinite;flex:none;margin:0 auto}
-@keyframes qsspin{to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion:reduce){.qs-spin{animation:none}}
 .qs-link{display:flex;flex-direction:column;gap:10px;padding:18px 20px;border:1px solid color-mix(in srgb,var(--primary) 35%,transparent);border-radius:12px;background:var(--primary-tint)}
 .qs-link .url{font-family:var(--mono);font-size:15px;font-weight:600;overflow-wrap:anywhere;color:var(--text);user-select:all;-webkit-user-select:all}
 .qs-link .alt{margin:0;color:var(--text-2);font-size:13px;line-height:1.5}
@@ -1172,6 +1161,7 @@ const fmtAge=ts=>{if(!ts)return "";const d=Math.round(Date.now()/1000)-ts;if(d<0
 SCREENS.vehicle=async()=>{
   if(!D.autopid){D.autopid=strip(await tryGet("/api/settings/autopid"));D.autopidSchema=await tryGet("/api/settings/autopid/schema");}
   D.vehicles=await tryGet("/api/autopid/vehicles"); /* null = firmware without the store */
+  D.chip=await tryGet("/api/obd_chip");   /* the chip's firmware against the device's image (2026-11-08) */
   const maxName=(D.autopidSchema&&D.autopidSchema.properties&&D.autopidSchema.properties.vehicle&&D.autopidSchema.properties.vehicle.maxLength)||63;
   const err=h("div",{});
   const body=h("div",{class:"qs-body"});
@@ -1216,10 +1206,35 @@ SCREENS.vehicle=async()=>{
     try{await api("/api/autopid/vehicles/"+encodeURIComponent(e.key)+"/merge",{method:"POST",body:{into}});toast("Folded in","ok");D.vehicles=await tryGet("/api/autopid/vehicles");render();}
     catch(ex){toast(ex.message,"err");}
   }
+  /* The OBD chip's firmware (2026-11-08, Ali). On chip firmware V2.3.22 the
+     warm start the bring-up sends kills the chip's automatic protocol search
+     until the device is unplugged (the finding of 2026-11-08): the detection
+     here, and every app's ATSP0, cannot find the car. This device carries
+     V2.3.24, which does not have the fault. So the step asks for the update
+     before anything else: the page's shared flow (chipFw in index.html: the
+     popup with one button, the job with its progress, Done, the banner),
+     the same the Status page shows a device that was set up before. Closed
+     by a tap beside it, the offer stays as the banner and Detect waits for
+     the chip. WiCAN stays awake meanwhile (the sleep entry waits for the
+     job). */
+  const chipOld=()=>chipFw.outdated(D.chip)&&W.chip.state!=="done";
+  function chipFailed(why){W.chip.state="failed";W.chip.err=why;W.chip.tries++;render();}
+  async function startChipUpdate(){
+    if(W.chip.state==="running")return;
+    W.chip.state="running";W.chip.err="";render();
+    const r=await chipFw.run(D.chip);
+    if(!r.ok){chipFailed(r.why);return;}
+    D.chip=r.st;W.chip.state="done";render();
+    chipFw.done(r.st,()=>render());
+  }
   const render=()=>{
     const out=[];
     const v=W.veh;
     const phase=W.vehPhase;
+    if(chipOld()){
+      /* the offer stays on the step (the popup closed, or an attempt failed) */
+      out.push(chipFw.banner(D.chip,W.chip,startChipUpdate,"qs-chip-banner"));
+    }
     if(phase==="idle"||phase==="noanswer"){
       /* 1. which car (2026-10-26, discussion #1018, Ali: the profile before
          the probe): a published profile, or no profile and detection as
@@ -1241,11 +1256,11 @@ SCREENS.vehicle=async()=>{
       out.push(sub("2. Detect the vehicle"));
       if(phase==="noanswer")out.push(banner("warn","alert",h("b",{},"The car did not answer. "),
         (W.scanStatus&&W.scanStatus.error?W.scanStatus.error+". ":"")+"Usually the ignition is off or the plug is not seated. Turn the ignition on (an EV in ready mode) and try again. You can also skip: WiCAN detects the car by itself the first time it answers, and the Status page tells you when it has."));
-      const detBtn=btn(phase==="noanswer"?"Try again":"Detect my vehicle",startDetect,"pri",{icon:"refresh",disabled:!(W.plugged&&W.ignition)});
-      const ack=(key,id,title,text)=>h("label",{class:"qs-agree"},h("input",{type:"checkbox",id,checked:W[key],onchange:e=>{W[key]=e.target.checked;detBtn.disabled=!(W.plugged&&W.ignition);}}),h("div",{},h("b",{},title),h("span",{},text)));
+      const detBtn=btn(phase==="noanswer"?"Try again":"Detect my vehicle",startDetect,"pri",{icon:"refresh",disabled:!(W.plugged&&W.ignition)||chipOld()});
+      const ack=(key,id,title,text)=>h("label",{class:"qs-agree"},h("input",{type:"checkbox",id,checked:W[key],onchange:e=>{W[key]=e.target.checked;detBtn.disabled=!(W.plugged&&W.ignition)||chipOld();}}),h("div",{},h("b",{},title),h("span",{},text)));
       out.push(ack("plugged","qs-plugged","WiCAN is plugged into the OBD port","Under the dashboard, driver side on most cars."));
       out.push(ack("ignition","qs-ignition","Ignition is on","The engine can stay off. On an EV, \"ready\" mode."));
-      out.push(h("div",{},detBtn));
+      out.push(h("div",{class:"rowflex",style:"gap:12px"},detBtn,chipOld()?chip("Update the chip first","warn"):null));
       out.push(note("",W.carChoice==="profile"&&W.profCar
         ?"About 10 to 20 s. WiCAN pins the protocol the profile expects, reads the VIN and the standard PIDs, and sends the profile's first requests. A car that answers no standard request is still confirmed by those and stored under the name above."
         :"About 15 to 30 s. WiCAN learns the protocol, reads the VIN and finds the standard PIDs, then remembers all of it under this vehicle. Plug it into another car later and it tells the cars apart."));
@@ -1447,6 +1462,10 @@ SCREENS.vehicle=async()=>{
   if(W.vehPhase===undefined||W.vehPhase===null)W.vehPhase="idle";
   if(W.vehPhase==="result")await loadProfiles();
   render();
+  /* the chip's firmware first (2026-11-08): the popup once, on an
+     untouched chip; after a closed popup or a failed attempt the banner
+     carries the same button */
+  if(chipOld()&&W.chip.state==="unknown")chipFw.prompt(D.chip,startChipUpdate);
   return screen("Your vehicle","Say which car it is, then WiCAN detects it: the OBD protocol, the VIN and the standard PIDs it supports, with the profile's own requests for a car that answers nothing standard. Everything is stored under the car, so moving WiCAN between cars just works.",
     [body],
     [back("checks"),grow(),btn("Skip for now",()=>{W.noVeh=true;go("done");},"gh sm"),finish]);
