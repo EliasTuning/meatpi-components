@@ -57,10 +57,23 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 
 static const char *TAG = "can_core";
+
+/* Deinit wakes can_rx_task with CAN_RX_RAW_EVT, then blocks on this
+ * until the task has stored rx_exited and given it. A spin would starve
+ * the RX task when deinit runs at equal or higher priority. */
+static StaticSemaphore_t s_rx_exit_sem_buf;
+static SemaphoreHandle_t s_rx_exit_sem;
+
+/* esp_timer us immediately before the RX task's vTaskDelete(NULL).
+ * can_core_init memsets the handle, so this cannot live there. The
+ * 20 ms static-TCB settle is paid on the next start, and only for
+ * however much of it is still left. */
+static int64_t s_rx_deleted_us;
 
 /* RX task stack size (bytes) */
 #define CAN_CORE_RX_TASK_STACK   4096
@@ -239,6 +252,11 @@ static void can_rx_task(void *arg)
     }
 
     handle->rx_exited = true; /* deinit may stop the driver now */
+    if (s_rx_exit_sem != NULL)
+    {
+        (void)xSemaphoreGive(s_rx_exit_sem);
+    }
+    s_rx_deleted_us = esp_timer_get_time();
     vTaskDelete(NULL);
 }
 
@@ -283,6 +301,35 @@ elm327_err_t can_core_init(can_core_handle_t *handle,
     static StaticTask_t s_rx_tcb;
     static EXT_RAM_BSS_ATTR StackType_t
         s_rx_stack[CAN_CORE_RX_TASK_STACK];
+
+    if (s_rx_exit_sem == NULL)
+    {
+        s_rx_exit_sem = xSemaphoreCreateBinaryStatic(&s_rx_exit_sem_buf);
+    }
+    else
+    {
+        while (xSemaphoreTake(s_rx_exit_sem, 0) == pdTRUE)
+        {
+        }
+    }
+
+    /* s_rx_tcb is static. Reuse it only after the previous task's
+     * vTaskDelete has had 20 ms. can_stop must not pay this: the pin
+     * is already released, and a STIL retry starts hundreds of ms later. */
+    if (s_rx_deleted_us != 0)
+    {
+        int64_t remain_us = 20000 - (esp_timer_get_time() - s_rx_deleted_us);
+        if (remain_us > 0)
+        {
+            TickType_t ticks = pdMS_TO_TICKS((uint32_t)((remain_us + 999) / 1000));
+            if (ticks == 0)
+            {
+                ticks = 1;
+            }
+            vTaskDelay(ticks);
+        }
+    }
+
     TaskHandle_t task_hdl =
         xTaskCreateStaticPinnedToCore(can_rx_task, "can_core_rx",
                                       CAN_CORE_RX_TASK_STACK, handle,
@@ -320,21 +367,47 @@ void can_core_deinit(can_core_handle_t *handle)
 #ifdef ESP_PLATFORM
     can_link_tx_close(handle); /* no transmit inside the driver below */
 
-    /* The RX task may be BLOCKED inside twai_receive (100 ms slices),
-     * uninstalling the driver under it deletes the RX queue it sleeps
-     * on (spinlock assert; crashed every sleep entry 2026-07-20). Wait
-     * for its exit ack, THEN stop the driver. Worst case one receive
-     * slice + dispatch; 1 s is a hang, log and bail out anyway. */
-    for (int i = 0; i < 100 && !handle->rx_exited; i++)
+    /* The RX task blocks in xQueueReceive(can_drv_rx_q), a static queue
+     * that is never deleted (up to CAN_AB_WATCH_MS while the link is up).
+     * A CAN_RX_RAW_EVT wakes that receive. If the queue is full the task
+     * is not blocked and sees initialised on its next loop; do not drop
+     * a frame to make room. Then wait until it has stored rx_exited and
+     * given s_rx_exit_sem. Taking the semaphore yields, so a deinit at
+     * equal or higher priority cannot starve can_rx_task. If rx_exited
+     * is already set, the give already happened: take it without waiting
+     * for another one. Do not vTaskDelay here. The 20 ms static-TCB
+     * settle lives in can_core_init, before s_rx_tcb is reused. The
+     * 2026-07-20 crash was can_drv_stop while a receive still blocked
+     * on the queue the driver was about to delete, so can_drv_stop runs
+     * only after rx_exited, or after this 1 s hang timeout. */
+    if (can_drv_rx_q != NULL)
     {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        can_rx_raw_t wake;
+        memset(&wake, 0, sizeof(wake));
+        wake.flags = CAN_RX_RAW_EVT;
+        (void)xQueueSend(can_drv_rx_q, &wake, 0);
     }
-    if (!handle->rx_exited)
+
+    if (handle->rx_exited)
     {
-        ESP_LOGE(TAG, "rx task did not exit; uninstalling anyway");
+        if (s_rx_exit_sem != NULL &&
+            xSemaphoreTake(s_rx_exit_sem, 0) != pdTRUE)
+        {
+            (void)xSemaphoreTake(s_rx_exit_sem, pdMS_TO_TICKS(1000));
+        }
     }
-    vTaskDelay(pdMS_TO_TICKS(20)); /* let vTaskDelete(NULL) finish
-                                    * before the static TCB is reusable */
+    else if (s_rx_exit_sem == NULL ||
+             xSemaphoreTake(s_rx_exit_sem, pdMS_TO_TICKS(1000)) != pdTRUE)
+    {
+        if (!handle->rx_exited)
+        {
+            ESP_LOGE(TAG, "rx task did not exit; uninstalling anyway");
+        }
+        else if (s_rx_exit_sem != NULL)
+        {
+            (void)xSemaphoreTake(s_rx_exit_sem, 0);
+        }
+    }
     can_drv_stop(handle);
 #endif
 
