@@ -10,7 +10,9 @@
 
 #include <stddef.h>
 
-#ifdef ESP_PLATFORM
+/* The linux host suite defines ESP_PLATFORM and has no driver/gpio.h.
+ * __linux__ is the host compiler; the device toolchain does not set it. */
+#if defined(ESP_PLATFORM) && !defined(__linux__)
 
 #include "sdkconfig.h"
 
@@ -166,7 +168,7 @@ int se_gpio_touched_count(void)
     return s_n_touched;
 }
 
-#ifdef ESP_PLATFORM
+#if defined(ESP_PLATFORM) && !defined(__linux__)
 
 #define RMT_BLOCK_SYMBOLS 48
 #define RMT_LOOP_MAX      1023
