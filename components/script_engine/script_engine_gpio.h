@@ -52,6 +52,6 @@ int  se_gpio_touched_count(void);
 
 void se_gpio_write(int pin, int level);
 
-/** Blocks until the RMT has sent the pulses. false: no RMT channel free or
- *  the transmission failed. */
+/** Blocks until the pulses have been sent. CAN_TX is bit-banged; other pins
+ *  use the RMT. false: no RMT channel free or the transmission failed. */
 bool se_gpio_pwm(int pin, const se_pwm_plan_t *plan);

@@ -1,8 +1,10 @@
 /**
  * @file script_engine_gpio.c
- * @brief Pin checks for digitalWrite / digitalPWM and the RMT pulse sender.
- *        digitalPWM is timed by the RMT peripheral: the CPU only loads the
- *        symbols and waits, the hardware drives every edge.
+ * @brief Pin checks for digitalWrite / digitalPWM and the pulse sender.
+ *        Other pins are timed by the RMT peripheral. CAN_TX is a busy-wait
+ *        bitbang: the first thing that drives the pad is the on-level.
+ *        An idle write or rmt_new_tx_channel before that edge holds a
+ *        constant level through the radar's sample window.
  */
 #include "script_engine_gpio.h"
 
@@ -16,6 +18,7 @@
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 
 static const char *TAG = "script_gpio";
 
@@ -190,8 +193,49 @@ static bool send_train(rmt_channel_handle_t ch, rmt_encoder_handle_t enc,
     return rmt_tx_wait_all_done(ch, wait_ms) == ESP_OK;
 }
 
+/* CAN_TX only. Do not write the idle level first, and do not create an
+ * RMT channel here: both hold the pad at a constant level for about a
+ * millisecond, which is already past the 0.6 ms fall limit. The first
+ * drive is the on-level (dominant when idle is high). Each level then
+ * lasts the planned time. Interrupts stay enabled; one level is 1.5 ms,
+ * and a 300 ms lock is not acceptable. The pad is left an output at idle. */
+static void bitbang_can_tx(int pin, const se_pwm_plan_t *plan)
+{
+    uint32_t on_us = (uint32_t)(((uint64_t)plan->on_ticks * 1000000ULL +
+                                 plan->res_hz / 2) / plan->res_hz);
+    uint32_t off_us = (uint32_t)(((uint64_t)plan->off_ticks * 1000000ULL +
+                                  plan->res_hz / 2) / plan->res_hz);
+    int on = plan->idle ? 0 : 1;
+    int off = on ? 0 : 1;
+
+    gpio_set_level((gpio_num_t)pin, on);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
+
+    for (uint32_t i = 0; i < plan->rounds; i++)
+    {
+        if (i != 0)
+        {
+            gpio_set_level((gpio_num_t)pin, on);
+        }
+        esp_rom_delay_us(on_us);
+        gpio_set_level((gpio_num_t)pin, off);
+        esp_rom_delay_us(off_us);
+    }
+
+    gpio_set_level((gpio_num_t)pin, plan->idle ? 1 : 0);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
+}
+
 bool se_gpio_pwm(int pin, const se_pwm_plan_t *plan)
 {
+    if (pin == se_can_tx_gpio())
+    {
+        bitbang_can_tx(pin, plan);
+        return true;
+    }
+
+    /* Other pins. This idle write and the channel setup below must not
+     * move onto CAN_TX: they run before the first edge. */
     gpio_set_level((gpio_num_t)pin, plan->idle ? 1 : 0);
     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
 
