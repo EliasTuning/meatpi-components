@@ -40,6 +40,7 @@
 #include <string.h>
 
 #include "esp_attr.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -52,6 +53,8 @@
 #include "bridge_endpoints_private.h"
 
 #define BEP_CAN_MAX_SUBS 4
+
+static const char *TAG = "bridge_endpoints";
 
 static QueueHandle_t s_can_rx_q;        /* can_core_frame_t from can_manager */
 static QueueHandle_t s_can_qs[BEP_CAN_MAX_SUBS]; /* bridge queues (fan-out)   */
@@ -137,6 +140,33 @@ static void can_pump_task(void *arg)
 
     s_can_pump = NULL;
     vTaskDelete(NULL);
+}
+
+static void bep_can_rebind(void)
+{
+    esp_err_t err;
+
+    if (s_can_nsubs <= 0 || s_can_rx_q == NULL)
+    {
+        return;
+    }
+
+    err = can_manager_subscribe_queue(
+        s_can_rx_q, s_can_filter, s_can_mask, s_can_filter_ext,
+        s_can_mask == 0, &s_can_sub_idx);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "can bridge resubscribe failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    (void)can_manager_subscriber_name(s_can_sub_idx, "bridge");
+    ESP_LOGI(TAG, "can bridge resubscribed after the bus came back");
+}
+
+void bep_can_bind_restart(void)
+{
+    can_manager_on_bus_up(bep_can_rebind);
 }
 
 esp_err_t bep_can_subscribe(QueueHandle_t q)

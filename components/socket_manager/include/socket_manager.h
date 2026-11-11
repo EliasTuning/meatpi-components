@@ -79,7 +79,7 @@ typedef struct
     uint32_t bytes_in;
     uint32_t bytes_out;
     uint32_t rx_drops;     /* subscriber queue full: chunk dropped        */
-    uint32_t tx_drops;     /* client send failed/stalled: client dropped  */
+    uint32_t tx_drops;     /* stalled send: chunk dropped, client kept   */
     uint32_t reconnects;   /* listener (re)creations after failure         */
     uint32_t refused;      /* connections refused at max_clients           */
 } socket_stats_t;

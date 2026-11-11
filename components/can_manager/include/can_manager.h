@@ -80,6 +80,11 @@ esp_err_t can_manager_init(void);
 /** Bring the bus up per settings (no-op when disabled). §4 lifecycle. */
 esp_err_t can_manager_start(void);
 
+/** Called at the end of a start that installed the driver. One hook.
+ *  can_core_deinit has already cleared queue subscribers, so a consumer
+ *  that kept its RX queue across stop/start resubscribes here. */
+void can_manager_on_bus_up(void (*fn)(void));
+
 /** Park the bus: TWAI stopped/uninstalled, transceiver into standby.
  *  Called by main's sleep-prepare BEFORE sleep_manager's GPIO hold. */
 esp_err_t can_manager_stop(void);

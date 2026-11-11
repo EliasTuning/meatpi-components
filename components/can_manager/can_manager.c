@@ -49,6 +49,7 @@ static const char *TAG = "can_manager";
 
 static bool s_started;
 static bool s_running;
+static void (*s_bus_up_hook)(void);
 
 /* start / stop / probe never overlap (the probe borrows the one handle) */
 static SemaphoreHandle_t s_life;
@@ -213,7 +214,19 @@ static esp_err_t start_locked(void)
                  silent ? " SILENT" : "");
     }
 
+    /* can_core_deinit wipes queue subscribers. A bridge that stayed
+     * subscribed across can_stop()/can_start() has to join again. */
+    if (s_running && s_bus_up_hook != NULL)
+    {
+        s_bus_up_hook();
+    }
+
     return ESP_OK;
+}
+
+void can_manager_on_bus_up(void (*fn)(void))
+{
+    s_bus_up_hook = fn;
 }
 
 void can_manager_transceiver(bool active)

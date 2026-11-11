@@ -220,6 +220,136 @@ static void pump_raw_batch(bm_bridge_t *br, QueueHandle_t q,
     }
 }
 
+typedef struct
+{
+    uint8_t *buf;
+    size_t len;
+    size_t cap;
+} tr_batch_t;
+
+static esp_err_t tr_batch_sink(void *arg, const uint8_t *out, size_t out_len)
+{
+    tr_batch_t *b = arg;
+
+    if (out_len > b->cap - b->len)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(b->buf + b->len, out, out_len);
+    b->len += out_len;
+    return ESP_OK;
+}
+
+static void tr_batch_flush(bm_bridge_t *br, const bridge_endpoint_t *dst,
+                           tr_batch_t *b)
+{
+    if (b->len == 0)
+    {
+        return;
+    }
+
+    if (dst->send(b->buf, b->len) != ESP_OK)
+    {
+        br->stats.send_errors++;
+    }
+
+    b->len = 0;
+}
+
+/** One codec call into the batch. A line that does not fit is sent only
+ *  after the bytes already gathered, so a Lawicel line is never split. */
+static void tr_feed(bm_bridge_t *br, const bridge_endpoint_t *dst,
+                    tr_batch_t *batch, const bridge_chunk_t *chunk, bool a2b)
+{
+    void *ctx = a2b ? br->ctx_a2b : br->ctx_b2a;
+    esp_err_t err;
+
+    if (batch->cap - batch->len < 64)
+    {
+        tr_batch_flush(br, dst, batch);
+    }
+
+    err = a2b
+        ? br->tr->decode(ctx, chunk->data, chunk->len, tr_batch_sink, batch)
+        : br->tr->encode(ctx, chunk->data, chunk->len, tr_batch_sink, batch);
+
+    if (err == ESP_ERR_NO_MEM)
+    {
+        tr_batch_flush(br, dst, batch);
+        err = a2b
+            ? br->tr->decode(ctx, chunk->data, chunk->len, tr_batch_sink, batch)
+            : br->tr->encode(ctx, chunk->data, chunk->len, tr_batch_sink, batch);
+    }
+
+    if (err != ESP_OK)
+    {
+        br->stats.codec_errors++;
+    }
+
+    if (a2b)
+    {
+        br->stats.a2b_chunks++;
+        br->stats.a2b_bytes += chunk->len;
+    }
+    else
+    {
+        br->stats.b2a_chunks++;
+        br->stats.b2a_bytes += chunk->len;
+    }
+}
+
+/** Translated path: gather queued chunks into one send, same cap as the
+ *  raw coalescer. SLCAN lines concatenate. The queue set is drained the
+ *  same way as pump_raw_batch so its container does not fill with stale
+ *  notifications. */
+static void pump_translated_batch(bm_bridge_t *br, QueueHandle_t q,
+                                  const bridge_chunk_t *first, bool a2b)
+{
+    const bridge_endpoint_t *dst = a2b ? br->b : br->a;
+    tr_batch_t batch = { .buf = br->batch, .len = 0, .cap = BM_COALESCE_MAX };
+    bridge_chunk_t more;
+    bridge_chunk_t other;
+    bool have_other = false;
+
+    tr_feed(br, dst, &batch, first, a2b);
+
+    while (batch.len + 64 <= batch.cap)
+    {
+        QueueSetMemberHandle_t m = xQueueSelectFromSet(br->set, 0);
+
+        if (m == NULL)
+        {
+            break;
+        }
+
+        if (m == (QueueSetMemberHandle_t)q)
+        {
+            if (xQueueReceive(q, &more, 0) != pdTRUE)
+            {
+                break;
+            }
+
+            tr_feed(br, dst, &batch, &more, a2b);
+        }
+        else
+        {
+            if (xQueueReceive((QueueHandle_t)m, &other, 0) == pdTRUE)
+            {
+                have_other = true;
+            }
+            break;
+        }
+    }
+
+    tr_batch_flush(br, dst, &batch);
+
+    if (have_other)
+    {
+        pump_one(br, &other, !a2b);
+    }
+}
+
 static void pump_one(bm_bridge_t *br, const bridge_chunk_t *chunk, bool a2b)
 {
     const bridge_endpoint_t *dst = a2b ? br->b : br->a;
@@ -315,7 +445,7 @@ static void pump_task(void *arg)
             }
             else
             {
-                pump_one(br, &chunk, a2b);
+                pump_translated_batch(br, (QueueHandle_t)ready, &chunk, a2b);
             }
         }
 

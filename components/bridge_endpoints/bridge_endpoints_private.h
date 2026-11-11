@@ -48,6 +48,7 @@ esp_err_t bep_usb_start(void);
 esp_err_t bep_can_send(const uint8_t *d, size_t l);
 esp_err_t bep_can_subscribe(QueueHandle_t q);
 esp_err_t bep_can_unsubscribe(QueueHandle_t q);
+void bep_can_bind_restart(void);
 
 #ifdef __cplusplus
 }

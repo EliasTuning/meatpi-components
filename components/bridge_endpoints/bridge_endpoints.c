@@ -187,6 +187,8 @@ static const bridge_endpoint_t WS_EPS[WEBSOCKET_MANAGER_MAX_CHANNELS] =
 
 esp_err_t bridge_endpoints_init(void)
 {
+    bep_can_bind_restart();
+
     static const log_descriptor_t LOG_DESC =
         { "bridge_endpoints", ESP_LOG_INFO };
     static const bridge_endpoint_t FIXED[] =
