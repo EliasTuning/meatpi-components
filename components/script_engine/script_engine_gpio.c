@@ -16,6 +16,7 @@
 
 #include "sdkconfig.h"
 
+#include "can_manager.h"
 #include "driver/gpio.h"
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
@@ -316,9 +317,20 @@ bool se_gpio_pwm(int pin, const se_pwm_plan_t *plan)
 
 void se_gpio_release_all(void)
 {
+    /* The script called can_start() after the pulse. The controller owns
+     * CAN TX again. Resetting that pad here glitches the bus and the
+     * radar's FlexCAN stops answering. */
+    bool can_owns_pins = can_manager_core_handle() != NULL;
+
     for (int i = 0; i < s_n_touched; i++)
     {
         gpio_num_t pin = (gpio_num_t)s_touched[i];
+
+        if (can_owns_pins &&
+            ((int)pin == se_can_tx_gpio() || (int)pin == se_can_rx_gpio()))
+        {
+            continue;
+        }
 
         /* CAN TX goes back recessive, not dominant */
         gpio_set_level(pin, (int)pin == se_can_tx_gpio() ? 1 : 0);
