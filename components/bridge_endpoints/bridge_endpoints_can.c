@@ -84,13 +84,28 @@ void bep_can_set_filter(uint32_t filter, uint32_t mask, bool ext)
 esp_err_t bep_can_send(const uint8_t *d, size_t l)
 {
     can_core_frame_t f;
+    size_t off = 0;
+    size_t n;
 
-    if (!can_wire_decode(d, l, &f))
+    while ((n = can_wire_decode_next(d + off, l - off, &f)) > 0)
+    {
+        esp_err_t err = can_manager_send(f.id, f.ext, f.rtr, f.data, f.dlc);
+
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+
+        off += n;
+    }
+
+    if (l == 0 || off < l)
     {
         s_can_ep_drops++;
         return ESP_ERR_INVALID_ARG;
     }
-    return can_manager_send(f.id, f.ext, f.rtr, f.data, f.dlc);
+
+    return ESP_OK;
 }
 
 static void can_pump_task(void *arg)
