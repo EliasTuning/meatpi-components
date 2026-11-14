@@ -76,7 +76,9 @@ Current config + runtime stats.
   the last reply that carried a body: `applied`, `same` (the revision in
   use: nothing to do, counted in neither), `untrusted`, `pinned`,
   `too_long`, `not_json`, `invalid`, `failed` (valid, the device could not
-  store it), `""` when no reply has carried a body.
+  store it), `removed` (a `410`: the device cleared its webhook, counted
+  in `applied`; see "Removed in Home Assistant"), `""` when no reply has
+  carried a body.
 
 ## DELETE /api/webhook
 
@@ -202,9 +204,38 @@ then carries `status` (+ `config`) only - a status-only push is valid
 identity rejected** → no failover to the 2nd URL that cycle; after 3
 consecutive 403-cycles the poster PAUSES (`status: "rejected"` in
 `GET /api/webhook`) until the next `POST /api/webhook` registration or
-reboot, the contract's "stop; needs user attention" action. Other
-failures retry next cycle with `retries`/`last_error` tracked. Any `2xx`
-is a delivered push, with or without a body.
+reboot, the contract's "stop; needs user attention" action. **`410`
+with `{"webhook": {"removed": true}}`** (2026-11-15) → the device was
+removed in Home Assistant: the webhook is cleared and the pushes stop
+(below). Other failures retry next cycle with `retries`/`last_error`
+tracked. Any `2xx` is a delivered push, with or without a body.
+
+### Removed in Home Assistant: `410 Gone` (2026-11-15)
+
+Home Assistant can only tell a device to stop by calling it, and a car
+that is asleep or away when its entry is removed cannot be called. Home
+Assistant answers a push to a webhook it does not know with `200`, so
+that car went on pushing for good and counted every push as delivered.
+The integration now keeps the webhook of a removed entry answering:
+
+```
+HTTP/1.1 410 Gone
+{"webhook": {"removed": true}}
+```
+
+| The reply | The device |
+|---|---|
+| `410` with the marker, from a server it may take settings from | Clears the webhook as `DELETE /api/webhook` does (no address, off, no revision; the interval and the other settings stay), in one write. `status` reads `removed` until the next start, `reply.last` reads `removed`. No push follows. |
+| `410` with the marker while the webhook is pinned on the device | Kept (`pinned`). The push failed. |
+| `410` with the marker from a server it takes no settings from | Kept (`untrusted`). The push failed. |
+| `410` without the marker (no body, a page, other JSON, a body over 2048 bytes) | Some other server's: a failed push like any other (`last_error` `http=410`), the second address is tried. |
+
+The rule for "a server it may take settings from" is the one of the
+settings in the reply (below): https to a host name, or a private
+address not reached through a network marked untrusted. A forged 410
+over plain http across the internet cannot switch a car's pushes off.
+A registration brings the webhook back (the integration registers when
+the device is added again).
 
 ### Settings in the reply to a push (2026-11-14)
 

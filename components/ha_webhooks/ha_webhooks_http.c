@@ -225,11 +225,8 @@ static esp_err_t delete_handler(httpd_req_t *req)
     hw_config_t c = { 0 };
 
     (void)hw_config_get(&c);
-    c.url[0] = '\0';
-    c.url2[0] = '\0';
-    c.enabled = false;
+    hw_config_unregister(&c);
     c.manual_override = false;
-    hw_rev_stamp(&c, NULL); /* nothing left for a revision to name */
 
     (void)hw_config_apply_live(&c, true);
 

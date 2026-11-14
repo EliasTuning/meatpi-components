@@ -81,6 +81,17 @@ identical on every product built from the V6 core.
   from HA (identity rejection) skips failover; 3 consecutive rejected
   cycles pause the poster (`status: "rejected"`) until the next
   registration, the contract's "stop; needs user attention" action.
+- **Removed in Home Assistant** (2026-11-15): a `410 Gone` with
+  `{"webhook": {"removed": true}}` clears the webhook, as `DELETE
+  /api/webhook` does (`gone_process()` in `ha_webhooks_post.c`, the rule
+  in `hw_gone_decide()`, pure). Home Assistant cannot call a car that is
+  asleep or away when its entry is removed, and it answers a push to a
+  webhook it does not know with 200: that car pushed for good and counted
+  every push as delivered. The integration keeps the removed webhook
+  answering 410 (the way Home Assistant's own mobile_app tells its apps).
+  Only the marker counts (a bare 410 is some other server's: a failed
+  push), only from a server the settings in a reply would be taken from,
+  and never while the webhook is pinned on the device.
 - **gzip** (setting, default off; either data mode): the push body is
   compressed via the **ROM miniz** deflate (`tdefl_*` are mask-ROM
   symbols: zero flash cost) with hand-rolled gzip framing (10 B header
@@ -162,7 +173,9 @@ identical on every product built from the V6 core.
 
 ## Testing
 
-- `host_test/` (`.\test.ps1 host ha_webhooks`, 9 tests): the pure rules of
+- `host_test/` (`.\test.ps1 host ha_webhooks`, 11 tests; the two of
+  2026-11-15: what a 410 means, with and without the marker, pinned,
+  untrusted, and what clearing the webhook leaves): the pure rules of
   `ha_webhooks_reg.c`. The revision's alphabet and length, the fingerprint
   (each of the four settings breaks it, the user's own settings do not),
   the registration object without a revision (the older rules and their

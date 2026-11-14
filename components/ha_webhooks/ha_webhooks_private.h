@@ -79,6 +79,7 @@ typedef struct
 typedef struct
 {
     char     status[HW_STATUS_LEN];  /* "ok" / "failed" / "disabled" /
+                                       "removed" (a 410, 2026-11-15) /
                                         "rejected" (HA 403 pause)         */
     char     last_post[HW_TS_LEN];   /* UTC ISO8601 of last success       */
     uint32_t success_count;
@@ -122,6 +123,7 @@ typedef enum
     HW_REPLY_NOT_JSON,   /* the body is not a JSON object                  */
     HW_REPLY_INVALID,    /* the webhook object failed validation           */
     HW_REPLY_FAILED,     /* valid, the device could not store it           */
+    HW_REPLY_REMOVED,    /* a 410: Home Assistant removed this device      */
 } hw_reply_t;
 
 /** True for a revision: 1 to 16 characters of `A-Z a-z 0-9 _ -`. */
@@ -177,6 +179,23 @@ bool hw_reply_trusted(bool https_named, bool peer_known, bool peer_private,
 hw_reply_t hw_reply_decide(const char *body, size_t len, bool truncated,
                            const hw_config_t *cur, bool trusted,
                            hw_config_t *out, hw_reg_err_t *err);
+
+/**
+ * Decide what a 410 Gone means (2026-11-15). Home Assistant keeps the
+ * webhook of a device it removed answering 410 with
+ * `{"webhook": {"removed": true}}`. HW_REPLY_REMOVED = clear the webhook.
+ * HW_REPLY_PINNED / HW_REPLY_UNTRUSTED = the marker is there and the device
+ * keeps its settings (the user pinned them here; the server is not one a
+ * registration would be taken from). HW_REPLY_NONE = a 410 without the
+ * marker, some other server's: a failed push like any other.
+ */
+hw_reply_t hw_gone_decide(const char *body, size_t len, bool truncated,
+                          const hw_config_t *cur, bool trusted);
+
+/** Take the webhook out of @p c: no address, off, no revision. The user's
+ *  own settings stay (the interval, the mode, the networks, the pin). What
+ *  `DELETE /api/webhook` and a 410 from Home Assistant leave behind. */
+void hw_config_unregister(hw_config_t *c);
 
 /** A word for `GET /api/webhook` and the log: "" for HW_REPLY_NONE. */
 const char *hw_reply_str(hw_reply_t r);

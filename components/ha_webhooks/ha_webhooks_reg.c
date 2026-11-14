@@ -321,6 +321,49 @@ hw_reply_t hw_reply_decide(const char *body, size_t len, bool truncated,
     return r;
 }
 
+hw_reply_t hw_gone_decide(const char *body, size_t len, bool truncated,
+                          const hw_config_t *cur, bool trusted)
+{
+    /* any server can answer 410: only Home Assistant's marker counts */
+    if (body == NULL || len == 0 || truncated || len > HW_REPLY_MAX)
+    {
+        return HW_REPLY_NONE;
+    }
+
+    cJSON *root = cJSON_ParseWithLength(body, len);
+    bool marked = false;
+
+    if (cJSON_IsObject(root))
+    {
+        const cJSON *wh = cJSON_GetObjectItemCaseSensitive(root, "webhook");
+
+        marked = cJSON_IsObject(wh) &&
+                 cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(wh, "removed"));
+    }
+
+    cJSON_Delete(root);
+
+    if (!marked)
+    {
+        return HW_REPLY_NONE;
+    }
+
+    if (cur->manual_override)
+    {
+        return HW_REPLY_PINNED;
+    }
+
+    return trusted ? HW_REPLY_REMOVED : HW_REPLY_UNTRUSTED;
+}
+
+void hw_config_unregister(hw_config_t *c)
+{
+    c->url[0] = '\0';
+    c->url2[0] = '\0';
+    c->enabled = false;
+    hw_rev_stamp(c, NULL); /* nothing left for a revision to name */
+}
+
 const char *hw_reply_str(hw_reply_t r)
 {
     switch (r)
@@ -333,6 +376,7 @@ const char *hw_reply_str(hw_reply_t r)
         case HW_REPLY_NOT_JSON:  return "not_json";
         case HW_REPLY_INVALID:   return "invalid";
         case HW_REPLY_FAILED:    return "failed";
+        case HW_REPLY_REMOVED:   return "removed";
         case HW_REPLY_NONE:
         default:                 return "";
     }

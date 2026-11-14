@@ -183,6 +183,33 @@ static bool url_is_raw_ip_https(const char *url)
 
 /* ---- settings in the reply (2026-11-14) ----------------------------------- */
 
+/** The settings as they are now, into @p cur, and whether the server that
+ *  answered may change them (hw_reply_trusted). False when they are no
+ *  longer the ones the push went out with: they changed while it was under
+ *  way (a registration, a DELETE), and that change is newer than anything
+ *  this reply says. */
+static bool reply_context(const hw_config_t *sent, const char *url,
+                          const http_client_response_t *resp,
+                          hw_config_t *cur, bool *trusted)
+{
+    if (!hw_config_get(cur) || strcmp(cur->url, sent->url) != 0 ||
+        strcmp(cur->url2, sent->url2) != 0 || cur->enabled != sent->enabled ||
+        cur->interval_s != sent->interval_s ||
+        strcmp(cur->rev, sent->rev) != 0)
+    {
+        ESP_LOGD(TAG, "the settings changed during the push: reply left alone");
+        return false;
+    }
+
+    bool named = strncasecmp(url, "https://", 8) == 0 &&
+                 !url_is_raw_ip_https(url);
+
+    *trusted = hw_reply_trusted(
+        named, resp->conn_known, resp->peer_private,
+        wifi_manager_addr_on_untrusted_sta(resp->local_ip4));
+    return true;
+}
+
 /**
  * The reply to a delivered push may carry Home Assistant's webhook
  * settings (`{"webhook": {...}}` in a 200): for a car it cannot reach to
@@ -204,23 +231,14 @@ static hw_reply_t reply_process(const hw_config_t *sent, const char *url,
         return HW_REPLY_NONE;
     }
 
-    /* the settings may have changed while the push was under way (a
-       registration, a DELETE): that change is newer than this reply */
     hw_config_t cur;
+    bool trusted;
 
-    if (!hw_config_get(&cur) || strcmp(cur.url, sent->url) != 0 ||
-        strcmp(cur.url2, sent->url2) != 0 || cur.enabled != sent->enabled ||
-        cur.interval_s != sent->interval_s || strcmp(cur.rev, sent->rev) != 0)
+    if (!reply_context(sent, url, resp, &cur, &trusted))
     {
-        ESP_LOGD(TAG, "the settings changed during the push: reply left alone");
         return HW_REPLY_NONE;
     }
 
-    bool named = strncasecmp(url, "https://", 8) == 0 &&
-                 !url_is_raw_ip_https(url);
-    bool trusted = hw_reply_trusted(
-        named, resp->conn_known, resp->peer_private,
-        wifi_manager_addr_on_untrusted_sta(resp->local_ip4));
     hw_config_t next;
     hw_reg_err_t why = HW_REG_OK;
     hw_reply_t r = hw_reply_decide(resp->data, resp->len, resp->truncated,
@@ -259,9 +277,62 @@ static hw_reply_t reply_process(const hw_config_t *sent, const char *url,
     return r;
 }
 
+/**
+ * A 410 Gone (2026-11-15): Home Assistant removed this device. It could not
+ * tell a car that was asleep or away at that moment, and it answers a push
+ * to a webhook it does not know with 200: the device went on pushing for
+ * good and counted every push as delivered. The integration now keeps the
+ * removed webhook answering 410 with `{"webhook": {"removed": true}}`.
+ * From a server the device would take settings from, that clears the
+ * webhook as `DELETE /api/webhook` does, unless the user pinned it here.
+ * A 410 without the marker is some other server's: a failed push.
+ */
+static hw_reply_t gone_process(const hw_config_t *sent, const char *url,
+                               const http_client_response_t *resp)
+{
+    static hw_reply_t s_said; /* one W line per kind, as reply_process */
+    hw_config_t cur;
+    bool trusted;
+
+    if (!reply_context(sent, url, resp, &cur, &trusted))
+    {
+        return HW_REPLY_NONE;
+    }
+
+    hw_reply_t r = hw_gone_decide(resp->data, resp->len, resp->truncated,
+                                  &cur, trusted);
+
+    if (r == HW_REPLY_REMOVED)
+    {
+        hw_config_unregister(&cur);
+
+        if (hw_config_apply_live(&cur, false) != ESP_OK)
+        {
+            r = HW_REPLY_FAILED;
+        }
+    }
+
+    if (r == HW_REPLY_REMOVED)
+    {
+        ESP_LOGW(TAG, "this device was removed in Home Assistant (HTTP 410): "
+                      "the webhook is cleared, the pushes stop");
+        s_said = HW_REPLY_NONE;
+    }
+    else if (r != HW_REPLY_NONE && r != s_said)
+    {
+        ESP_LOGW(TAG, "Home Assistant says this device was removed there "
+                      "(HTTP 410); the webhook is kept: %s",
+                 hw_reply_str(r));
+        s_said = r;
+    }
+
+    return r;
+}
+
 /** Try each configured URL in order; first 2xx wins. Fills @p err;
  *  sets @p rejected on an HA identity rejection (HTTP 403) and @p reply to
- *  what the delivering reply said about the webhook settings. */
+ *  what the delivering reply said about the webhook settings, or to what
+ *  became of a 410 (HW_REPLY_REMOVED: the webhook is cleared). */
 static bool post_failover(const hw_config_t *c, const void *body,
                           size_t body_len, bool gzipped,
                           char err[HW_ERR_LEN], char okstatus[HW_STATUS_LEN],
@@ -318,6 +389,25 @@ static bool post_failover(const hw_config_t *c, const void *body,
             *rejected = true;
             http_client_manager_free(&resp);
             return false;
+        }
+
+        if (r == ESP_OK && resp.status_code == 410)
+        {
+            hw_reply_t gone = gone_process(c, urls[i], &resp);
+
+            if (gone != HW_REPLY_NONE)
+            {
+                *reply = gone;
+            }
+
+            if (gone == HW_REPLY_REMOVED)
+            {
+                /* the second URL is the SAME Home Assistant */
+                snprintf(err, HW_ERR_LEN,
+                         "http=410 removed in Home Assistant");
+                http_client_manager_free(&resp);
+                return false;
+            }
         }
 
         if (r != ESP_OK)
@@ -459,9 +549,9 @@ static void poster_task(void *arg)
 
         if (reply != HW_REPLY_NONE)
         {
-            if (reply == HW_REPLY_APPLY)
+            if (reply == HW_REPLY_APPLY || reply == HW_REPLY_REMOVED)
             {
-                st.reply_applied++;
+                st.reply_applied++; /* the device did what the reply said */
             }
             else if (reply != HW_REPLY_SAME)
             {
@@ -497,6 +587,11 @@ static void poster_task(void *arg)
                          "(was this device replaced?)",
                          (unsigned)s_reject_streak);
             }
+            else if (reply == HW_REPLY_REMOVED)
+            {
+                /* said once by gone_process; nothing is pushed from here */
+                strlcpy(st.status, "removed", sizeof(st.status));
+            }
             else
             {
                 strlcpy(st.status, "failed", sizeof(st.status));
@@ -504,7 +599,11 @@ static void poster_task(void *arg)
 
             strlcpy(st.last_error, err, sizeof(st.last_error));
             hw_format_utc(st.last_error_time);
-            ESP_LOGW(TAG, "webhook POST failed: %s", err);
+
+            if (reply != HW_REPLY_REMOVED)
+            {
+                ESP_LOGW(TAG, "webhook POST failed: %s", err);
+            }
         }
 
         hw_stats_set(&st);

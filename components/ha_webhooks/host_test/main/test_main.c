@@ -404,6 +404,81 @@ static void test_reply_applied(void)
     TEST_ASSERT_FALSE(out.manual_override); /* a reply cannot pin */
 }
 
+/* ---- a 410: removed in Home Assistant (2026-11-15) ------------------------- */
+
+#define GONE "{\"webhook\":{\"removed\":true}}"
+
+static hw_reply_t gone(const char *body, const hw_config_t *cur, bool trusted)
+{
+    return hw_gone_decide(body, strlen(body), false, cur, trusted);
+}
+
+static void test_gone_clears_the_webhook(void)
+{
+    hw_config_t cur = base_config();
+
+    strlcpy(cur.url2, URL_B, sizeof(cur.url2));
+    hw_rev_stamp(&cur, "1a2b3c4d");
+
+    TEST_ASSERT_EQUAL(HW_REPLY_REMOVED, gone(GONE, &cur, true));
+    /* keys of a later integration beside the marker change nothing */
+    TEST_ASSERT_EQUAL(HW_REPLY_REMOVED,
+                      gone("{\"webhook\":{\"removed\":true,\"why\":\"x\"},"
+                           "\"more\":1}", &cur, true));
+    TEST_ASSERT_EQUAL_STRING("removed", hw_reply_str(HW_REPLY_REMOVED));
+
+    /* what is left: no address, off, no revision, the user's own settings */
+    hw_config_unregister(&cur);
+    TEST_ASSERT_EQUAL_STRING("", cur.url);
+    TEST_ASSERT_EQUAL_STRING("", cur.url2);
+    TEST_ASSERT_FALSE(cur.enabled);
+    TEST_ASSERT_EQUAL_STRING("", cur.rev);
+    TEST_ASSERT_EQUAL_STRING("", hw_rev_reported(&cur));
+    TEST_ASSERT_EQUAL(60, cur.interval_s);
+    TEST_ASSERT_TRUE(cur.gzip);
+    TEST_ASSERT_EQUAL_STRING("home", cur.cert_set);
+    TEST_ASSERT_EQUAL_STRING("Home WiFi", cur.networks);
+}
+
+static void test_gone_left_alone(void)
+{
+    hw_config_t cur = base_config();
+    char big[HW_REPLY_MAX + 64];
+
+    /* some other server's 410: no body, a page, JSON without the marker,
+       the marker not true, the marker somewhere else */
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE, gone("", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE,
+                      hw_gone_decide(NULL, 0, false, &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE, gone("<html>Gone</html>", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE, gone("[true]", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE, gone("{}", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE, gone("{\"webhook\":{}}", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE,
+                      gone("{\"webhook\":{\"removed\":false}}", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE,
+                      gone("{\"webhook\":{\"removed\":1}}", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE,
+                      gone("{\"webhook\":\"removed\"}", &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE, gone("{\"removed\":true}", &cur, true));
+
+    /* cut off by the read limit, or over it: not Home Assistant's */
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE,
+                      hw_gone_decide(GONE, strlen(GONE), true, &cur, true));
+    memset(big, ' ', sizeof(big));
+    memcpy(big, GONE, strlen(GONE));
+    TEST_ASSERT_EQUAL(HW_REPLY_NONE,
+                      hw_gone_decide(big, sizeof(big), false, &cur, true));
+
+    /* the marker from a server no registration would be taken from */
+    TEST_ASSERT_EQUAL(HW_REPLY_UNTRUSTED, gone(GONE, &cur, false));
+
+    /* the user pinned the webhook on the device: from nobody */
+    cur.manual_override = true;
+    TEST_ASSERT_EQUAL(HW_REPLY_PINNED, gone(GONE, &cur, true));
+    TEST_ASSERT_EQUAL(HW_REPLY_PINNED, gone(GONE, &cur, false));
+}
+
 static void test_reply_refused(void)
 {
     hw_config_t cur = base_config();
@@ -485,5 +560,7 @@ void app_main(void)
     RUN_TEST(test_reply_plain_delivered);
     RUN_TEST(test_reply_applied);
     RUN_TEST(test_reply_refused);
+    RUN_TEST(test_gone_clears_the_webhook);
+    RUN_TEST(test_gone_left_alone);
     UNITY_END();
 }
