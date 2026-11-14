@@ -37,6 +37,7 @@
  *   - config        -> autopid_config_json_dup()    (PSRAM cache, no flash)
  *   - gps           -> usb_acm_cli_gps_get()        (RAM fix cache)
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,6 +52,7 @@
 #include "mdns_manager.h"
 #include "obd_chip.h"
 #include "sdkconfig.h"
+#include "sleep_manager.h" /* status.sleep_mode (2026-11-15) */
 #include "usb_acm_cli.h" /* usb_acm_cli_gps_get: the dongle fix */
 #include "vpn_manager.h"
 #include "wifi_manager.h" /* wifi_manager_get_sta_ip: status.sta_ip */
@@ -95,6 +97,49 @@ static void drop_prev_caches(void)
 }
 
 /* ---- status section (mirror of /api/status + device_id) ------------------- */
+
+/** The four keys of the device catalog's diagnostic sensors (2026-11-15).
+ *  The integration's catalog gives every WiCAN the sensors Sleep mode, CAN
+ *  protocol, ECU PID count and AutoPID loop, read from `sleep_mode`,
+ *  `can_protocol`, `ecu_pids_num` and `loop_status`. No firmware ever sent
+ *  them (not this one, not the 4.x line): four sensors with no value on
+ *  every device, seen on a first-time setup with Home Assistant 2026.11.1.
+ *  All four are RAM reads (the poster's stack is in PSRAM). */
+static void status_catalog_keys(cJSON *s)
+{
+    sleep_manager_status_t sleep;
+
+    /* Power Saving as it is set: the device that sleeps does not push */
+    if (sleep_manager_status(&sleep) == ESP_OK)
+    {
+        cJSON_AddStringToObject(s, "sleep_mode", sleep.enabled ? "on" : "off");
+    }
+
+    /* the vehicle protocol in effect, in words: the pinned one, else the
+       current car's; with neither the chip's own search picks */
+    char proto[48];
+
+    if (autopid_protocol_text(proto, sizeof(proto)) == 0)
+    {
+        snprintf(proto, sizeof(proto), "Automatic");
+    }
+
+    cJSON_AddStringToObject(s, "can_protocol", proto);
+
+    autopid_stats_t ap;
+
+    if (autopid_stats(&ap) == ESP_OK)
+    {
+        bool paused = ap.paused_voltage || ap.paused_client ||
+                      ap.paused_diag || ap.paused_bus;
+
+        cJSON_AddNumberToObject(s, "ecu_pids_num", (double)ap.pids_loaded);
+        cJSON_AddStringToObject(s, "loop_status",
+                                ap.running ? "Running"
+                                : paused   ? "Paused"
+                                           : "Stopped");
+    }
+}
 
 static cJSON *build_status(void)
 {
@@ -236,6 +281,8 @@ static cJSON *build_status(void)
                             autopid_ecu_online() ? "online" : "offline");
     cJSON_AddStringToObject(s, "obd_chip_status",
                             obd_chip_status_ok() ? "ready" : "offline");
+
+    status_catalog_keys(s);
 
     /* vpn_ip is HA's away-from-home control endpoint (it registers the
        tunnel address as the backup for /api/webhook + buttons).

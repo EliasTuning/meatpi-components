@@ -17,6 +17,7 @@ Feature component. Consumes `http_server_manager` (the route),
 sets), `autopid` (`autopid_snapshot` + `autopid_config_json_dup`),
 `dev_status_manager` (the status section + `device_id`),
 `battery_monitor` (`batt_voltage`), `wifi_manager` (`sta_ip`),
+`sleep_manager` (`sleep_mode`),
 `vpn_manager` (`vpn_status`/`vpn_ip`) and `mdns_manager` (the `mdns`
 configuration URL). Config lives in
 `settings_manager` (`"ha_webhooks"`); the URL push is a documented live
@@ -46,7 +47,13 @@ identical on every product built from the V6 core.
   webhook push ever did), `vpn_status` (always: `disabled | waiting |
   paused | connecting | connected`, vpn_manager's own words since issue
   #985) and, while the tunnel is up, `vpn_ip` (HA's away-from-home
-  backup endpoint).
+  backup endpoint). Since 2026-11-15 it carries the four keys of the
+  integration catalog's diagnostic sensors, which no firmware had sent:
+  `sleep_mode` (`on`/`off`), `can_protocol` (the vehicle protocol in
+  effect in words, `Automatic` while the chip's search picks),
+  `ecu_pids_num` (PID rows loaded) and `loop_status` (`Running` |
+  `Paused` | `Stopped`); the stage `pushreply` (leg a8) compares them
+  with the device's own routes.
   Sections are diffed in `changed` mode and omitted when empty; a fresh
   registration forces a full **resync** so a new HA sees the complete
   state (since 2026-10-11 that full push also primes the diff caches,

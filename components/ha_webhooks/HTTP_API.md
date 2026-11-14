@@ -96,6 +96,9 @@ then carries `status` (+ `config`) only - a status-only push is valid
               "bits": {…}, "uptime": "…", "version": "…", "temp_c": 33.1,
               "wifi_mode": "Station", "sta_ip": "192.168.1.23",
               "ble_status": "disable", "batt_voltage": 12.53,
+              "sleep_mode": "off", "ecu_pids_num": 12,
+              "can_protocol": "ISO 15765-4 CAN, 11-bit, 500 kbit/s",
+              "loop_status": "Running",
               "vpn_status": "connected", "vpn_ip": "10.6.0.2" },
   "autopid_data": { "RPM": 820, "Speed": 0,
                     "gps_latitude": -25.3444, "gps_longitude": 131.0369,
@@ -134,6 +137,29 @@ then carries `status` (+ `config`) only - a status-only push is valid
   the road the station sits on the ESPNetLink dongle's network
   (192.168.80.x) and that address is reported as it is: `vpn_ip` stays
   the road-side endpoint.
+- **`sleep_mode`, `can_protocol`, `ecu_pids_num`, `loop_status`**
+  (added 2026-11-15): the keys of the four diagnostic sensors the
+  integration's device catalog gives every WiCAN (Sleep mode, CAN
+  protocol, ECU PID count, AutoPID loop). No firmware sent them before,
+  the 4.x line included, so the four sensors never had a value (seen on
+  a first-time setup with Home Assistant 2026.11.1). Like the rest of
+  `status` they go out whole in a resync and on a change in `changed`
+  mode.
+  - `sleep_mode`: `on` | `off`, Power Saving as the device runs it
+    (`GET /api/sleep` `enabled`).
+  - `can_protocol`: the vehicle protocol in effect, in words, the name
+    and detail of its row in `GET /api/autopid/protocols` ("ISO 15765-4
+    CAN, 11-bit, 500 kbit/s", "ISO 9141-2, K-line, 5 baud init"): the
+    `std_protocol` setting when it pins one, else the current car's
+    record; `Automatic` while neither names one (the OBD chip's own
+    search picks). The key keeps the catalog's name; the protocol is not
+    always a CAN one.
+  - `ecu_pids_num`: the number of PID rows loaded (`GET /api/autopid`
+    `stats.pids`).
+  - `loop_status`: `Running` (polling), `Paused` (one of the pauses of
+    `GET /api/autopid` `stats` holds: the low-voltage pause, an app on
+    the ELM port, a diagnostic tool, the bus guard) or `Stopped`
+    (AutoPID is off).
 - **`gps`** (contract §5.4, added 2026-09-09): present while there is a
   LIVE fix, `{latitude, longitude, accuracy (m), altitude (m), speed
   (m/s), heading (°), satellites}`, the same shape as `GET /api/gps`
