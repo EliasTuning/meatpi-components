@@ -69,6 +69,9 @@ Decisions log there is authoritative; the big ones:
   file (`PUT /api/autopid/config` applies LIVE).
 - `autopid_stats(&st)` / `autopid_ecu_online()`: poll counters, pause
   reasons, ECU presence.
+- `autopid_protocol_text(out, cap)`: the vehicle protocol in effect in
+  words (the pinned one, else the current car's; "" while the chip's
+  search picks): the push's `can_protocol` (ha_webhooks, 2026-11-15).
 - `autopid_dtc_scan_start()` / `_scanning()` / `_report(&json)` /
   `_clear(codes, mode, ...)` / `_desc(code, ...)`: the DTC engine.
 - `autopid_register_http()` / `autopid_register_cli()`: own routes/commands.

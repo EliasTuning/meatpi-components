@@ -89,6 +89,11 @@ typedef struct
  *  chip's search, is no protocol). */
 const ap_proto_t *ap_proto(char id);
 
+/** A protocol in words, the table's name and detail: "ISO 15765-4 CAN,
+ *  11-bit, 500 kbit/s". "" for an id the table does not know. Returns the
+ *  length written (2026-11-15: the push's `can_protocol`). */
+size_t ap_proto_text(char id, char *out, size_t cap);
+
 /** The table, in the order a person reads it (1 to 9, A to C). */
 size_t ap_proto_count(void);
 const ap_proto_t *ap_proto_at(size_t i);

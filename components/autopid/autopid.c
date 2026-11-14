@@ -55,6 +55,7 @@
 
 #include "autopid_private.h"
 #include "autopid_poller.h"
+#include "autopid_runner_private.h" /* ap_base_proto */
 
 static const char *TAG = "autopid";
 
@@ -452,4 +453,11 @@ bool autopid_ecu_online(void)
     }
 
     return (esp_timer_get_time() - last_ok_us) < 30 * 1000000LL;
+}
+
+size_t autopid_protocol_text(char *out, size_t cap)
+{
+    /* what the prelude pins: '0' (the search) is no row of the table,
+       so it comes out as "" */
+    return ap_proto_text(ap_base_proto(), out, cap);
 }

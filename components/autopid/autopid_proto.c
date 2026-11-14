@@ -34,6 +34,8 @@
  */
 #include "autopid_proto.h"
 
+#include <stdio.h>
+
 static const ap_proto_t PROTOCOLS[] =
 {
     { '1', AP_PK_J1850, AP_PF_HDR3_CRC, "SAE J1850 PWM", "41.6 kbit/s, Ford",
@@ -85,6 +87,27 @@ const ap_proto_t *ap_proto(char id)
 size_t ap_proto_count(void)
 {
     return N_PROTOCOLS;
+}
+
+size_t ap_proto_text(char id, char *out, size_t cap)
+{
+    const ap_proto_t *p = ap_proto(id);
+
+    if (out == NULL || cap == 0)
+    {
+        return 0;
+    }
+
+    out[0] = '\0';
+
+    if (p == NULL)
+    {
+        return 0;
+    }
+
+    int n = snprintf(out, cap, "%s, %s", p->name, p->detail);
+
+    return (n < 0) ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 
 const ap_proto_t *ap_proto_at(size_t i)

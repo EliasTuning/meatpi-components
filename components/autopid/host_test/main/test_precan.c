@@ -67,6 +67,27 @@ void test_precan_protocol_table(void)
     TEST_ASSERT_NULL(ap_proto_at(12));
     TEST_ASSERT_EQUAL('1', ap_proto_at(0)->id);
 
+    /* in words (2026-11-15, the push's can_protocol): name and detail; ""
+       for an id that is no protocol; cut, never overrun */
+    char text[48];
+
+    TEST_ASSERT_EQUAL(35, (int)ap_proto_text('6', text, sizeof(text)));
+    TEST_ASSERT_EQUAL_STRING("ISO 15765-4 CAN, 11-bit, 500 kbit/s", text);
+    ap_proto_text('a', text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("SAE J1939, 29-bit, 250 kbit/s", text);
+    TEST_ASSERT_EQUAL(0, (int)ap_proto_text('0', text, sizeof(text)));
+    TEST_ASSERT_EQUAL_STRING("", text);
+    TEST_ASSERT_EQUAL(0, (int)ap_proto_text('\0', text, sizeof(text)));
+    TEST_ASSERT_EQUAL(7, (int)ap_proto_text('6', text, 8));
+    TEST_ASSERT_EQUAL_STRING("ISO 157", text);
+
+    for (size_t i = 0; i < ap_proto_count(); i++)
+    {
+        /* every row fits a 48 byte field whole (the push's can_protocol) */
+        TEST_ASSERT_TRUE(ap_proto_text(ap_proto_at(i)->id, text, sizeof(text))
+                         < sizeof(text) - 1);
+    }
+
     /* the kinds */
     TEST_ASSERT_TRUE(ap_proto_precan('1'));
     TEST_ASSERT_TRUE(ap_proto_precan('5'));

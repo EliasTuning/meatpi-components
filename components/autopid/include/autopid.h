@@ -143,6 +143,13 @@ esp_err_t autopid_stats(autopid_stats_t *out);
  *  the device-contract `ecu_status` source (ha_webhooks). */
 bool autopid_ecu_online(void);
 
+/** The vehicle protocol in effect, in words: "ISO 15765-4 CAN, 11-bit,
+ *  500 kbit/s". It is the `std_protocol` setting when that pins one, else
+ *  the current car's record, else none: "" while the chip's own search
+ *  picks. Returns the length written. A RAM read, any task (2026-11-15:
+ *  the device-contract `can_protocol` source, ha_webhooks). */
+size_t autopid_protocol_text(char *out, size_t cap);
+
 /** The current car of the vehicle store in one line (2026-10-26): for the
  *  composition root's `vehicle` summary on GET /api/status (the web UI's
  *  notice bar and the dashboard say when the live tables belong to a car
