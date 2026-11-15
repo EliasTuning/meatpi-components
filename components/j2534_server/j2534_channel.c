@@ -222,6 +222,14 @@ QueueHandle_t j2534_channel_wait_queue(void)
 
 static void teardown(j2534_channel_t *c)
 {
+    /* The tool does not send 0xA8 when a read fails. The ECU then keeps
+     * the channel and answers the next setup with 0xD7. */
+    if (c->tp_learned && c->tp_tx_id != 0)
+    {
+        uint8_t disc = 0xA8;
+        (void)can_manager_send(c->tp_tx_id, false, false, &disc, 1);
+    }
+
     if (c->can_sub >= 0)
     {
         can_manager_unsubscribe_queue(c->can_sub);
@@ -385,48 +393,24 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
             bool send_it = true;
 
             /* A one-byte 0xBn is the tester's TP2.0 ACK. Once this channel
-             * has sent that ACK itself, the tool's copy stays off the bus. */
-            if (!ext && dlc >= 1 && (payload[0] & 0xF0) == 0xB0)
+             * has sent that ACK itself, the tool's copy stays off the bus.
+             * An ACK the channel did not send moves the sequence cursor to
+             * the frame the tool accepted. */
+            if (!ext && dlc == 1 && c->tp_learned && id == c->tp_tx_id &&
+                (payload[0] & 0xF0) == 0xB0)
             {
                 int64_t now = esp_timer_get_time();
 
-                if (c->tp_learned && dlc == 1 && id == c->tp_tx_id &&
-                    payload[0] == c->tp_last_ack &&
+                if (payload[0] == c->tp_last_ack &&
                     (now - c->tp_ack_us) < 80000)
                 {
                     send_it = false;
                 }
-                else if (c->tp_have_wait &&
-                         c->tp_wait_seq == (uint8_t)((payload[0] - 1) & 0x0F) &&
-                         (now - c->tp_wait_us) < 100000)
+                else
                 {
-                    /* The bus is full of frames whose first byte looks like
-                     * a wait-ack. Learn the response id only when the tool's
-                     * ACK sequence matches that frame, twice. */
-                    if (c->tp_candidate_id == c->tp_wait_id)
-                    {
-                        if (c->tp_candidate_hits < 255)
-                        {
-                            c->tp_candidate_hits++;
-                        }
-                    }
-                    else
-                    {
-                        c->tp_candidate_id = c->tp_wait_id;
-                        c->tp_candidate_hits = 1;
-                    }
-
-                    if (c->tp_candidate_hits >= 2)
-                    {
-                        c->tp_tx_id = id;
-                        c->tp_rx_id = c->tp_wait_id;
-                        c->tp_learned = true;
-                    }
+                    c->tp_last_seq = (uint8_t)((payload[0] - 1) & 0x0F);
+                    c->tp_have_seq = true;
                 }
-            }
-            else if (!ext && dlc >= 1)
-            {
-                c->tp_tx_id = id;
             }
 
             esp_err_t err = ESP_OK;
@@ -683,6 +667,47 @@ bool j2534_ch_filters_pass(const j2534_channel_t *c, const uint8_t *view,
     return has_pass ? any_pass : true; /* no PASS filter = pass all */
 }
 
+/* ---- TP2.0 block ACK -------------------------------------------------- */
+
+/* Channel-setup positive response. Bit 4 of each high byte is the
+ * "id not valid" flag; clear means the ECU assigned that id. */
+static void tp_note_setup(j2534_channel_t *c, const uint8_t *d)
+{
+    if ((d[3] & 0x10) != 0 || (d[5] & 0x10) != 0)
+    {
+        return;
+    }
+
+    uint32_t rx = (uint32_t)d[2] | ((uint32_t)(d[3] & 0x0F) << 8);
+    uint32_t tx = (uint32_t)d[4] | ((uint32_t)(d[5] & 0x0F) << 8);
+
+    if (rx == 0 || tx == 0)
+    {
+        return;
+    }
+
+    c->tp_rx_id = rx;
+    c->tp_tx_id = tx;
+    c->tp_learned = true;
+    c->tp_have_seq = false;
+}
+
+/* Next sequence, or a replay of the last one. A jump is not an ACK:
+ * confirming it makes the ECU transmit the following block into the
+ * tester's next request. */
+static bool tp_accept_seq(j2534_channel_t *c, uint8_t seq)
+{
+    if (c->tp_have_seq && seq != c->tp_last_seq &&
+        seq != (uint8_t)((c->tp_last_seq + 1) & 0x0F))
+    {
+        return false;
+    }
+
+    c->tp_last_seq = seq;
+    c->tp_have_seq = true;
+    return true;
+}
+
 /* ---- rx poll ---------------------------------------------------------- */
 
 bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
@@ -711,30 +736,30 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
             memcpy(view + 4, fr.data, fr.dlc);
             if (j2534_ch_filters_pass(c, view, 4u + fr.dlc))
             {
-                /* TP2.0 wait-ack (high nibble 0 or 1): answer on the CAN
-                 * controller before this frame is even handed to WiFi. */
-                if (!fr.ext && fr.dlc >= 1)
+                /* The setup response names the two ids. Only that ECU id
+                 * is answered, and only in sequence, before the frame
+                 * is handed to WiFi. */
+                if (!fr.ext && fr.dlc == 7 && fr.data[1] == 0xD0)
+                {
+                    tp_note_setup(c, fr.data);
+                }
+
+                if (c->tp_learned && !fr.ext && fr.id == c->tp_rx_id &&
+                    c->tp_tx_id != 0 && fr.dlc >= 1)
                 {
                     uint8_t op = fr.data[0] & 0xF0;
+                    uint8_t seq = fr.data[0] & 0x0F;
 
-                    if (op == 0x00 || op == 0x10)
+                    if (op <= 0x30 && tp_accept_seq(c, seq) &&
+                        (op == 0x00 || op == 0x10))
                     {
-                        c->tp_wait_id = fr.id;
-                        c->tp_wait_seq = fr.data[0] & 0x0F;
-                        c->tp_wait_us = esp_timer_get_time();
-                        c->tp_have_wait = true;
+                        uint8_t ack = (uint8_t)(0xB0 | ((seq + 1) & 0x0F));
 
-                        if (c->tp_learned && fr.id == c->tp_rx_id &&
-                            c->tp_tx_id != 0)
+                        if (can_manager_send(c->tp_tx_id, false, false,
+                                             &ack, 1) == ESP_OK)
                         {
-                            uint8_t ack = (uint8_t)(0xB0 | ((fr.data[0] + 1) & 0x0F));
-
-                            if (can_manager_send(c->tp_tx_id, false, false,
-                                                 &ack, 1) == ESP_OK)
-                            {
-                                c->tp_last_ack = ack;
-                                c->tp_ack_us = esp_timer_get_time();
-                            }
+                            c->tp_last_ack = ack;
+                            c->tp_ack_us = esp_timer_get_time();
                         }
                     }
                 }
