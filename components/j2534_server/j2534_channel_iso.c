@@ -259,7 +259,7 @@ static void indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
 /* ---- write ------------------------------------------------------------ */
 
 /* padding follows each message: a session opened the other way is reopened */
-static bool pad_rebind(j2534_iso_session_t *s, bool pad)
+static bool pad_rebind(j2534_channel_t *c, j2534_iso_session_t *s, bool pad)
 {
     if (s->pad == pad)
     {
@@ -275,7 +275,7 @@ static bool pad_rebind(j2534_iso_session_t *s, bool pad)
     s->rx_id = rx;
     s->ext = ext;
     s->pad = pad;
-    return session_open(s) == J2534_STATUS_NOERROR;
+    return session_open(c, s) == J2534_STATUS_NOERROR;
 }
 
 /* the send's own wait: flow control after the first frame, then the
@@ -340,7 +340,7 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
 
     if (s >= 0)
     {
-        if (!pad_rebind(&c->sess[s], pad))
+        if (!pad_rebind(c, &c->sess[s], pad))
         {
             obd_gate_release(c);
             return J2534_ERR_FAILED;

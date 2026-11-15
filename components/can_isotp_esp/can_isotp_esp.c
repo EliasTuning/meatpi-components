@@ -678,14 +678,8 @@ static esp_err_t isotp_recv(can_isotp_session_t s, uint8_t *buf, size_t cap,
 
 /* ---- registration ---------------------------------------------------------- */
 
-esp_err_t can_isotp_esp_init(void)
-{
-    static const log_descriptor_t LOG_DESC = { "can_isotp_esp", ESP_LOG_INFO };
-    /* the vendored stack logs every send at INFO: keep it quiet unless
-       someone turns it up in the log settings */
-    static const log_descriptor_t STACK_LOG = { "esp_isotp", ESP_LOG_WARN };
-    static esp_err_t isotp_set_flow(can_isotp_session_t session, uint8_t block_size,
-                                 uint32_t stmin_us)
+static esp_err_t isotp_set_flow(can_isotp_session_t session, uint8_t block_size,
+                                uint32_t stmin_us)
 {
     struct can_isotp_session *s = session;
 
@@ -700,7 +694,13 @@ esp_err_t can_isotp_esp_init(void)
     return err;
 }
 
-static const can_isotp_ops_t OPS =
+esp_err_t can_isotp_esp_init(void)
+{
+    static const log_descriptor_t LOG_DESC = { "can_isotp_esp", ESP_LOG_INFO };
+    /* the vendored stack logs every send at INFO: keep it quiet unless
+       someone turns it up in the log settings */
+    static const log_descriptor_t STACK_LOG = { "esp_isotp", ESP_LOG_WARN };
+    static const can_isotp_ops_t OPS =
     {
         .open     = isotp_open,
         .close    = isotp_close,
