@@ -93,6 +93,22 @@ typedef struct
 
     uint8_t leg_hdr[J2534_J1850_HDR];  /* J1850 (legacy): the ATSH header cache  */
     bool    leg_have_hdr;              /* so a repeated header is not re-sent     */
+
+    /* Raw CAN TP2.0 block ACK. The tester's ACK otherwise waits for the
+     * frame to cross WiFi and come back, and the ECU sits between blocks.
+     * After the tool has ACKed one wait-ack itself, later ones are sent
+     * here as the frame arrives. The tool's copy of that ACK is dropped. */
+    bool     tp_learned;
+    bool     tp_have_wait;
+    uint32_t tp_tx_id;
+    uint32_t tp_rx_id;
+    uint32_t tp_wait_id;
+    uint32_t tp_candidate_id;
+    uint8_t  tp_candidate_hits;
+    uint8_t  tp_wait_seq;
+    uint8_t  tp_last_ack;
+    int64_t  tp_wait_us;
+    int64_t  tp_ack_us;
 } j2534_channel_t;
 
 /* ---- j2534_channel.c, used by the ISO15765 file ---------------------- */

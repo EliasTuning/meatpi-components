@@ -381,8 +381,60 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
             uint32_t id = get_id_be(msg->data);
             bool ext = (msg->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
             uint8_t dlc = (uint8_t)(msg->data_size - 4);
-            esp_err_t err = can_manager_send(id, ext, false, msg->data + 4,
-                                             dlc);
+            const uint8_t *payload = msg->data + 4;
+            bool send_it = true;
+
+            /* A one-byte 0xBn is the tester's TP2.0 ACK. Once this channel
+             * has sent that ACK itself, the tool's copy stays off the bus. */
+            if (!ext && dlc >= 1 && (payload[0] & 0xF0) == 0xB0)
+            {
+                int64_t now = esp_timer_get_time();
+
+                if (c->tp_learned && dlc == 1 && id == c->tp_tx_id &&
+                    payload[0] == c->tp_last_ack &&
+                    (now - c->tp_ack_us) < 80000)
+                {
+                    send_it = false;
+                }
+                else if (c->tp_have_wait &&
+                         c->tp_wait_seq == (uint8_t)((payload[0] - 1) & 0x0F) &&
+                         (now - c->tp_wait_us) < 100000)
+                {
+                    /* The bus is full of frames whose first byte looks like
+                     * a wait-ack. Learn the response id only when the tool's
+                     * ACK sequence matches that frame, twice. */
+                    if (c->tp_candidate_id == c->tp_wait_id)
+                    {
+                        if (c->tp_candidate_hits < 255)
+                        {
+                            c->tp_candidate_hits++;
+                        }
+                    }
+                    else
+                    {
+                        c->tp_candidate_id = c->tp_wait_id;
+                        c->tp_candidate_hits = 1;
+                    }
+
+                    if (c->tp_candidate_hits >= 2)
+                    {
+                        c->tp_tx_id = id;
+                        c->tp_rx_id = c->tp_wait_id;
+                        c->tp_learned = true;
+                    }
+                }
+            }
+            else if (!ext && dlc >= 1)
+            {
+                c->tp_tx_id = id;
+            }
+
+            esp_err_t err = ESP_OK;
+
+            if (send_it)
+            {
+                err = can_manager_send(id, ext, false, payload, dlc);
+            }
 
             if (err != ESP_OK)
             {
@@ -659,6 +711,34 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
             memcpy(view + 4, fr.data, fr.dlc);
             if (j2534_ch_filters_pass(c, view, 4u + fr.dlc))
             {
+                /* TP2.0 wait-ack (high nibble 0 or 1): answer on the CAN
+                 * controller before this frame is even handed to WiFi. */
+                if (!fr.ext && fr.dlc >= 1)
+                {
+                    uint8_t op = fr.data[0] & 0xF0;
+
+                    if (op == 0x00 || op == 0x10)
+                    {
+                        c->tp_wait_id = fr.id;
+                        c->tp_wait_seq = fr.data[0] & 0x0F;
+                        c->tp_wait_us = esp_timer_get_time();
+                        c->tp_have_wait = true;
+
+                        if (c->tp_learned && fr.id == c->tp_rx_id &&
+                            c->tp_tx_id != 0)
+                        {
+                            uint8_t ack = (uint8_t)(0xB0 | ((fr.data[0] + 1) & 0x0F));
+
+                            if (can_manager_send(c->tp_tx_id, false, false,
+                                                 &ack, 1) == ESP_OK)
+                            {
+                                c->tp_last_ack = ack;
+                                c->tp_ack_us = esp_timer_get_time();
+                            }
+                        }
+                    }
+                }
+
                 memset(out, 0, sizeof(*out));
                 out->protocol_id = J2534_PROT_CAN;
                 /* the frame's own RX-interrupt time, not the poll time */
