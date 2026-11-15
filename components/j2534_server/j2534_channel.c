@@ -25,8 +25,9 @@
  * @brief J2534 channel transports (see j2534_channel.h): lifecycle, the
  *        CAN channel on can_manager (raw frames), the filter table and
  *        the bus-bitrate rule at CONNECT. The ISO15765
- *        side (sessions, the SAE J2534-1 message layout, indications)
- *        lives in j2534_channel_iso.c; both share j2534_channel_private.h.
+ *        side lives in j2534_channel_iso.c, SAE J2534-2 TP2.0 in
+ *        j2534_channel_tp20.c. Both share j2534_channel_private.h.
+ *        Raw CAN does not look at TP2.0 opcodes.
  */
 #include "j2534_channel.h"
 
@@ -108,7 +109,8 @@ void j2534_ch_say_refused(const char *what)
 
 uint32_t j2534_channel_bus_baud(uint32_t proto, uint32_t baud_bps)
 {
-    if (proto != J2534_PROT_CAN && proto != J2534_PROT_ISO15765)
+    if (proto != J2534_PROT_CAN && proto != J2534_PROT_ISO15765 &&
+        proto != J2534_PROT_TP2_0)
     {
         return J2534_STATUS_NOERROR; /* not a CAN protocol: nothing to check */
     }
@@ -222,13 +224,8 @@ QueueHandle_t j2534_channel_wait_queue(void)
 
 static void teardown(j2534_channel_t *c)
 {
-    /* The tool does not send 0xA8 when a read fails. The ECU then keeps
-     * the channel and answers the next setup with 0xD7. */
-    if (c->tp_learned && c->tp_tx_id != 0)
-    {
-        uint8_t disc = 0xA8;
-        (void)can_manager_send(c->tp_tx_id, false, false, &disc, 1);
-    }
+    /* Drop a TP2.0 session table, including its teardown telegrams. */
+    j2534_tp20_detach(c);
 
     if (c->can_sub >= 0)
     {
@@ -332,6 +329,17 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
            bus and WRITE_MSGS collects the replies. */
         st = j2534_legacy_connect(c);
     }
+    else if (protocol == J2534_PROT_TP2_0)
+    {
+        if (!subscribe_bus(c, "j2534_tp20"))
+        {
+            st = J2534_ERR_FAILED;
+        }
+        else
+        {
+            st = j2534_tp20_attach(c);
+        }
+    }
     else
     {
         st = J2534_ERR_NOT_SUPPORTED;
@@ -390,35 +398,7 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
             bool ext = (msg->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
             uint8_t dlc = (uint8_t)(msg->data_size - 4);
             const uint8_t *payload = msg->data + 4;
-            bool send_it = true;
-
-            /* A one-byte 0xBn is the tester's TP2.0 ACK. Once this channel
-             * has sent that ACK itself, the tool's copy stays off the bus.
-             * An ACK the channel did not send moves the sequence cursor to
-             * the frame the tool accepted. */
-            if (!ext && dlc == 1 && c->tp_learned && id == c->tp_tx_id &&
-                (payload[0] & 0xF0) == 0xB0)
-            {
-                int64_t now = esp_timer_get_time();
-
-                if (payload[0] == c->tp_last_ack &&
-                    (now - c->tp_ack_us) < 80000)
-                {
-                    send_it = false;
-                }
-                else
-                {
-                    c->tp_last_seq = (uint8_t)((payload[0] - 1) & 0x0F);
-                    c->tp_have_seq = true;
-                }
-            }
-
-            esp_err_t err = ESP_OK;
-
-            if (send_it)
-            {
-                err = can_manager_send(id, ext, false, payload, dlc);
-            }
+            esp_err_t err = can_manager_send(id, ext, false, payload, dlc);
 
             if (err != ESP_OK)
             {
@@ -434,6 +414,10 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
     else if (c->protocol == J2534_PROT_ISO15765)
     {
         st = j2534_iso_write(c, msg, indicate);
+    }
+    else if (c->protocol == J2534_PROT_TP2_0)
+    {
+        st = j2534_tp20_write(c, msg, indicate);
     }
     else if (c->protocol == J2534_PROT_J1850VPW)
     {
@@ -587,6 +571,12 @@ uint32_t j2534_channel_stop_filter(int slot, uint32_t filter_id)
     {
         if (c->filters[i].id == filter_id)
         {
+            /* A TP2.0 connection owns this slot until teardown. */
+            if (c->filters[i].tp_owned)
+            {
+                break;
+            }
+
             if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
             {
                 j2534_iso_unbind(c, c->filters[i].session);
@@ -611,14 +601,19 @@ void j2534_channel_clear_filters(int slot)
     j2534_channel_t *c = &s_ch[slot];
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    for (int i = 0; i < c->n_filters; i++)
+    for (int i = c->n_filters - 1; i >= 0; i--)
     {
         if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
         {
             j2534_iso_unbind(c, c->filters[i].session);
         }
+
+        /* Implicit TP2.0 pass filters stay until the connection does. */
+        if (!c->filters[i].tp_owned)
+        {
+            filter_remove_at(c, i);
+        }
     }
-    c->n_filters = 0;   /* the ids given at CONNECT keep their session */
     xSemaphoreGive(s_lock);
 }
 
@@ -626,7 +621,7 @@ bool j2534_ch_has_pass_filter(const j2534_channel_t *c)
 {
     for (int i = 0; i < c->n_filters; i++)
     {
-        if (c->filters[i].type == J2534_PASS_FILTER)
+        if (c->filters[i].type == J2534_PASS_FILTER && !c->filters[i].tp_owned)
         {
             return true;
         }
@@ -645,9 +640,9 @@ bool j2534_ch_filters_pass(const j2534_channel_t *c, const uint8_t *view,
     {
         const j2534_ch_filter_t *f = &c->filters[i];
 
-        if (f->type == J2534_FLOW_CONTROL_FILTER)
+        if (f->tp_owned || f->type == J2534_FLOW_CONTROL_FILTER)
         {
-            continue; /* a session, not a match rule */
+            continue; /* a session, not a user match rule */
         }
 
         bool m = j2534_filter_match(f->mask, f->len, f->pattern, f->len,
@@ -665,47 +660,6 @@ bool j2534_ch_filters_pass(const j2534_channel_t *c, const uint8_t *view,
     }
 
     return has_pass ? any_pass : true; /* no PASS filter = pass all */
-}
-
-/* ---- TP2.0 block ACK -------------------------------------------------- */
-
-/* Channel-setup positive response. Bit 4 of each high byte is the
- * "id not valid" flag; clear means the ECU assigned that id. */
-static void tp_note_setup(j2534_channel_t *c, const uint8_t *d)
-{
-    if ((d[3] & 0x10) != 0 || (d[5] & 0x10) != 0)
-    {
-        return;
-    }
-
-    uint32_t rx = (uint32_t)d[2] | ((uint32_t)(d[3] & 0x0F) << 8);
-    uint32_t tx = (uint32_t)d[4] | ((uint32_t)(d[5] & 0x0F) << 8);
-
-    if (rx == 0 || tx == 0)
-    {
-        return;
-    }
-
-    c->tp_rx_id = rx;
-    c->tp_tx_id = tx;
-    c->tp_learned = true;
-    c->tp_have_seq = false;
-}
-
-/* Next sequence, or a replay of the last one. A jump is not an ACK:
- * confirming it makes the ECU transmit the following block into the
- * tester's next request. */
-static bool tp_accept_seq(j2534_channel_t *c, uint8_t seq)
-{
-    if (c->tp_have_seq && seq != c->tp_last_seq &&
-        seq != (uint8_t)((c->tp_last_seq + 1) & 0x0F))
-    {
-        return false;
-    }
-
-    c->tp_last_seq = seq;
-    c->tp_have_seq = true;
-    return true;
 }
 
 /* ---- rx poll ---------------------------------------------------------- */
@@ -736,34 +690,6 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
             memcpy(view + 4, fr.data, fr.dlc);
             if (j2534_ch_filters_pass(c, view, 4u + fr.dlc))
             {
-                /* The setup response names the two ids. Only that ECU id
-                 * is answered, and only in sequence, before the frame
-                 * is handed to WiFi. */
-                if (!fr.ext && fr.dlc == 7 && fr.data[1] == 0xD0)
-                {
-                    tp_note_setup(c, fr.data);
-                }
-
-                if (c->tp_learned && !fr.ext && fr.id == c->tp_rx_id &&
-                    c->tp_tx_id != 0 && fr.dlc >= 1)
-                {
-                    uint8_t op = fr.data[0] & 0xF0;
-                    uint8_t seq = fr.data[0] & 0x0F;
-
-                    if (op <= 0x30 && tp_accept_seq(c, seq) &&
-                        (op == 0x00 || op == 0x10))
-                    {
-                        uint8_t ack = (uint8_t)(0xB0 | ((seq + 1) & 0x0F));
-
-                        if (can_manager_send(c->tp_tx_id, false, false,
-                                             &ack, 1) == ESP_OK)
-                        {
-                            c->tp_last_ack = ack;
-                            c->tp_ack_us = esp_timer_get_time();
-                        }
-                    }
-                }
-
                 memset(out, 0, sizeof(*out));
                 out->protocol_id = J2534_PROT_CAN;
                 /* the frame's own RX-interrupt time, not the poll time */
@@ -780,6 +706,10 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
     {
         got = j2534_iso_poll(c, out);
     }
+    else if (c->protocol == J2534_PROT_TP2_0)
+    {
+        got = j2534_tp20_poll(c, out);
+    }
     else if (c->protocol == J2534_PROT_J1850VPW)
     {
         got = j2534_legacy_poll(c, slot, out);
@@ -787,4 +717,45 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
 
     xSemaphoreGive(s_lock);
     return got;
+}
+
+bool j2534_channel_is_tp20(int slot)
+{
+    return slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use &&
+           s_ch[slot].protocol == J2534_PROT_TP2_0;
+}
+
+uint32_t j2534_channel_ioctl(int slot, uint32_t ioctl_id,
+                             const uint8_t *body, uint32_t body_len,
+                             uint8_t *out, uint32_t out_cap,
+                             uint32_t *out_len)
+{
+    uint32_t st;
+
+    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
+    {
+        return J2534_ERR_INVALID_CHANNEL_ID;
+    }
+
+    if (s_ch[slot].protocol != J2534_PROT_TP2_0)
+    {
+        if (ioctl_id == J2534_IOCTL_GET_CONFIG ||
+            ioctl_id == J2534_IOCTL_SET_CONFIG)
+        {
+            return J2534_STATUS_NOERROR;
+        }
+
+        return J2534_ERR_NOT_SUPPORTED;
+    }
+
+    if (out_len != NULL)
+    {
+        *out_len = 0;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    st = j2534_tp20_ioctl(&s_ch[slot], ioctl_id, body, body_len,
+                          out, out_cap, out_len);
+    xSemaphoreGive(s_lock);
+    return st;
 }

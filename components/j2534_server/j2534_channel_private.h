@@ -40,6 +40,8 @@
 #include "j2534_channel.h"
 #include "j2534_proto.h"
 
+typedef struct j2534_tp20_state j2534_tp20_state_t;
+
 #define J2534_CH_CAN_QLEN 32
 #define J2534_CH_MAX_IND  4   /* pending TxDone / START_OF_MESSAGE indications */
 
@@ -51,6 +53,7 @@ typedef struct
     uint8_t  pattern[8];
     uint8_t  len;
     int      session;   /* FLOW_CONTROL: the ISO-TP session it bound, else -1 */
+    bool     tp_owned;  /* TP2.0 implicit pass; CLEAR_MSG_FILTERS keeps it */
 } j2534_ch_filter_t;
 
 typedef struct
@@ -71,7 +74,7 @@ typedef struct
     uint32_t ts_us;
 } j2534_ch_ind_t;
 
-typedef struct
+typedef struct j2534_channel
 {
     bool     in_use;
     uint32_t protocol;
@@ -94,22 +97,11 @@ typedef struct
     uint8_t leg_hdr[J2534_J1850_HDR];  /* J1850 (legacy): the ATSH header cache  */
     bool    leg_have_hdr;              /* so a repeated header is not re-sent     */
 
-    /* Raw CAN TP2.0 block ACK. The tester's ACK otherwise waits for the
-     * frame to cross WiFi and come back, and the ECU sits between blocks.
-     * The ids come from the channel-setup response (opcode 0xD0), not from
-     * whichever bus frame last looked like a wait-ack: other ids on this
-     * bus use a low nibble that counts, and treating one of those as the
-     * ECU makes the adapter ACK the tester's own channel. A wait-ack is
-     * answered here only when its sequence is the next one, or a replay
-     * of the last one. The tool's copy of that ACK is dropped. */
-    bool     tp_learned;
-    bool     tp_have_seq;
-    uint32_t tp_tx_id;               /* tester -> ECU                        */
-    uint32_t tp_rx_id;               /* ECU -> tester                        */
-    uint8_t  tp_last_seq;
-    uint8_t  tp_last_ack;
-    int64_t  tp_ack_us;
+    /* TP2.0 (protocol 0x800E) only. Raw CAN leaves this NULL. */
+    j2534_tp20_state_t *tp20;
 } j2534_channel_t;
+
+#include "j2534_channel_tp20.h"
 
 /* ---- j2534_channel.c, used by the ISO15765 file ---------------------- */
 

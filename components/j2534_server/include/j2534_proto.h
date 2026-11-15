@@ -49,6 +49,9 @@ enum {
     J2534_PROT_CAN       = 5,   /* supported */
     J2534_PROT_ISO15765  = 6,   /* supported (ISO-TP) */
     J2534_PROT_SCI_A_ENGINE = 7,
+    /* SAE J2534-2 TP2.0. Its own channel: raw CAN (protocol 5) does not
+     * parse TP2.0 opcodes. */
+    J2534_PROT_TP2_0     = 0x800E,
 };
 
 /* ---- J2534 return/status codes ---------------------------------------- */
@@ -58,6 +61,7 @@ enum {
     J2534_ERR_INVALID_CHANNEL_ID      = 0x02,
     J2534_ERR_INVALID_PROTOCOL_ID     = 0x03,
     J2534_ERR_NULL_PARAMETER          = 0x04,
+    J2534_ERR_INVALID_IOCTL_VALUE     = 0x05,
     J2534_ERR_INVALID_FLAGS           = 0x06,
     J2534_ERR_FAILED                  = 0x07,
     J2534_ERR_DEVICE_NOT_CONNECTED    = 0x08,
@@ -72,6 +76,7 @@ enum {
     J2534_ERR_NO_FLOW_CONTROL         = 0x16,
     J2534_ERR_NOT_UNIQUE              = 0x17,
     J2534_ERR_INVALID_BAUDRATE        = 0x18,
+    J2534_ERR_NO_CONNECTION_ESTABLISHED = 0x1D,
     J2534_ERR_INVALID_DEVICE_ID       = 0x19,
     J2534_ERR_DEVICE_IN_USE           = 0x1A, /* WiCAN: second tester */
 };
@@ -89,6 +94,7 @@ enum {
     J2534_TX_ISO15765_ADDR_TYPE = 0x00000080, /* extended addressing: not supported */
     J2534_TX_CAN_29BIT_ID       = 0x00000100,
     J2534_TX_WAIT_P3_MIN_ONLY   = 0x00000200,
+    J2534_TX_TP2_0_BROADCAST    = 0x00010000, /* TP2_0_BROADCAST_MSG */
 };
 enum {
     J2534_RX_TX_MSG_TYPE           = 0x00000001, /* a transmit, not a receive */
@@ -97,6 +103,8 @@ enum {
     J2534_RX_ISO15765_PADDING_ERR  = 0x00000010,
     J2534_RX_ISO15765_ADDR_TYPE    = 0x00000080,
     J2534_RX_CAN_29BIT_ID          = 0x00000100,
+    J2534_RX_CONNECTION_ESTABLISHED = 0x00010000, /* bit 16 */
+    J2534_RX_CONNECTION_LOST        = 0x00020000, /* bit 17 */
 };
 
 /* ---- Ioctl IDs + SET_CONFIG parameter IDs ----------------------------- */
@@ -108,14 +116,38 @@ enum {
     J2534_IOCTL_CLEAR_RX_BUFFER          = 0x08,
     J2534_IOCTL_CLEAR_PERIODIC_MSGS      = 0x09,
     J2534_IOCTL_CLEAR_MSG_FILTERS        = 0x0A,
+    J2534_IOCTL_REQUEST_CONNECTION       = 0x800A,
+    J2534_IOCTL_TEARDOWN_CONNECTION      = 0x800B,
+    J2534_IOCTL_GET_DEVICE_INFO          = 0x800C,
 };
 enum {
     J2534_CFG_DATA_RATE      = 0x01,
     J2534_CFG_LOOPBACK       = 0x03,
+    J2534_CFG_BIT_SAMPLE_POINT = 0x17,
+    J2534_CFG_SYNC_JUMP_WIDTH  = 0x18,
     J2534_CFG_ISO15765_BS    = 0x1E,
     J2534_CFG_ISO15765_STMIN = 0x1F,
     J2534_CFG_BS_TX          = 0x22,
     J2534_CFG_STMIN_TX       = 0x23,
+    J2534_CFG_J1962_PINS     = 0x8001, /* this hardware: 0x060E only */
+    /* SAE J2534-2 table 77, in order. */
+    J2534_CFG_TP2_0_T_BR_INT = 0x8044,
+    J2534_CFG_TP2_0_T_E      = 0x8045,
+    J2534_CFG_TP2_0_MNTC     = 0x8046,
+    J2534_CFG_TP2_0_T_CTA    = 0x8047,
+    J2534_CFG_TP2_0_MNCT     = 0x8048,
+    J2534_CFG_TP2_0_MNTB     = 0x8049,
+    J2534_CFG_TP2_0_MNT      = 0x804A,
+    J2534_CFG_TP2_0_T_WAIT   = 0x804B,
+    J2534_CFG_TP2_0_T1       = 0x804C,
+    J2534_CFG_TP2_0_T3       = 0x804D,
+    J2534_CFG_TP2_0_IDENTIFIER = 0x804E,
+    J2534_CFG_TP2_0_RXIDPASSIVE = 0x804F,
+};
+/* GET_DEVICE_INFO parameters. TP2_0_PS_J1962 is 1: pins 6 and 14 only. */
+enum {
+    J2534_DEV_TP2_0_SUPPORTED = 0x13,
+    J2534_DEV_TP2_0_PS_J1962  = 0x28,
 };
 
 /* ---- wire framing ----------------------------------------------------- */
@@ -381,6 +413,23 @@ bool j2534_tcp_gate_allowed(bool allow_lan, bool loopback, bool on_ap,
  * @return J2534_STATUS_NOERROR or J2534_ERR_INVALID_BAUDRATE.
  */
 uint32_t j2534_connect_baud_check(uint32_t asked_bps, uint32_t bus_kbps);
+
+/**
+ * TP2.0 timing byte (high 2 bits unit, low 6 bits scale; units 0.1 / 1 /
+ * 10 / 100 ms). @p ms 40 encodes as 0x68. 0 stays 0. Values above 6 ms
+ * use a coarser unit, rounded up so the wire byte is not shorter than
+ * the request.
+ */
+uint8_t j2534_tp20_encode_ms(uint32_t ms);
+
+/** The same byte, in microseconds. */
+uint32_t j2534_tp20_decode_us(uint8_t wire);
+
+/**
+ * Round a gap up to the device's 500 µs resolution (J2534-2 19.2).
+ * 0 stays 0. 500 stays 500.
+ */
+uint32_t j2534_tp20_round_gap_us(uint32_t us);
 
 #ifdef __cplusplus
 }

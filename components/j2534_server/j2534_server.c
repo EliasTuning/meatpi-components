@@ -167,6 +167,14 @@ static uint32_t rd_u32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static void wr_u32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
 /* ---- periodic messages (esp_timer -> channel write) ------------------- */
 
 static void periodic_cb(void *arg)
@@ -385,6 +393,14 @@ static void handle_start_periodic(const j2534_transport_t *t,
     }
 
     pm->in_use = true;
+
+    /* TP2_0_BROADCAST_MSG: the five-shot goes out now, then on the timer. */
+    if ((pm->msg.tx_flags & J2534_TX_TP2_0_BROADCAST) != 0 &&
+        j2534_channel_is_tp20(slot))
+    {
+        (void)j2534_channel_write_periodic(slot, &pm->msg);
+    }
+
     ACK(J2534_STATUS_NOERROR, &pm->id);
 }
 
@@ -409,26 +425,150 @@ static void handle_stop_periodic(const j2534_transport_t *t,
     ACK(st, NULL);
 }
 
+/* PassThruIoctl payload, little-endian:
+ *   u32 ioctl_id, u32 body_len, body[body_len]
+ * body_len is a byte count. A 4-byte payload (the id alone) is body_len 0,
+ * which is what READ_VBATT has always sent.
+ *
+ * SET_CONFIG / GET_CONFIG body: u32 count, then count pairs of
+ *   u32 parameter, u32 value.
+ * GET_CONFIG's ack is u32 status, then that same body with values filled.
+ * REQUEST_CONNECTION body: u32 11, then the 11 bytes.
+ * TEARDOWN_CONNECTION body: u32 4, then the 4-byte big-endian RX id.
+ * GET_DEVICE_INFO body: u32 parameter. Its ack is one u32, like READ_VBATT.
+ */
+static void ack_status_body(const j2534_transport_t *t, const j2534_hdr_t *h,
+                            uint32_t status, const uint8_t *extra,
+                            uint32_t extra_len)
+{
+    uint8_t buf[4 + 4 + 24 * 8];
+
+    if (extra_len > sizeof(buf) - 4)
+    {
+        extra_len = (uint32_t)(sizeof(buf) - 4);
+    }
+
+    wr_u32(buf, status);
+
+    if (extra_len > 0 && extra != NULL)
+    {
+        memcpy(buf + 4, extra, extra_len);
+    }
+
+    (void)j2534_srv_send_frame(t, J2534_MT_ACK, h->seq, h->channel,
+                               buf, 4u + extra_len);
+}
+
 static void handle_ioctl(const j2534_transport_t *t, const j2534_hdr_t *h,
                          const uint8_t *payload)
 {
     int slot = (int)h->channel - 1;
-    uint32_t ioctl_id = (h->length >= 4) ? rd_u32(payload) : 0;
+    uint32_t ioctl_id;
+    uint32_t body_len = 0;
+    const uint8_t *body = NULL;
 
-    /* v1: config is best-effort (bus params come from can_manager
-     * settings); CLEAR_* operate on our channel state */
+    if (h->length < 4)
+    {
+        ACK(J2534_ERR_INVALID_MSG, NULL);
+        return;
+    }
+
+    ioctl_id = rd_u32(payload);
+
+    if (h->length >= 8)
+    {
+        body_len = rd_u32(payload + 4);
+
+        if (body_len > h->length - 8)
+        {
+            ACK(J2534_ERR_INVALID_MSG, NULL);
+            return;
+        }
+
+        body = payload + 8;
+    }
+    else if (h->length != 4)
+    {
+        ACK(J2534_ERR_INVALID_MSG, NULL);
+        return;
+    }
+
     switch (ioctl_id)
     {
         case J2534_IOCTL_READ_VBATT:
         {
             uint32_t millivolts;
-            uint32_t status = j2534_srv_read_vbatt(s_session.device_open, &millivolts);
+            uint32_t status = j2534_srv_read_vbatt(s_session.device_open,
+                                                   &millivolts);
             ACK(status, status == J2534_STATUS_NOERROR ? &millivolts : NULL);
             return;
         }
-        case J2534_IOCTL_CLEAR_MSG_FILTERS:   j2534_channel_clear_filters(slot); break;
-        case J2534_IOCTL_CLEAR_PERIODIC_MSGS: periodic_clear_all(); break;
-        default: break; /* GET/SET_CONFIG, CLEAR_*_BUFFER: ack OK */
+        case J2534_IOCTL_GET_DEVICE_INFO:
+        {
+            uint32_t param;
+            uint32_t value;
+
+            if (!s_session.device_open)
+            {
+                ACK(J2534_ERR_DEVICE_NOT_CONNECTED, NULL);
+                return;
+            }
+
+            if (body == NULL || body_len != 4)
+            {
+                ACK(J2534_ERR_INVALID_IOCTL_VALUE, NULL);
+                return;
+            }
+
+            param = rd_u32(body);
+
+            if (param == J2534_DEV_TP2_0_SUPPORTED ||
+                param == J2534_DEV_TP2_0_PS_J1962)
+            {
+                value = 1;
+                ACK(J2534_STATUS_NOERROR, &value);
+                return;
+            }
+
+            ACK(J2534_ERR_INVALID_IOCTL_VALUE, NULL);
+            return;
+        }
+        case J2534_IOCTL_CLEAR_MSG_FILTERS:
+            j2534_channel_clear_filters(slot);
+            break;
+        case J2534_IOCTL_CLEAR_PERIODIC_MSGS:
+            periodic_clear_all();
+            break;
+        case J2534_IOCTL_GET_CONFIG:
+        case J2534_IOCTL_SET_CONFIG:
+            /* CAN and ISO15765 keep the old best-effort ack. The bus rate
+             * comes from can_manager, not from this ioctl. */
+            if (!j2534_channel_is_tp20(slot))
+            {
+                break;
+            }
+            /* fall through */
+        case J2534_IOCTL_REQUEST_CONNECTION:
+        case J2534_IOCTL_TEARDOWN_CONNECTION:
+        {
+            uint8_t extra[4 + 24 * 8];
+            uint32_t extra_len = 0;
+            uint32_t st = j2534_channel_ioctl(slot, ioctl_id, body, body_len,
+                                              extra, sizeof(extra), &extra_len);
+
+            if (st == J2534_STATUS_NOERROR && extra_len > 0)
+            {
+                ack_status_body(t, h, st, extra, extra_len);
+            }
+            else
+            {
+                ACK(st, NULL);
+            }
+
+            return;
+        }
+        default:
+            break; /* CLEAR_*_BUFFER: ack OK */
     }
 
     ACK(J2534_STATUS_NOERROR, NULL);

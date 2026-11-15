@@ -185,6 +185,7 @@ const char *j2534_status_name(uint32_t status)
         case J2534_ERR_INVALID_CHANNEL_ID:   return "ERR_INVALID_CHANNEL_ID";
         case J2534_ERR_INVALID_PROTOCOL_ID:  return "ERR_INVALID_PROTOCOL_ID";
         case J2534_ERR_NULL_PARAMETER:       return "ERR_NULL_PARAMETER";
+        case J2534_ERR_INVALID_IOCTL_VALUE:  return "ERR_INVALID_IOCTL_VALUE";
         case J2534_ERR_INVALID_FLAGS:        return "ERR_INVALID_FLAGS";
         case J2534_ERR_FAILED:               return "ERR_FAILED";
         case J2534_ERR_DEVICE_NOT_CONNECTED: return "ERR_DEVICE_NOT_CONNECTED";
@@ -196,9 +197,12 @@ const char *j2534_status_name(uint32_t status)
         case J2534_ERR_BUFFER_OVERFLOW:      return "ERR_BUFFER_OVERFLOW";
         case J2534_ERR_INVALID_FILTER_ID:    return "ERR_INVALID_FILTER_ID";
         case J2534_ERR_NO_FLOW_CONTROL:      return "ERR_NO_FLOW_CONTROL";
+        case J2534_ERR_NOT_UNIQUE:           return "ERR_NOT_UNIQUE";
         case J2534_ERR_INVALID_BAUDRATE:     return "ERR_INVALID_BAUDRATE";
         case J2534_ERR_INVALID_DEVICE_ID:    return "ERR_INVALID_DEVICE_ID";
         case J2534_ERR_DEVICE_IN_USE:        return "ERR_DEVICE_IN_USE";
+        case J2534_ERR_NO_CONNECTION_ESTABLISHED:
+            return "ERR_NO_CONNECTION_ESTABLISHED";
         default:                             return "?";
     }
 }
@@ -327,6 +331,70 @@ uint32_t j2534_connect_baud_check(uint32_t asked_bps, uint32_t bus_kbps)
     /* whole kbit/s, as the settings count: 83333 is "83" */
     return (asked_bps / 1000u == bus_kbps) ? J2534_STATUS_NOERROR
                                            : J2534_ERR_INVALID_BAUDRATE;
+}
+
+uint8_t j2534_tp20_encode_ms(uint32_t ms)
+{
+    if (ms == 0)
+    {
+        return 0;
+    }
+
+    /* 0.1 ms units: 1..6 ms fits in the 6-bit scale (40 ms does not). */
+    if (ms <= 6)
+    {
+        return (uint8_t)(ms * 10u);
+    }
+
+    if (ms <= 63)
+    {
+        return (uint8_t)(0x40u | ms);
+    }
+
+    if (ms <= 630)
+    {
+        uint32_t scale = (ms + 9u) / 10u;
+
+        if (scale > 63u)
+        {
+            scale = 63u;
+        }
+
+        return (uint8_t)(0x80u | scale);
+    }
+
+    {
+        uint32_t scale = (ms + 99u) / 100u;
+
+        if (scale == 0)
+        {
+            scale = 1u;
+        }
+
+        if (scale > 63u)
+        {
+            scale = 63u;
+        }
+
+        return (uint8_t)(0xC0u | scale);
+    }
+}
+
+uint32_t j2534_tp20_decode_us(uint8_t wire)
+{
+    static const uint32_t unit_us[4] = { 100u, 1000u, 10000u, 100000u };
+
+    return unit_us[wire >> 6] * (uint32_t)(wire & 0x3Fu);
+}
+
+uint32_t j2534_tp20_round_gap_us(uint32_t us)
+{
+    if (us == 0)
+    {
+        return 0;
+    }
+
+    return ((us + 499u) / 500u) * 500u;
 }
 
 /* ---- ISO15765 message data (SAE J2534-1 layout) ------------------------ */

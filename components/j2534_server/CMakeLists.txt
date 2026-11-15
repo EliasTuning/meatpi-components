@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "j2534_proto.c"
          "j2534_channel.c"
          "j2534_channel_iso.c"
+         "j2534_channel_tp20.c"
          "j2534_channel_legacy.c"
          "j2534_server.c"
          "j2534_server_pump.c"
