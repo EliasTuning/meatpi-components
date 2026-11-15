@@ -294,6 +294,8 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
     c->flags = flags;
     c->ext = ext;
     c->next_filter_id = 1;
+    c->iso_bs = CONFIG_ISO_TP_DEFAULT_BLOCK_SIZE;
+    c->iso_st_us = CONFIG_ISO_TP_DEFAULT_ST_MIN_US;
 
     uint32_t st = J2534_STATUS_NOERROR;
 
@@ -336,6 +338,59 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
 
     xSemaphoreGive(s_lock);
     return st;
+}
+
+static uint32_t stmin_param_to_us(uint32_t stmin)
+{
+    if (stmin <= 0x7Fu)
+    {
+        return stmin * 1000u;
+    }
+
+    if (stmin >= 0xF1u && stmin <= 0xF9u)
+    {
+        return (stmin - 0xF0u) * 100u;
+    }
+
+    return 0;
+}
+
+void j2534_channel_set_isotp(int slot, bool has_bs, uint8_t bs,
+                             bool has_stmin, uint32_t stmin)
+{
+    if (slot < 0 || slot >= J2534_MAX_CHANNELS)
+    {
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    j2534_channel_t *c = &s_ch[slot];
+
+    if (c->in_use)
+    {
+        if (has_bs)
+        {
+            c->iso_bs = bs;
+        }
+        if (has_stmin)
+        {
+            c->iso_st_us = stmin_param_to_us(stmin);
+        }
+        const can_isotp_ops_t *ops = can_isotp();
+
+        if (ops != NULL && ops->set_flow != NULL)
+        {
+            for (int i = 0; i < J2534_CH_MAX_SESSIONS; i++)
+            {
+                if (c->sess[i].in_use && c->sess[i].isotp != NULL)
+                {
+                    (void)ops->set_flow(c->sess[i].isotp, c->iso_bs, c->iso_st_us);
+                }
+            }
+        }
+    }
+
+    xSemaphoreGive(s_lock);
 }
 
 void j2534_channel_disconnect(int slot)

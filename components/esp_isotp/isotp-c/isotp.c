@@ -413,8 +413,8 @@ void isotp_on_can_message(IsoTpLink* link, const uint8_t* data, uint8_t len) {
                 /* change status */
                 link->receive_status = ISOTP_RECEIVE_STATUS_INPROGRESS;
                 /* send fc frame */
-                link->receive_bs_count = ISO_TP_DEFAULT_BLOCK_SIZE;
-                isotp_send_flow_control(link, PCI_FLOW_STATUS_CONTINUE, link->receive_bs_count, ISO_TP_DEFAULT_ST_MIN_US);
+                link->receive_bs_count = link->fc_bs;
+                isotp_send_flow_control(link, PCI_FLOW_STATUS_CONTINUE, link->receive_bs_count, link->fc_st_min_us);
                 /* refresh timer cs */
                 link->receive_timer_cr = isotp_user_get_us() + ISO_TP_DEFAULT_RESPONSE_TIMEOUT_US;
             }
@@ -451,8 +451,8 @@ void isotp_on_can_message(IsoTpLink* link, const uint8_t* data, uint8_t len) {
                      * for the rest of the PDU. A zero count must not
                      * wrap and emit another flow control mid-transfer. */
                     if (link->receive_bs_count != 0 && 0 == --link->receive_bs_count) {
-                        link->receive_bs_count = ISO_TP_DEFAULT_BLOCK_SIZE;
-                        isotp_send_flow_control(link, PCI_FLOW_STATUS_CONTINUE, link->receive_bs_count, ISO_TP_DEFAULT_ST_MIN_US);
+                        link->receive_bs_count = link->fc_bs;
+                        isotp_send_flow_control(link, PCI_FLOW_STATUS_CONTINUE, link->receive_bs_count, link->fc_st_min_us);
                     }
                 }
             }
@@ -542,6 +542,8 @@ void isotp_init_link(IsoTpLink* link, uint32_t sendid, uint8_t* sendbuf, uint32_
     link->send_buf_size       = sendbufsize;
     link->receive_buffer      = recvbuf;
     link->receive_buf_size    = recvbufsize;
+    link->fc_bs               = ISO_TP_DEFAULT_BLOCK_SIZE;
+    link->fc_st_min_us        = ISO_TP_DEFAULT_ST_MIN_US;
 
 #ifdef ISO_TP_TRANSMIT_COMPLETE_CALLBACK
     link->tx_done_cb     = NULL;
@@ -554,6 +556,12 @@ void isotp_init_link(IsoTpLink* link, uint32_t sendid, uint8_t* sendbuf, uint32_
 #endif
 
     return;
+}
+
+void isotp_set_flow_control(IsoTpLink* link, uint8_t block_size, uint32_t st_min_us) {
+    if (link == NULL) { return; }
+    link->fc_bs        = block_size;
+    link->fc_st_min_us = st_min_us;
 }
 
 void isotp_destroy_link(IsoTpLink* link) {

@@ -77,6 +77,8 @@ typedef struct
     uint32_t protocol;
     uint32_t flags;
     bool     ext;                    /* CONNECT: 29-bit ids                      */
+    uint8_t  iso_bs;                 /* flow control BS this channel sends       */
+    uint32_t iso_st_us;              /* flow control STmin, microseconds         */
 
     QueueHandle_t can_q;             /* CAN: every frame on the bus; ISO15765:   */
     int           can_sub;           /* first-frame peeks + frames no session owns */

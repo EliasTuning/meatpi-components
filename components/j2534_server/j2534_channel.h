@@ -118,6 +118,15 @@ uint32_t j2534_channel_stop_filter(int slot, uint32_t filter_id);
 void j2534_channel_clear_filters(int slot);
 
 /**
+ * Receiver flow control for an ISO15765 channel. @p stmin is the J2534
+ * ISO15765_STMIN value (0..127 ms, or 0xF1..0xF9 for 100..900 us). Applied
+ * to sessions already open and to sessions opened afterwards. @p bs 0 asks
+ * the sender to stream the rest of each PDU.
+ */
+void j2534_channel_set_isotp(int slot, bool has_bs, uint8_t bs,
+                             bool has_stmin, uint32_t stmin);
+
+/**
  * Poll one channel for a received message (non-blocking-ish; ISO15765
  * uses a short internal timeout). Returns true and fills @p out when a
  * message passed the channel's filters. The server's RX pump calls this

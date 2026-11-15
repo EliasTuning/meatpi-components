@@ -103,6 +103,9 @@ typedef struct {
     bool externally_managed_twai;     /*!< When true, caller owns TWAI callbacks/lifecycle and feeds RX frames manually */
     esp_isotp_can_tx_callback_t can_tx_callback; /*!< Optional CAN TX callback for externally managed transports */
     void *can_tx_callback_arg;        /*!< User argument passed to can_tx_callback */
+    bool flow_override;               /*!< When true, flow_block_size / flow_st_min_us replace the Kconfig defaults */
+    uint8_t flow_block_size;          /*!< Receiver BS. 0 = sender streams the rest of the PDU */
+    uint32_t flow_st_min_us;          /*!< Receiver STmin in microseconds. 0 = no separation */
 } esp_isotp_config_t;
 
 /**
@@ -129,6 +132,9 @@ typedef struct {
  *  - Other error codes from TWAI functions
  */
 esp_err_t esp_isotp_new_transport(twai_node_handle_t twai_node, const esp_isotp_config_t *config, esp_isotp_handle_t *out_handle);
+
+/** Replace the flow control this transport sends as receiver. Safe between PDUs. */
+esp_err_t esp_isotp_set_flow_control(esp_isotp_handle_t handle, uint8_t block_size, uint32_t st_min_us);
 
 /**
  * @brief Feed a CAN frame into an externally managed ISO-TP transport.

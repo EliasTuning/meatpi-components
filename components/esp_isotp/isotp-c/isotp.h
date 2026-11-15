@@ -60,7 +60,9 @@ typedef struct IsoTpLink {
 
     /* multi-frame control */
     uint8_t             receive_sn;
-    uint8_t             receive_bs_count; /* Maximum number of FC.Wait frame transmissions  */
+    uint8_t             receive_bs_count; /* frames left in this block; 0 = the rest of the PDU */
+    uint8_t             fc_bs;            /* BS this link sends in flow control              */
+    uint32_t            fc_st_min_us;     /* STmin this link sends, microseconds             */
     uint32_t            receive_timer_cr; /* Time until transmission of the next ConsecutiveFrame N_PDU
                                     start at sending FC, receive CF
                                     end at receive FC */
@@ -94,6 +96,9 @@ typedef struct IsoTpLink {
  * @param recvbufsize The size of the buffer area.
  */
 void isotp_init_link(IsoTpLink* link, uint32_t sendid, uint8_t* sendbuf, uint32_t sendbufsize, uint8_t* recvbuf, uint32_t recvbufsize);
+
+/** Flow control this link sends as receiver. block_size 0 asks the sender to stream. */
+void isotp_set_flow_control(IsoTpLink* link, uint8_t block_size, uint32_t st_min_us);
 
 /**
  * @brief Destroys the ISO-TP link and releases associated resources.

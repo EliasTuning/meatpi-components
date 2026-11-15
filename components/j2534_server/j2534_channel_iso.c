@@ -114,14 +114,23 @@ static int find_by_tx(const j2534_channel_t *c, uint32_t tx_id, bool ext)
 }
 
 /* open the provider session for a record whose ids and padding are set */
-static uint32_t session_open(j2534_iso_session_t *s)
+static uint32_t session_open(j2534_channel_t *c, j2534_iso_session_t *s)
 {
+    uint32_t st_us = c->iso_st_us;
+    uint8_t stmin_ms = 0;
+
+    if (st_us >= 1000u && (st_us % 1000u) == 0 && st_us / 1000u <= 127u)
+    {
+        stmin_ms = (uint8_t)(st_us / 1000u);
+    }
+
     can_isotp_cfg_t cfg = {
         .tx_id        = s->tx_id,
         .rx_id        = s->rx_id,
         .ext_id       = s->ext,
-        .block_size   = 0,
-        .stmin_ms     = 0,
+        .block_size   = c->iso_bs,
+        .stmin_ms     = stmin_ms,
+        .stmin_us     = st_us,
         .padding_byte = 0xAA,
         .use_padding  = s->pad,
     };
@@ -198,7 +207,7 @@ uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
     c->sess[s].ext = ext;
     c->sess[s].pad = pad;
 
-    uint32_t st = session_open(&c->sess[s]);
+    uint32_t st = session_open(c, &c->sess[s]);
 
     if (st == J2534_STATUS_NOERROR && slot != NULL)
     {

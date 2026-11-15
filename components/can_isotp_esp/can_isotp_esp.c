@@ -459,6 +459,11 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
             .externally_managed_twai = true,
             .can_tx_callback         = on_can_tx,
             .can_tx_callback_arg     = s,
+            .flow_override           = true,
+            .flow_block_size         = cfg->block_size,
+            .flow_st_min_us          = cfg->stmin_us != 0
+                                           ? cfg->stmin_us
+                                           : (uint32_t)cfg->stmin_ms * 1000u,
         };
 
         err = esp_isotp_new_transport(NULL, &ic, &s->tp);
@@ -492,14 +497,6 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
 
     if (err == ESP_OK)
     {
-        if (cfg->block_size != 0 || cfg->stmin_ms != 0)
-        {
-            ESP_LOGW(TAG, "per-session BS/STmin not supported by esp_isotp "
-                          "0.1.1: flow control uses Kconfig BS=%d STmin=%d us",
-                     CONFIG_ISO_TP_DEFAULT_BLOCK_SIZE,
-                     CONFIG_ISO_TP_DEFAULT_ST_MIN_US);
-        }
-
         s_tbl[slot] = s;
 
         portENTER_CRITICAL(&s_stats_mux);
@@ -687,12 +684,29 @@ esp_err_t can_isotp_esp_init(void)
     /* the vendored stack logs every send at INFO: keep it quiet unless
        someone turns it up in the log settings */
     static const log_descriptor_t STACK_LOG = { "esp_isotp", ESP_LOG_WARN };
-    static const can_isotp_ops_t OPS =
+    static esp_err_t isotp_set_flow(can_isotp_session_t session, uint8_t block_size,
+                                 uint32_t stmin_us)
+{
+    struct can_isotp_session *s = session;
+
+    if (s == NULL || s->tp == NULL)
     {
-        .open  = isotp_open,
-        .close = isotp_close,
-        .send  = isotp_send,
-        .recv  = isotp_recv,
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s->lock, portMAX_DELAY);
+    esp_err_t err = esp_isotp_set_flow_control(s->tp, block_size, stmin_us);
+    xSemaphoreGive(s->lock);
+    return err;
+}
+
+static const can_isotp_ops_t OPS =
+    {
+        .open     = isotp_open,
+        .close    = isotp_close,
+        .send     = isotp_send,
+        .recv     = isotp_recv,
+        .set_flow = isotp_set_flow,
     };
 
     log_manager_register(&LOG_DESC);

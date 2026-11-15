@@ -314,6 +314,13 @@ void isotp_user_debug(const char *message, ...)
     va_end(args);
 }
 
+esp_err_t esp_isotp_set_flow_control(esp_isotp_handle_t handle, uint8_t block_size, uint32_t st_min_us)
+{
+    ESP_RETURN_ON_FALSE(handle, ESP_ERR_INVALID_ARG, TAG, "Invalid parameters");
+    isotp_set_flow_control(&handle->link, block_size, st_min_us);
+    return ESP_OK;
+}
+
 esp_err_t esp_isotp_new_transport(twai_node_handle_t twai_node, const esp_isotp_config_t *config, esp_isotp_handle_t *out_handle)
 {
     esp_err_t ret = ESP_OK;
@@ -361,6 +368,9 @@ esp_err_t esp_isotp_new_transport(twai_node_handle_t twai_node, const esp_isotp_
     // Initialize the isotp-c library link with our allocated buffers.
     isotp_init_link(&isotp->link, config->tx_id, isotp->isotp_tx_buffer,
                     config->tx_buffer_size, isotp->isotp_rx_buffer, config->rx_buffer_size);
+    if (config->flow_override) {
+        isotp_set_flow_control(&isotp->link, config->flow_block_size, config->flow_st_min_us);
+    }
     isotp->link.receive_arbitration_id = config->rx_id;
 
     // Pre-allocate ISR-safe receive frame buffer to avoid dynamic allocation in interrupt context.

@@ -416,7 +416,52 @@ static void handle_ioctl(const j2534_transport_t *t, const j2534_hdr_t *h,
     uint32_t ioctl_id = (h->length >= 4) ? rd_u32(payload) : 0;
 
     /* v1: config is best-effort (bus params come from can_manager
-     * settings); CLEAR_* operate on our channel state */
+     * settings); CLEAR_* operate on our channel state.
+     * SET_CONFIG may carry ISO15765_BS (0x1E) and ISO15765_STMIN (0x1F):
+     * u32 count, then count pairs of u32 parameter, u32 value. */
+    if (ioctl_id == J2534_IOCTL_SET_CONFIG && h->length >= 8)
+    {
+        uint32_t count = rd_u32(payload + 4);
+        uint8_t bs = 0;
+        uint32_t stmin = 0;
+        bool have_bs = false;
+        bool have_st = false;
+
+        if (count > 16)
+        {
+            count = 16;
+        }
+
+        for (uint32_t i = 0; i < count; i++)
+        {
+            uint32_t off = 8 + i * 8;
+
+            if (off + 8 > h->length)
+            {
+                break;
+            }
+
+            uint32_t param = rd_u32(payload + off);
+            uint32_t value = rd_u32(payload + off + 4);
+
+            if (param == 0x1Eu)
+            {
+                bs = (uint8_t)value;
+                have_bs = true;
+            }
+            else if (param == 0x1Fu)
+            {
+                stmin = value;
+                have_st = true;
+            }
+        }
+
+        if (have_bs || have_st)
+        {
+            j2534_channel_set_isotp(slot, have_bs, bs, have_st, stmin);
+        }
+    }
+
     switch (ioctl_id)
     {
         case J2534_IOCTL_READ_VBATT:
