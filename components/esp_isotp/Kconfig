@@ -2,16 +2,17 @@ menu "ISO-TP Protocol"
 
     config ISO_TP_DEFAULT_BLOCK_SIZE
         int "Default Block Size"
-        default 8
-        range 1 32
+        default 0
+        range 0 32
         help
-            Maximum number of consecutive frames the receiver can receive at one time.
-            This value is affected by CAN driver queue length.
-            Higher values improve throughput but require more buffer space.
+            Consecutive frames the receiver accepts before it sends another
+            flow control. 0 is ISO 15765-2 BS=0: one flow control, then the
+            sender streams the rest of the PDU. The RX queue has to absorb
+            that burst. 1..32 send another flow control after that many frames.
 
     config ISO_TP_DEFAULT_ST_MIN_US
         int "Default STmin (microseconds)"
-        default 1000
+        default 0
         range 0 50000
         help
             The STmin parameter specifies the minimum time gap allowed between

@@ -447,8 +447,10 @@ void isotp_on_can_message(IsoTpLink* link, const uint8_t* data, uint8_t len) {
                 if (link->receive_offset >= link->receive_size) {
                     link->receive_status = ISOTP_RECEIVE_STATUS_FULL;
                 } else {
-                    /* send fc when bs reaches limit */
-                    if (0 == --link->receive_bs_count) {
+                    /* BS 0 means the first flow control already asked
+                     * for the rest of the PDU. A zero count must not
+                     * wrap and emit another flow control mid-transfer. */
+                    if (link->receive_bs_count != 0 && 0 == --link->receive_bs_count) {
                         link->receive_bs_count = ISO_TP_DEFAULT_BLOCK_SIZE;
                         isotp_send_flow_control(link, PCI_FLOW_STATUS_CONTINUE, link->receive_bs_count, ISO_TP_DEFAULT_ST_MIN_US);
                     }
