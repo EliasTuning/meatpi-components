@@ -64,6 +64,12 @@
 extern "C" {
 #endif
 
+/* The caller stack requirement above as a number, in bytes, for a caller
+   to check its task against at build time (_Static_assert). Measured
+   2026-11-16 on an event manager worker: an https post used 4.3 to
+   4.5 KB of the task's stack, a plain one 2.7 KB (the README). */
+#define HTTP_CLIENT_MANAGER_TLS_STACK_MIN  (8 * 1024)
+
 #define HTTP_CLIENT_MANAGER_MAX_CONCURRENT 4
 #define HTTP_CLIENT_MANAGER_DEFAULT_RESP   (16 * 1024)
 #define HTTP_CLIENT_MANAGER_MAX_RESP       (256 * 1024)

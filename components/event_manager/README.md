@@ -30,6 +30,10 @@ SOURCES ──publish──▶ queue ──dispatcher──▶ match/when/cooldo
 - `event_manager_register_http()`: the `/api/events/*` routes.
 - `em_action_t.undoable` (2026-09-17): the action reverses itself when run
   with `"undo":true` in `with` (a while-rule ending); `blocking` = worker lane.
+- `EVENT_MANAGER_WORKER_STACK` (2026-11-16): the stack of one worker of the
+  blocking lane, in bytes. The owner of a blocking action with a stack
+  budget of its own checks it against this at build time
+  (`_Static_assert` in `http_client_manager_events.c`).
 
 ## Dependencies
 
@@ -50,7 +54,15 @@ depends on it.
   for the live re-check), registries (32 sources, 24 actions, 24 values)
   ~2 KB, event ring 32 entries ~14 KB, the 2 KB render buffer, the settings
   probe table 16 x ~600 B = 9.6 KB.
-- Task stacks (PSRAM): dispatcher 8 KB, 2 workers x 4 KB.
+- Task stacks (PSRAM): dispatcher 8 KB, 2 workers x 16 KB
+  (`EVENT_MANAGER_WORKER_STACK`; 4 KB each until 2026-11-16).
+  **Measured 2026-11-16** on a worker (WiCAN PRO, IDF 6.1, the stack's
+  high-water mark): idle 1,116 B used; a plain `http.post` 2,700 B; an
+  `https://` post 4,268 to 4,300 B with an RSA chain and 4,476 B with an
+  ECDSA chain (three hosts, the same figure), which leaves 11,908 B. The
+  4 KB stack was 172 to 380 B short of every https post: the first one
+  overflowed it and reset the device (GitHub issue 1067, `A stack overflow
+  in task em_worker`). Dispatcher: 3,004 B used after the same run.
 - Internal RAM: queue/task control blocks only (~1 KB). Heap: the rendered
   `with` cJSON per fired action (transient).
 
@@ -131,8 +143,12 @@ sources (status.bit covers the connected-bit cases today), the
     `mqtt.publish` (already async), `led.*`, `autopid.group`.
   - **worker pool** (`blocking=true`): a SLOW network/bus round-trip
     (`http.post`, `obd.request`, `uds.request`) is handed to a bounded
-    pool (`EM_WORKERS=2` tasks, 4 KB PSRAM each) via a depth-8 job queue,
-    so one 8 s HTTP+TLS post can't stall tick processing. The queue is
+    pool (`EM_WORKERS=2` tasks, 16 KB PSRAM each) via a depth-8 job queue,
+    so one 8 s HTTP+TLS post can't stall tick processing. The workers'
+    stack carries whatever the action needs of its caller: the TLS
+    handshake of an `https://` post runs there (see Memory footprint for
+    the measured use; a new blocking action states its budget against
+    `EVENT_MANAGER_WORKER_STACK` the way `http.post` does). The queue is
     drop-OLDEST when full (`stats.blocking_dropped` counts the drops);
     the rendered `with` cJSON ownership transfers dispatcher→worker.
     `run()` on a blocking action MUST NOT touch flash (PSRAM-stack task,
@@ -181,3 +197,10 @@ vocabulary (zero hardcoded dropdowns; actions carry `undoable`).
   surfaces, a `wifi.sta` while-rule firing at boot and overriding a group's
   rate, a timer rule with a live `${time.epoch}` condition undone by the 1 s
   re-check; restores the device's rules.
+- Bench (`.\test.ps1 rulepost`, `tools/testbench/system/rule_http_post_bench.py`,
+  `RULE POST PASS`, 2026-11-16): `http.post` rules fired by one MQTT message
+  each, to a plain receiver and to two public `https://` hosts (an ECDSA and
+  an RSA chain), then two https posts at once so that each worker runs a
+  handshake; no restart, each worker keeps 4 KB of stack. On an image with
+  the 4 KB workers the stage fails at its first https post and names the
+  crash. See the firmware repo's `testing/rulepost.md`.

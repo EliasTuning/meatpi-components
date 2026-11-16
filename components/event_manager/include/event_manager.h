@@ -61,6 +61,14 @@ extern "C" {
 #define EM_KV_MAX   6
 #define EM_STR_MAX  48
 
+/* The stack of one worker of the blocking lane, in BYTES (StackType_t is
+   one byte on xtensa). Public so that the owner of a blocking action with
+   a stack budget of its own checks it at build time: http.post runs the
+   TLS handshake of an https:// request on the worker, and on the 4 KB
+   this was until 2026-11-16 the first such post overflowed it (issue
+   1067). Measured use and headroom: the README, "Memory footprint". */
+#define EVENT_MANAGER_WORKER_STACK (16 * 1024)
+
 typedef enum
 {
     EM_VAL_F64 = 0,

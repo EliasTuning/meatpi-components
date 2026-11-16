@@ -24,15 +24,23 @@
  * @file http_client_manager_events.c
  * @brief event_manager glue: `http.post {url, body, content_type?}`,
  *        the webhook/ABRP-style action. Fire-and-forget with counted
- *        errors, NO retries (design §12.3); runs in the dispatcher
- *        (8 KB PSRAM stack: the component's TLS work is heap-based,
- *        response buffer freed immediately).
+ *        errors, NO retries (design §12.3). A blocking action: it runs
+ *        on a worker of the event manager's pool, and the TLS handshake
+ *        of an https:// URL runs on that worker's stack (the response
+ *        buffer is heap, freed immediately).
  */
 #include <string.h>
 
 #include "event_manager.h"
 
 #include "http_client_manager.h"
+
+/* Issue 1067 (2026-11-16): the workers had 4 KB, and the first https://
+   post of a rule overflowed the stack and reset the device. The lane this
+   action runs on must hold what this component asks of every caller. */
+_Static_assert(EVENT_MANAGER_WORKER_STACK >= HTTP_CLIENT_MANAGER_TLS_STACK_MIN,
+               "http.post: the event manager's worker stack is below the "
+               "https caller budget of http_client_manager.h");
 
 static esp_err_t act_post(const cJSON *with, const em_event_t *ev)
 {
