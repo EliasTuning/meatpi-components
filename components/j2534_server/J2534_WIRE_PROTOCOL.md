@@ -15,7 +15,7 @@
 |---|---|
 | Wire version | 1 (`HELLO` answers it) |
 | Transports | TCP (port 6809), USB CDC-ACM serial, BLE (stream channel FFF5/FFF6) |
-| Protocols | SAE J2534-1: `CAN` (5) and `ISO15765` (6) on the native controller, `J1850VPW` (1, GM Class 2) on the OBD chip; `J1850PWM`/`ISO9141`/`ISO14230` answer `ERR_NOT_SUPPORTED` (chip-wired, not built yet) |
+| Protocols | SAE J2534-1: `CAN` (5) and `ISO15765` (6) on the native controller, `J1850VPW` (1, GM Class 2) on the OBD chip; `J1850PWM`/`ISO9141`/`ISO14230` answer `ERR_NOT_SUPPORTED` (chip-wired, not built yet). SAE J2534-2: `TP2_0_PS` (0x800E, VW TP 2.0 as SAE J2819 describes it) on the native controller, section 11 |
 | Byte order | little-endian everywhere, EXCEPT the CAN id inside message data (big-endian, section 4) |
 | Session | one tester at a time across all transports (section 2) |
 
@@ -87,8 +87,8 @@ Types 0x01..0x15 are tester to device; 0x80.. are device to tester.
 | `0x12` | `STOP_FILTER` | `filter_id u32` | none |
 | `0x13` | `START_PERIODIC` | `interval_ms u32` (clamped to >= 5), then one MSG | `u32` periodic id |
 | `0x14` | `STOP_PERIODIC` | `periodic_id u32` | none |
-| `0x15` | `IOCTL` | `ioctl_id u32` [, parameters] | `READ_VBATT`: millivolts `u32`; otherwise none |
-| `0x80` | `ACK` | device: `status u32 [, result u32]` (payload 4 or 8 bytes) | |
+| `0x15` | `IOCTL` | `ioctl_id u32` [, `body_len u32`, then `body_len` bytes] | `READ_VBATT`: millivolts `u32`; `GET_CONFIG` on a TP2.0 channel and `GET_DEVICE_INFO`: a list (section 11); otherwise none |
+| `0x80` | `ACK` | device: `status u32 [, result u32]` (payload 4 or 8 bytes; longer for the two list answers) | |
 | `0x81` | `RX_MSG` | device: one PASSTHRU_MSG; `seq 0`, `hdr.channel` = source channel | |
 | `0x82` | `EVENT` | reserved, never sent in v1 | |
 
@@ -148,7 +148,17 @@ when the filter or session table is full.
 
 `IOCTL` v1: `CLEAR_MSG_FILTERS (0x0A)` and `CLEAR_PERIODIC_MSGS (0x09)` act;
 `GET_CONFIG`, `SET_CONFIG`, `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` answer
-`NOERROR` without effect (bus timing comes from the device settings).
+`NOERROR` without effect (bus timing comes from the device settings). On a
+TP2.0 channel `GET_CONFIG` and `SET_CONFIG` do act (section 11).
+
+`IOCTL` payload: the id alone (4 bytes), or the id, `body_len u32` and
+`body_len` bytes. The id alone is what `READ_VBATT` has always sent and
+what driver 1.7 and earlier send for every IOCTL; it stays valid. An
+IOCTL with parameters (the TP2.0 ones and `GET_DEVICE_INFO`) carries
+them in the body. `body_len 0` (8 bytes) means the same as the id alone;
+firmware before 2026-11-17 reads the id and ignores what follows it. A
+payload of 8 bytes or more whose `body_len` is larger than what follows
+it is `ERR_INVALID_MSG`.
 
 `READ_VBATT (0x03)` is device-wide: use `hdr.channel = 0` after OPEN,
 without CONNECT. The ACK is `NOERROR u32, millivolts u32` (8 payload bytes).
@@ -174,9 +184,9 @@ reply:   35 4a 01 80 03 00 00 00 08 00 00 00 00 00 00 00 42 36 00 00
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 4 | `protocol_id` (1 J1850VPW, 5 CAN, 6 ISO15765) |
-| 4 | 4 | `rx_status` (device to tester: `0x01 TX_MSG_TYPE` + `0x08 TX_INDICATION` = the TxDone indication after an ISO15765 or J1850 transmit, `0x02 START_OF_MESSAGE` = an ISO15765 first frame arrived, `0x100 CAN_29BIT_ID`) |
-| 8 | 4 | `tx_flags` (tester to device: `0x100 CAN_29BIT_ID`, `0x40 ISO15765_FRAME_PAD`; `0x80 ISO15765_ADDR_TYPE` is refused) |
+| 0 | 4 | `protocol_id` (1 J1850VPW, 5 CAN, 6 ISO15765, 0x800E TP2_0_PS) |
+| 4 | 4 | `rx_status` (device to tester: `0x01 TX_MSG_TYPE` + `0x08 TX_INDICATION` = the TxDone indication after an ISO15765 or J1850 transmit, `0x02 START_OF_MESSAGE` = an ISO15765 first frame arrived, `0x100 CAN_29BIT_ID`, `0x10000 CONNECTION_ESTABLISHED` and `0x20000 CONNECTION_LOST` = the two TP2.0 indications) |
+| 8 | 4 | `tx_flags` (tester to device: `0x100 CAN_29BIT_ID`, `0x40 ISO15765_FRAME_PAD`, `0x10000 TP2_0_BROADCAST_MSG`; `0x80 ISO15765_ADDR_TYPE` is refused) |
 | 12 | 4 | `timestamp` (device: microseconds since boot, taken in the CAN receive interrupt for CAN frames, at reassembly for ISO15765 PDUs; wraps every 71.6 min) |
 | 16 | 4 | `extra_data_index` |
 | 20 | 4 | `data_size` (0..4128) |
@@ -210,6 +220,12 @@ Data conventions:
   implemented (the bus stays at 10.4 kbit/s; `SET_CONFIG DATA_RATE` is
   accepted but has no effect). `CONNECT` needs the OBD chip ready, else
   `ERR_FAILED`.
+- **TP2_0_PS**: `data = [4-byte BIG-ENDIAN CAN id][message bytes]`, both
+  ways, up to 4092 message bytes. The device puts nothing in front of the
+  message and takes nothing off it (SAE J2534-2 19.3.1): the two length
+  bytes a VW ECU wants in front of a message are the application's on a
+  write, and the ECU's own two are the first bytes of what is read.
+  Details in section 11.
 
 ## 5. Status codes
 
@@ -220,6 +236,7 @@ Data conventions:
 | `0x02` | `ERR_INVALID_CHANNEL_ID` | `DISCONNECT`/data op on an unused channel |
 | `0x03` | `ERR_INVALID_PROTOCOL_ID` | |
 | `0x04` | `ERR_NULL_PARAMETER` | |
+| `0x05` | `ERR_INVALID_IOCTL_VALUE` | a TP2.0 IOCTL or `GET_DEVICE_INFO` with a malformed body, a value out of range, a teardown of an id with no connection |
 | `0x06` | `ERR_INVALID_FLAGS` | |
 | `0x07` | `ERR_FAILED` | no free channel / periodic slot, timer failure, unknown message type |
 | `0x08` | `ERR_DEVICE_NOT_CONNECTED` | `CONNECT` before `OPEN` |
@@ -234,6 +251,7 @@ Data conventions:
 | `0x18` | `ERR_INVALID_BAUDRATE` | `CONNECT` (CAN, ISO15765) with a baud the bus does not run at |
 | `0x19` | `ERR_INVALID_DEVICE_ID` | |
 | `0x1A` | `ERR_DEVICE_IN_USE` | a tester is attached on another transport |
+| `0x00010001` | `ERR_NO_CONNECTION_ESTABLISHED` | a TP2.0 message longer than one CAN frame to an id with no connection (SAE J2534-2 table 123: its own return values start at 0x10000) |
 
 ## 6. Device behaviours
 
@@ -385,3 +403,126 @@ ISO15765 message's `data` (section 4: the id first, as J2534-1 says) and
 the device now sends the indications above. The Windows DLL copies
 messages verbatim and needed no change; the bench scripts and the BLE
 bench moved with the device.
+
+2026-11-17, still version 1: TP2.0 (section 11) added a protocol id, two
+IOCTLs with a body, `GET_DEVICE_INFO`, two `rx_status` bits, one
+`tx_flags` bit and two status codes. Nothing a client of the day before
+sends changed meaning: an IOCTL that is its id alone is read as before.
+The one edge is a client that put parameters straight behind an IOCTL id
+without a length (none is known): its second word is now read as
+`body_len`.
+
+## 11. TP2.0 (`TP2_0_PS`, protocol 0x800E)
+
+VW's TP 2.0 transport as its own J2534 protocol (SAE J2534-2 section 19;
+the transport itself is SAE J2819). The device sets a connection up,
+splits a message into telegrams and puts a received one together,
+acknowledges blocks, sends again what the ECU asks for again and tests an
+idle connection; the tester sees whole messages and two indications. A
+raw `CAN` channel does none of this: a tool that does the transport
+itself keeps using protocol 5.
+
+`CONNECT` with protocol `0x800E` opens the channel. Up to four
+connections live on it at once (`ERR_EXCEEDED_LIMIT` for a fifth).
+`DISCONNECT` sends a disconnect (`A8`) on every connection first.
+
+**IOCTLs on the channel** (payload: id, `body_len`, body; section 3):
+
+| IOCTL | Body | Answer |
+|---|---|---|
+| `SET_CONFIG (0x02)` | `count u32`, then `count` pairs `parameter u32, value u32` (at most 24) | status; the first refused pair ends the request |
+| `GET_CONFIG (0x01)` | the same list, values ignored | `status u32`, then `count u32` and the pairs with the values filled |
+| `REQUEST_CONNECTION (0x800A)` | `u32 11`, then the 11 bytes of the SBYTE_ARRAY (below) | status at once; the outcome is an indication |
+| `TEARDOWN_CONNECTION (0x800B)` | `u32 4`, then the connection's RX id, 4 bytes big-endian | status; `ERR_INVALID_IOCTL_VALUE` when no connection has that id |
+
+Config parameters (SAE J2534-2 table 77; times in ms):
+
+| Id | Name | Default | Note |
+|---|---|---|---|
+| `0x01` | `DATA_RATE` | - | kept and read back; the bus rate comes from the device settings |
+| `0x03` | `LOOPBACK` | 0 | 0 or 1 |
+| `0x17`, `0x18` | `BIT_SAMPLE_POINT`, `SYNC_JUMP_WIDTH` | - | kept and read back |
+| `0x8001` | `J1962_PINS` | `0x060E` | pins 6 and 14, the one pair this hardware has; any other value is `ERR_NOT_SUPPORTED` |
+| `0x8044` | `TP2_0_T_BR_INT` | 20 | gap between the telegrams of a broadcast |
+| `0x8045` | `TP2_0_T_E` | 100 | wait for the answer to a setup telegram |
+| `0x8046` | `TP2_0_MNTC` | 10 | tries of a setup telegram |
+| `0x8047` | `TP2_0_T_CTA` | 1000 | one connection test per this time on an idle connection |
+| `0x8048` | `TP2_0_MNCT` | 5 | unanswered connection tests before the connection counts as lost |
+| `0x8049` | `TP2_0_MNTB` | 5 | times a block is sent again when the ECU names a telegram in it |
+| `0x804A` | `TP2_0_MNT` | 2 | times a telegram is sent again when no acknowledge comes |
+| `0x804B` | `TP2_0_T_WAIT` | 100 | wait after "receiver not ready" |
+| `0x804C` | `TP2_0_T1` | 100 | wait for an acknowledge |
+| `0x804D` | `TP2_0_T3` | 0 | gap between telegrams, the value the device states in its connection setup |
+| `0x804E` | `TP2_0_IDENTIFER` | 0 | the tester's own address, for a connection the ECU asks for |
+| `0x804F` | `TP2_0_RXIDPASSIVE` | 0 | 0, or 0x300..0x7FF |
+
+Any other parameter is `ERR_NOT_SUPPORTED`.
+
+**`REQUEST_CONNECTION`**, the 11 bytes (SAE J2534-2 table 78): bytes 0
+to 3 the CAN id the setup request goes out on, big-endian (`00 00 02 00`);
+byte 4 the ECU's address; byte 5 the opcode, `C0`; bytes 6 and 7 the TX
+id offered; bytes 8 and 9 the RX id asked for (low byte first; bit 4 of
+the second byte set means "not given"); byte 10 the application type. Bytes 4 to 10 are the setup telegram as it goes on the bus
+(`01 C0 00 10 00 03 01` on `200` asks ECU 1 for a channel the tester
+receives on `300`); the answer is expected on `0x200 + address`. Refused
+at once with `ERR_INVALID_IOCTL_VALUE` (not 11 bytes, another opcode, id
+0), `ERR_NOT_UNIQUE` (the address or an id is already in use) or
+`ERR_EXCEEDED_LIMIT`. Otherwise the ACK is `NOERROR` and the outcome
+comes as an `RX_MSG` indication on the channel:
+
+- `rx_status 0x10000` (`CONNECTION_ESTABLISHED`), `data` = the RX id then
+  the TX id, 4 bytes big-endian each: the ids the ECU gave. Messages are
+  written to the TX id and read from the RX id.
+- `rx_status 0x20000` (`CONNECTION_LOST`), `data` = the RX id (4 bytes
+  big-endian) and one reason byte: `01` nothing answered (the setup after
+  `MNTC` tries, the connection tests, a block), `00` a disconnect (the
+  tester's `TEARDOWN_CONNECTION` or the ECU's own), `D6` to `D8` the
+  ECU's negative answer to the setup, passed on. A setup that fails is
+  reported with the RX id that was asked for.
+
+**`WRITE_MSGS`**, by the id in the first four data bytes:
+
+- The TX id of a connection: the bytes behind the id are the message, at
+  most 4092 (`ERR_INVALID_MSG` above that, nothing sent). They go out as
+  written in telegrams of 7 bytes; the id alone is one empty
+  end-of-message telegram. The ACK comes when the ECU has acknowledged
+  the last block. `ERR_TIMEOUT`: no acknowledge after the repeats, the
+  connection is then reported lost. `ERR_FAILED`: the ECU sent a break;
+  the connection stays. No TxDone indication follows.
+- `tx_flags 0x10000` (`TP2_0_BROADCAST_MSG`): a broadcast request, five
+  telegrams `T_BR_INT` apart, the last two bytes of each the key (`55 55`,
+  then `AA AA`, changing with every telegram; SAE J2819 5.1.2).
+  `ERR_INVALID_MSG` when the id is not a broadcast address.
+- Any other id: up to 8 bytes go out as one CAN frame; a longer message
+  is `ERR_NO_CONNECTION_ESTABLISHED (0x00010001)`.
+
+`START_PERIODIC` with the broadcast flag is the re-triggered broadcast
+(SAE J2534-2 19.3.2.3): the five telegrams at the start, then one per
+interval, the key changing over the whole run.
+
+**Received messages**: one `RX_MSG` per message, `data` = the RX id and
+everything the ECU sent up to its end-of-message telegram. A message
+longer than 4092 bytes is acknowledged on the bus and not delivered (one
+W line). A frame that belongs to no connection is delivered as on a CAN
+channel when a PASS filter of the tester matches it.
+
+**`GET_DEVICE_INFO (0x800C)`** is device-wide (`hdr.channel = 0` after
+`OPEN`; SAE J2534-2 section 25). Body: `count u32` (at most 16), then
+`count` pairs `parameter u32, value u32`. ACK: `status u32`, `count u32`,
+then `count` triples `parameter u32, value u32, supported u32`. A
+parameter the device does not have comes back with `supported 0` and its
+value as sent; the request is still `NOERROR`. Answered:
+`J1850VPW_SUPPORTED (0x03)`, `CAN_SUPPORTED (0x06)`,
+`ISO15765_SUPPORTED (0x07)` and their `_SIMULTANEOUS` (`0x36`, `0x39`,
+`0x3A`) with value `0x00000001`; `TP2_0_SUPPORTED (0x13)` and
+`TP2_0_SIMULTANEOUS (0x46)` with `0x00000100` (one `TP2_0_PS` channel);
+`TP2_0_PS_J1962 (0x28)`, where the value is the question (CAN-H pin in
+the high word, CAN-L pin in the low word, bit 0 = pin 1) and `supported`
+is 1 for `0x00202000` (pins 6 and 14) alone.
+
+Not proven on a bench: the connection an ECU asks the tester for
+(`TP2_0_IDENTIFER`, `TP2_0_RXIDPASSIVE`) and loopback. Not built:
+`GET_PROTOCOL_INFO`. Not run on a real ECU yet (2026-11-17). Reference
+client and proof: the stage `j2534tp20` of
+the firmware repo (`tools/testbench/usb/j2534_tp20_ps_bench.py`, ECUs
+that follow SAE J2819 played by a PCAN; `testing/j2534tp20.md`).
