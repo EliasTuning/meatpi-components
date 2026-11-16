@@ -49,6 +49,9 @@ enum {
     J2534_PROT_CAN       = 5,   /* supported */
     J2534_PROT_ISO15765  = 6,   /* supported (ISO-TP) */
     J2534_PROT_SCI_A_ENGINE = 7,
+    /* SAE J2534-2 TP2.0. Its own channel: raw CAN (protocol 5) does not
+     * parse TP2.0 opcodes. */
+    J2534_PROT_TP2_0     = 0x800E,
 };
 
 /* ---- J2534 return/status codes ---------------------------------------- */
@@ -58,6 +61,7 @@ enum {
     J2534_ERR_INVALID_CHANNEL_ID      = 0x02,
     J2534_ERR_INVALID_PROTOCOL_ID     = 0x03,
     J2534_ERR_NULL_PARAMETER          = 0x04,
+    J2534_ERR_INVALID_IOCTL_VALUE     = 0x05,
     J2534_ERR_INVALID_FLAGS           = 0x06,
     J2534_ERR_FAILED                  = 0x07,
     J2534_ERR_DEVICE_NOT_CONNECTED    = 0x08,
@@ -74,6 +78,8 @@ enum {
     J2534_ERR_INVALID_BAUDRATE        = 0x18,
     J2534_ERR_INVALID_DEVICE_ID       = 0x19,
     J2534_ERR_DEVICE_IN_USE           = 0x1A, /* WiCAN: second tester */
+    /* SAE J2534-2 table 123: its own return values start at 0x10000. */
+    J2534_ERR_NO_CONNECTION_ESTABLISHED = 0x00010001,
 };
 
 /* ---- filter types ----------------------------------------------------- */
@@ -89,6 +95,7 @@ enum {
     J2534_TX_ISO15765_ADDR_TYPE = 0x00000080, /* extended addressing: not supported */
     J2534_TX_CAN_29BIT_ID       = 0x00000100,
     J2534_TX_WAIT_P3_MIN_ONLY   = 0x00000200,
+    J2534_TX_TP2_0_BROADCAST    = 0x00010000, /* TP2_0_BROADCAST_MSG */
 };
 enum {
     J2534_RX_TX_MSG_TYPE           = 0x00000001, /* a transmit, not a receive */
@@ -97,6 +104,8 @@ enum {
     J2534_RX_ISO15765_PADDING_ERR  = 0x00000010,
     J2534_RX_ISO15765_ADDR_TYPE    = 0x00000080,
     J2534_RX_CAN_29BIT_ID          = 0x00000100,
+    J2534_RX_CONNECTION_ESTABLISHED = 0x00010000, /* bit 16 */
+    J2534_RX_CONNECTION_LOST        = 0x00020000, /* bit 17 */
 };
 
 /* ---- Ioctl IDs + SET_CONFIG parameter IDs ----------------------------- */
@@ -108,15 +117,49 @@ enum {
     J2534_IOCTL_CLEAR_RX_BUFFER          = 0x08,
     J2534_IOCTL_CLEAR_PERIODIC_MSGS      = 0x09,
     J2534_IOCTL_CLEAR_MSG_FILTERS        = 0x0A,
+    J2534_IOCTL_REQUEST_CONNECTION       = 0x800A,
+    J2534_IOCTL_TEARDOWN_CONNECTION      = 0x800B,
+    J2534_IOCTL_GET_DEVICE_INFO          = 0x800C,
 };
 enum {
     J2534_CFG_DATA_RATE      = 0x01,
     J2534_CFG_LOOPBACK       = 0x03,
+    J2534_CFG_BIT_SAMPLE_POINT = 0x17,
+    J2534_CFG_SYNC_JUMP_WIDTH  = 0x18,
     J2534_CFG_ISO15765_BS    = 0x1E,
     J2534_CFG_ISO15765_STMIN = 0x1F,
     J2534_CFG_BS_TX          = 0x22,
     J2534_CFG_STMIN_TX       = 0x23,
+    J2534_CFG_J1962_PINS     = 0x8001, /* this hardware: 0x060E only */
+    /* SAE J2534-2 table 77, in order. */
+    J2534_CFG_TP2_0_T_BR_INT = 0x8044,
+    J2534_CFG_TP2_0_T_E      = 0x8045,
+    J2534_CFG_TP2_0_MNTC     = 0x8046,
+    J2534_CFG_TP2_0_T_CTA    = 0x8047,
+    J2534_CFG_TP2_0_MNCT     = 0x8048,
+    J2534_CFG_TP2_0_MNTB     = 0x8049,
+    J2534_CFG_TP2_0_MNT      = 0x804A,
+    J2534_CFG_TP2_0_T_WAIT   = 0x804B,
+    J2534_CFG_TP2_0_T1       = 0x804C,
+    J2534_CFG_TP2_0_T3       = 0x804D,
+    J2534_CFG_TP2_0_IDENTIFIER = 0x804E,
+    J2534_CFG_TP2_0_RXIDPASSIVE = 0x804F,
 };
+/* GET_DEVICE_INFO parameters (SAE J2534-2 table 121), the ones answered. */
+enum {
+    J2534_DEV_J1850VPW_SUPPORTED    = 0x03,
+    J2534_DEV_CAN_SUPPORTED         = 0x06,
+    J2534_DEV_ISO15765_SUPPORTED    = 0x07,
+    J2534_DEV_TP2_0_SUPPORTED       = 0x13,
+    J2534_DEV_TP2_0_PS_J1962        = 0x28,
+    J2534_DEV_J1850VPW_SIMULTANEOUS = 0x36,
+    J2534_DEV_CAN_SIMULTANEOUS      = 0x39,
+    J2534_DEV_ISO15765_SIMULTANEOUS = 0x3A,
+    J2534_DEV_TP2_0_SIMULTANEOUS    = 0x46,
+};
+
+/** Most parameters one GET_DEVICE_INFO request carries (the ACK's size). */
+#define J2534_DEV_INFO_MAX 16
 
 /* ---- wire framing ----------------------------------------------------- */
 #define J2534_MAGIC        0x4A35u   /* "J5" */
@@ -381,6 +424,55 @@ bool j2534_tcp_gate_allowed(bool allow_lan, bool loopback, bool on_ap,
  * @return J2534_STATUS_NOERROR or J2534_ERR_INVALID_BAUDRATE.
  */
 uint32_t j2534_connect_baud_check(uint32_t asked_bps, uint32_t bus_kbps);
+
+/**
+ * TP2.0 timing byte (high 2 bits unit, low 6 bits scale; units 0.1 / 1 /
+ * 10 / 100 ms). @p ms 40 encodes as 0x68. 0 stays 0. Values above 6 ms
+ * use a coarser unit, rounded up so the wire byte is not shorter than
+ * the request.
+ */
+uint8_t j2534_tp20_encode_ms(uint32_t ms);
+
+/** The same byte, in microseconds. */
+uint32_t j2534_tp20_decode_us(uint8_t wire);
+
+/**
+ * Round a gap up to the device's 500 µs resolution (J2534-2 19.2).
+ * 0 stays 0. 500 stays 500.
+ */
+uint32_t j2534_tp20_round_gap_us(uint32_t us);
+
+/**
+ * The key byte of telegram number @p n (from 0) of one broadcast request.
+ * Both key bytes of a telegram carry it: 0x55 0x55 first, then 0xAA 0xAA,
+ * changing with every telegram sent (SAE J2819 5.1.2).
+ */
+uint8_t j2534_tp20_broadcast_key(uint32_t n);
+
+/**
+ * Where a block is sent again from (SAE J2819 5.2: an acknowledge whose
+ * sequence number is not the last telegram's plus one names the telegram
+ * to go back to). The telegram that asked for the acknowledge had the
+ * sequence number @p sent_seq and was telegram number @p in_block (from 0)
+ * of its block; the acknowledge carries @p ack_seq.
+ * @return the number of the telegram in the block to send again from
+ * (0 .. in_block), or -1 when the acknowledge names no telegram of this
+ * block (also for sent_seq + 1, which is the plain acknowledge).
+ */
+int j2534_tp20_resend_from(uint8_t sent_seq, unsigned in_block, uint8_t ack_seq);
+
+/**
+ * One GET_DEVICE_INFO parameter (SAE J2534-2 section 25, table 111).
+ * @p value is the caller's Value: an output for the *_SUPPORTED and
+ * *_SIMULTANEOUS parameters (0xPPQQRRSS), an input for TP2_0_PS_J1962
+ * (the pin bitmap asked about: CAN-H in the high word, CAN-L in the low
+ * word, bit 0 = pin 1) and left alone there.
+ * @return what goes into Supported: true when the device has the
+ * parameter, or for TP2_0_PS_J1962 when it has those pins. A parameter
+ * the device does not know returns false with @p value untouched; the
+ * request as a whole is still STATUS_NOERROR.
+ */
+bool j2534_device_info(uint32_t param, uint32_t *value);
 
 #ifdef __cplusplus
 }

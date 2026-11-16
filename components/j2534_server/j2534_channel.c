@@ -25,8 +25,9 @@
  * @brief J2534 channel transports (see j2534_channel.h): lifecycle, the
  *        CAN channel on can_manager (raw frames), the filter table and
  *        the bus-bitrate rule at CONNECT. The ISO15765
- *        side (sessions, the SAE J2534-1 message layout, indications)
- *        lives in j2534_channel_iso.c; both share j2534_channel_private.h.
+ *        side lives in j2534_channel_iso.c, SAE J2534-2 TP2.0 in
+ *        j2534_channel_tp20.c. Both share j2534_channel_private.h.
+ *        Raw CAN does not look at TP2.0 opcodes.
  */
 #include "j2534_channel.h"
 
@@ -108,7 +109,8 @@ void j2534_ch_say_refused(const char *what)
 
 uint32_t j2534_channel_bus_baud(uint32_t proto, uint32_t baud_bps)
 {
-    if (proto != J2534_PROT_CAN && proto != J2534_PROT_ISO15765)
+    if (proto != J2534_PROT_CAN && proto != J2534_PROT_ISO15765 &&
+        proto != J2534_PROT_TP2_0)
     {
         return J2534_STATUS_NOERROR; /* not a CAN protocol: nothing to check */
     }
@@ -222,6 +224,9 @@ QueueHandle_t j2534_channel_wait_queue(void)
 
 static void teardown(j2534_channel_t *c)
 {
+    /* Drop a TP2.0 session table, including its teardown telegrams. */
+    j2534_tp20_detach(c);
+
     if (c->can_sub >= 0)
     {
         can_manager_unsubscribe_queue(c->can_sub);
@@ -325,6 +330,17 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
            this dispatch when built. No CAN subscription: the chip owns the
            bus and WRITE_MSGS collects the replies. */
         st = j2534_legacy_connect(c);
+    }
+    else if (protocol == J2534_PROT_TP2_0)
+    {
+        if (!subscribe_bus(c, "j2534_tp20"))
+        {
+            st = J2534_ERR_FAILED;
+        }
+        else
+        {
+            st = j2534_tp20_attach(c);
+        }
     }
     else
     {
@@ -436,8 +452,8 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
             uint32_t id = get_id_be(msg->data);
             bool ext = (msg->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
             uint8_t dlc = (uint8_t)(msg->data_size - 4);
-            esp_err_t err = can_manager_send(id, ext, false, msg->data + 4,
-                                             dlc);
+            const uint8_t *payload = msg->data + 4;
+            esp_err_t err = can_manager_send(id, ext, false, payload, dlc);
 
             if (err != ESP_OK)
             {
@@ -453,6 +469,10 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
     else if (c->protocol == J2534_PROT_ISO15765)
     {
         st = j2534_iso_write(c, msg, indicate);
+    }
+    else if (c->protocol == J2534_PROT_TP2_0)
+    {
+        st = j2534_tp20_write(c, msg, indicate);
     }
     else if (c->protocol == J2534_PROT_J1850VPW)
     {
@@ -472,8 +492,20 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
     return write_common(slot, msg, true);
 }
 
-uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg)
+uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
+                                      uint32_t tick)
 {
+    if (slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use &&
+        s_ch[slot].protocol == J2534_PROT_TP2_0)
+    {
+        uint32_t st;
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        st = j2534_tp20_write_periodic(&s_ch[slot], msg, tick);
+        xSemaphoreGive(s_lock);
+        return st;
+    }
+
     return write_common(slot, msg, false);
 }
 
@@ -606,6 +638,12 @@ uint32_t j2534_channel_stop_filter(int slot, uint32_t filter_id)
     {
         if (c->filters[i].id == filter_id)
         {
+            /* A TP2.0 connection owns this slot until teardown. */
+            if (c->filters[i].tp_owned)
+            {
+                break;
+            }
+
             if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
             {
                 j2534_iso_unbind(c, c->filters[i].session);
@@ -630,14 +668,19 @@ void j2534_channel_clear_filters(int slot)
     j2534_channel_t *c = &s_ch[slot];
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    for (int i = 0; i < c->n_filters; i++)
+    for (int i = c->n_filters - 1; i >= 0; i--)
     {
         if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
         {
             j2534_iso_unbind(c, c->filters[i].session);
         }
+
+        /* Implicit TP2.0 pass filters stay until the connection does. */
+        if (!c->filters[i].tp_owned)
+        {
+            filter_remove_at(c, i);
+        }
     }
-    c->n_filters = 0;   /* the ids given at CONNECT keep their session */
     xSemaphoreGive(s_lock);
 }
 
@@ -645,7 +688,7 @@ bool j2534_ch_has_pass_filter(const j2534_channel_t *c)
 {
     for (int i = 0; i < c->n_filters; i++)
     {
-        if (c->filters[i].type == J2534_PASS_FILTER)
+        if (c->filters[i].type == J2534_PASS_FILTER && !c->filters[i].tp_owned)
         {
             return true;
         }
@@ -664,9 +707,9 @@ bool j2534_ch_filters_pass(const j2534_channel_t *c, const uint8_t *view,
     {
         const j2534_ch_filter_t *f = &c->filters[i];
 
-        if (f->type == J2534_FLOW_CONTROL_FILTER)
+        if (f->tp_owned || f->type == J2534_FLOW_CONTROL_FILTER)
         {
-            continue; /* a session, not a match rule */
+            continue; /* a session, not a user match rule */
         }
 
         bool m = j2534_filter_match(f->mask, f->len, f->pattern, f->len,
@@ -730,6 +773,10 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
     {
         got = j2534_iso_poll(c, out);
     }
+    else if (c->protocol == J2534_PROT_TP2_0)
+    {
+        got = j2534_tp20_poll(c, out);
+    }
     else if (c->protocol == J2534_PROT_J1850VPW)
     {
         got = j2534_legacy_poll(c, slot, out);
@@ -737,4 +784,45 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
 
     xSemaphoreGive(s_lock);
     return got;
+}
+
+bool j2534_channel_is_tp20(int slot)
+{
+    return slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use &&
+           s_ch[slot].protocol == J2534_PROT_TP2_0;
+}
+
+uint32_t j2534_channel_ioctl(int slot, uint32_t ioctl_id,
+                             const uint8_t *body, uint32_t body_len,
+                             uint8_t *out, uint32_t out_cap,
+                             uint32_t *out_len)
+{
+    uint32_t st;
+
+    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
+    {
+        return J2534_ERR_INVALID_CHANNEL_ID;
+    }
+
+    if (s_ch[slot].protocol != J2534_PROT_TP2_0)
+    {
+        if (ioctl_id == J2534_IOCTL_GET_CONFIG ||
+            ioctl_id == J2534_IOCTL_SET_CONFIG)
+        {
+            return J2534_STATUS_NOERROR;
+        }
+
+        return J2534_ERR_NOT_SUPPORTED;
+    }
+
+    if (out_len != NULL)
+    {
+        *out_len = 0;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    st = j2534_tp20_ioctl(&s_ch[slot], ioctl_id, body, body_len,
+                          out, out_cap, out_len);
+    xSemaphoreGive(s_lock);
+    return st;
 }

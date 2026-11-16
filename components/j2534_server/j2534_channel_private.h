@@ -40,6 +40,8 @@
 #include "j2534_channel.h"
 #include "j2534_proto.h"
 
+typedef struct j2534_tp20_state j2534_tp20_state_t;
+
 #define J2534_CH_CAN_QLEN 32
 #define J2534_CH_MAX_IND  4   /* pending TxDone / START_OF_MESSAGE indications */
 
@@ -51,6 +53,7 @@ typedef struct
     uint8_t  pattern[8];
     uint8_t  len;
     int      session;   /* FLOW_CONTROL: the ISO-TP session it bound, else -1 */
+    bool     tp_owned;  /* TP2.0 implicit pass; CLEAR_MSG_FILTERS keeps it */
 } j2534_ch_filter_t;
 
 typedef struct
@@ -71,7 +74,7 @@ typedef struct
     uint32_t ts_us;
 } j2534_ch_ind_t;
 
-typedef struct
+typedef struct j2534_channel
 {
     bool     in_use;
     uint32_t protocol;
@@ -95,7 +98,12 @@ typedef struct
 
     uint8_t leg_hdr[J2534_J1850_HDR];  /* J1850 (legacy): the ATSH header cache  */
     bool    leg_have_hdr;              /* so a repeated header is not re-sent     */
+
+    /* TP2.0 (protocol 0x800E) only. Raw CAN leaves this NULL. */
+    j2534_tp20_state_t *tp20;
 } j2534_channel_t;
+
+#include "j2534_channel_tp20.h"
 
 /* ---- j2534_channel.c, used by the ISO15765 file ---------------------- */
 

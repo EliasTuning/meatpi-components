@@ -51,7 +51,7 @@
 
 #include "j2534_proto.h"
 
-#define J2534_CH_MAX_FILTERS  8
+#define J2534_CH_MAX_FILTERS  10  /* SAE minimum; a TP2.0 link takes one */
 #define J2534_CH_MAX_SESSIONS 4   /* ISO-TP sessions (ECUs) per channel */
 
 void j2534_channel_init(void);          /* one-time: mutex, the bus queues */
@@ -96,8 +96,14 @@ bool j2534_channel_active(int slot);
  */
 uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg);
 
-/** The same for a periodic message: no TxDone indication (SAE J2534-1). */
-uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg);
+/**
+ * The same for a periodic message: no TxDone indication (SAE J2534-1).
+ * @p tick counts the firings of that periodic message, 0 for the one sent
+ * as it is started. Only a TP2.0 broadcast reads it (the re-triggered
+ * broadcast sends five telegrams at tick 0 and one per tick after).
+ */
+uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
+                                      uint32_t tick);
 
 /**
  * Add a filter. PASS/BLOCK (both protocols): matched in the RX pump over
@@ -133,3 +139,16 @@ void j2534_channel_set_isotp(int slot, bool has_bs, uint8_t bs,
  * across all active channels and pushes RX_MSG frames.
  */
 bool j2534_channel_poll_rx(int slot, j2534_msg_t *out);
+
+/** True when @p slot is an open TP2.0 channel (protocol 0x800E). */
+bool j2534_channel_is_tp20(int slot);
+
+/**
+ * Channel ioctl. SET/GET_CONFIG on a CAN or ISO15765 channel stay a
+ * best-effort success (the bus rate comes from can_manager). TP2.0
+ * applies the body. GET_CONFIG's filled pairs land in @p out.
+ */
+uint32_t j2534_channel_ioctl(int slot, uint32_t ioctl_id,
+                             const uint8_t *body, uint32_t body_len,
+                             uint8_t *out, uint32_t out_cap,
+                             uint32_t *out_len);

@@ -31,9 +31,10 @@
  * Ownership inversion (bridge_manager pattern): components register in
  * via <comp>_events.c; this file knows no component by name. Registration
  * calls are BOOT-CONTEXT ONLY (plain array writes). Publish is any-task,
- * never blocks (drop-oldest + counter). Actions run in the dispatcher
- * ONLY (8 KB PSRAM stack: no flash access in handlers, standard §2).
- * All time is esp_timer 64-bit µs.
+ * never blocks (drop-oldest + counter). Inline actions run in the
+ * dispatcher (8 KB PSRAM stack), `blocking` ones on the worker pool
+ * (EVENT_MANAGER_WORKER_STACK each, PSRAM): no flash access in handlers
+ * on either (standard §2). All time is esp_timer 64-bit µs.
  */
 #include "event_manager.h"
 
@@ -56,10 +57,12 @@ static const char *TAG = "event_manager";
 #define EM_QUEUE_LEN 32
 
 /* bounded worker pool for `blocking` actions (network/bus): keeps a slow
-   action off the single dispatcher. Fixed cost regardless of event rate. */
+   action off the single dispatcher. Fixed cost regardless of event rate.
+   A worker's stack is EVENT_MANAGER_WORKER_STACK (the public header): the
+   actions' owners check their own budget against it at build time. */
 #define EM_WORKERS       2
 #define EM_JOB_QUEUE     8
-#define EM_WORKER_STACK  4096
+#define EM_WORKER_STACK  EVENT_MANAGER_WORKER_STACK
 #define EM_RECHECK_US    1000000 /* live re-check of active undo rules */
 
 /* ---- runtime halves of the settings-applied config --------------------------------

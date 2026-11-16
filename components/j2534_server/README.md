@@ -7,8 +7,8 @@
 ## Summary
 
 SAE J2534 PassThru device: a tester (the Windows DLL, a phone app, a
-bench script) opens a session, connects CAN, ISO15765 and J1850 VPW
-channels, writes messages, sets filters and periodic messages, and
+bench script) opens a session, connects CAN, ISO15765, J1850 VPW and
+TP 2.0 channels, writes messages, sets filters and periodic messages, and
 receives bus traffic as unsolicited `RX_MSG` frames. One framed wire
 protocol runs over three transports: the TCP listener in this component
 (port 6809), USB CDC-ACM (`usb_cdc_device`) and BLE (`ble_j2534`, since
@@ -20,6 +20,25 @@ rounded to millivolts, without a CAN channel or bus transaction. OPEN is require
 No sample or an invalid reading returns `ERR_FAILED` with no result. The Windows
 DLL also needs the voltage update: older DLLs return a fixed 12,000 mV locally.
 The wire version and settings schema are unchanged.
+
+TP 2.0 as its own protocol (`TP2_0_PS`, protocol id 0x800E, SAE J2534-2
+section 19; `j2534_channel_tp20.c`, contributed by Elias Kotlyar, merged
+2026-11-17). The device does VW's transport as SAE J2819 describes it:
+the channel setup and the connection setup (`REQUEST_CONNECTION`), a
+message split into 7-byte telegrams and a received one put together, the
+block acknowledges, a block sent again from the telegram the ECU names,
+"receiver not ready" and a break, and one connection test per `T_CTA` on
+an idle connection, answered with a connection acknowledge. Four
+connections on the one channel, messages of up to 4092 bytes, broadcast
+requests with their key bytes, `GET_DEVICE_INFO`. The application's
+message goes out as written and the ECU's comes in as sent: the two length
+bytes a VW ECU uses are the application's (SAE J2534-2 19.3.1). The
+tester sees whole messages and two indications (`CONNECTION_ESTABLISHED`,
+`CONNECTION_LOST`); a tool that does the transport itself still uses a raw
+CAN channel, which does not read TP 2.0. The Windows DLL needs the TP 2.0
+update: driver 1.7 does not know the protocol. Layouts, defaults and
+limits: `J2534_WIRE_PROTOCOL.md` section 11. Proven against a model of
+the document and one published real exchange, not yet on a car.
 
 The RX pump (the `j2534_rx` task) pushes what the channels received as it
 arrives: it blocks on the open channel's bus queue between frames (the
@@ -170,6 +189,7 @@ every other write service. The owner's consent is `enabled` + `allow_lan`.
 | channel records `s_ch` (4 channels: filters, 4 ISO-TP session slots, the indication ring) | ~1.7 KB |
 | J1850 legacy: one chip-reply buffer `s_resp` + the RX ring (8 × 520 B) | ~8.2 KB |
 | ISO-TP sessions themselves: the provider's (about 25 KB PSRAM + 1.2 KB internal each while open, `can_isotp_esp` README); each takes one of `can_manager`'s 16 subscriber slots, as does every channel's own CAN queue (32 frames) | per open session |
+| a TP 2.0 channel while it is open: its state and, for each of the 4 connections, a reassembly buffer and a delivery buffer of 4092 B; taken from the heap at CONNECT, freed at DISCONNECT (not a PSRAM static yet: an open item against the standard) | ~33 KB heap |
 | tasks `j2534` (TCP listener) + `j2534_rx` (RX pump): 4 KB stacks each | 8 KB (+ 2 TCBs internal) |
 | mutexes (send, session, channels) | internal, ~270 B |
 | READ_VBATT helper | measured compiler frame: 64 B; no heap or mutable static storage |
@@ -186,7 +206,7 @@ this component.
 
 ## Testing
 
-- Host: `host_test/` (32 Unity cases: codec round trips and bounds,
+- Host: `host_test/` (36 Unity cases: codec round trips and bounds,
   filter match, status names, the framer with partial / delayed /
   dropped / malformed / discarded input, the ACK vectors of
   `J2534_WIRE_PROTOCOL.md` section 7, the TCP gate predicate, the
@@ -196,7 +216,15 @@ this component.
   checksum, reply-line decode / status / responsePending, settings migration,
   and READ_VBATT conversion, session and unavailable/invalid-sample cases,
   and the byte-exact READ_VBATT request and replies of the wire protocol's
-  section 3 as a vector).
+  section 3 as a vector, and the TP 2.0 helpers: the timing byte, the
+  broadcast key, where a block is sent again from, the device information
+  table).
+- TP 2.0: `.\test.ps1 j2534tp20` in the firmware checkout
+  (`tools/testbench/usb/j2534_tp20_ps_bench.py` -> `J2534 TP20 PASS`):
+  ECUs that follow SAE J2819, played by a PCAN, with faults on purpose (a
+  lost telegram, "not ready", a break), a published exchange of a real
+  engine ECU byte for byte, four connections, 4092-byte messages both
+  ways, and the driver DLL called like an application.
 - Voltage: `.\test.ps1 j2534vbat` in the firmware checkout, the wire ACK
   and Windows DLL at two real supply voltages, plus fake-device checks for
   older firmware without a result and an unavailable ADC.

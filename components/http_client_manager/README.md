@@ -18,7 +18,16 @@ heap (excess callers briefly block). Any task may call any API.
   only: never ISRs, timer callbacks, or handler contexts that must not
   block (mqtt/imu/battery callbacks included).
 - `https://` runs the mbedTLS handshake on YOUR stack: budget **≥8 KB**
-  (a 4 KB caller stack-overflowed and panicked, live-found).
+  (a 4 KB caller stack-overflowed and panicked, live-found). The figure
+  is `HTTP_CLIENT_MANAGER_TLS_STACK_MIN` in the header: a caller checks
+  its task against it at build time with a `_Static_assert` (the
+  `http.post` action does, against the event manager's worker stack).
+  **Measured 2026-11-16** on that worker (IDF 6.1, the stack's high-water
+  mark, of which 1.1 KB are the worker's own frames): a plain `http://`
+  post 2.7 KB, an `https://` post 4.3 KB with an RSA chain and 4.5 KB
+  with an ECDSA chain. The 4 KB that panicked here once did so again in
+  the field: the event manager's workers had 4 KB, and a rule's first
+  https post reset the device (GitHub issue 1067; 16 KB since).
 - `download()` is stack-agnostic: ALL media writes run on filesystem's
   internal-stack async-pipe writer task, so PSRAM-stack callers are
   fine. (The first, staged implementation crashed a PSRAM-stack caller
