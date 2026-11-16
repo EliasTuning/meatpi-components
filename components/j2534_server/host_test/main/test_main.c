@@ -526,6 +526,73 @@ static void test_tp20_time_byte(void)
                              j2534_status_name(J2534_ERR_INVALID_IOCTL_VALUE));
     TEST_ASSERT_EQUAL_STRING("ERR_NO_CONNECTION_ESTABLISHED",
                              j2534_status_name(J2534_ERR_NO_CONNECTION_ESTABLISHED));
+    /* SAE J2534-2 table 123: not a J2534-1 slot (0x1D is one of those) */
+    TEST_ASSERT_EQUAL_HEX32(0x00010001, J2534_ERR_NO_CONNECTION_ESTABLISHED);
+}
+
+/* SAE J2819 5.1.2: the two key bytes are equal, 0x5555 first, then 0xAAAA,
+ * and the key changes with every telegram, the re-triggered ones included. */
+static void test_tp20_broadcast_key(void)
+{
+    static const uint8_t want[7] = { 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55 };
+
+    for (uint32_t n = 0; n < 7; n++)
+    {
+        TEST_ASSERT_EQUAL_HEX8(want[n], j2534_tp20_broadcast_key(n));
+    }
+}
+
+/* SAE J2819 5.2: an acknowledge that names a telegram has the block sent
+ * again from it. Sequence numbers are four bits and wrap inside a block. */
+static void test_tp20_resend_from(void)
+{
+    /* a block of 15 from sequence 0: the last telegram is 0xE, number 14 */
+    TEST_ASSERT_EQUAL_INT(3, j2534_tp20_resend_from(0xE, 14, 0x3));
+    TEST_ASSERT_EQUAL_INT(0, j2534_tp20_resend_from(0xE, 14, 0x0));
+    TEST_ASSERT_EQUAL_INT(14, j2534_tp20_resend_from(0xE, 14, 0xE));
+    /* the plain acknowledge (the last telegram's number plus one) names none */
+    TEST_ASSERT_EQUAL_INT(-1, j2534_tp20_resend_from(0xE, 14, 0xF));
+    /* a block of 15 from sequence 0xA wraps: its telegram 2 is 0xC, its last 0x8 */
+    TEST_ASSERT_EQUAL_INT(2, j2534_tp20_resend_from(0x8, 14, 0xC));
+    TEST_ASSERT_EQUAL_INT(6, j2534_tp20_resend_from(0x8, 14, 0x0));
+    /* four telegrams sent (numbers 0 to 3, sequence 5 to 8): 2 is before the block */
+    TEST_ASSERT_EQUAL_INT(0, j2534_tp20_resend_from(0x8, 3, 0x5));
+    TEST_ASSERT_EQUAL_INT(-1, j2534_tp20_resend_from(0x8, 3, 0x2));
+    /* a one-telegram message: only itself can be asked for again */
+    TEST_ASSERT_EQUAL_INT(0, j2534_tp20_resend_from(0x0, 0, 0x0));
+    TEST_ASSERT_EQUAL_INT(-1, j2534_tp20_resend_from(0x0, 0, 0xF));
+}
+
+/* SAE J2534-2 section 25: Value and Supported of one SPARAM. */
+static void test_device_info(void)
+{
+    uint32_t v = 0xDEADBEEF;
+
+    TEST_ASSERT_TRUE(j2534_device_info(J2534_DEV_TP2_0_SUPPORTED, &v));
+    TEST_ASSERT_EQUAL_HEX32(0x00000100, v);   /* RR = 1 channel, SS = 0 */
+    v = 0;
+    TEST_ASSERT_TRUE(j2534_device_info(J2534_DEV_TP2_0_SIMULTANEOUS, &v));
+    TEST_ASSERT_EQUAL_HEX32(0x00000100, v);
+    v = 0;
+    TEST_ASSERT_TRUE(j2534_device_info(J2534_DEV_CAN_SUPPORTED, &v));
+    TEST_ASSERT_EQUAL_HEX32(0x00000001, v);   /* the J2534-1 id alone */
+    v = 0;
+    TEST_ASSERT_TRUE(j2534_device_info(J2534_DEV_ISO15765_SIMULTANEOUS, &v));
+    TEST_ASSERT_EQUAL_HEX32(0x00000001, v);
+
+    /* the pin question: the value is an input and stays as asked */
+    v = 0x00202000;                           /* CAN-H pin 6, CAN-L pin 14 */
+    TEST_ASSERT_TRUE(j2534_device_info(J2534_DEV_TP2_0_PS_J1962, &v));
+    TEST_ASSERT_EQUAL_HEX32(0x00202000, v);
+    v = 0x00040400;                           /* pins 3 and 11 */
+    TEST_ASSERT_FALSE(j2534_device_info(J2534_DEV_TP2_0_PS_J1962, &v));
+    TEST_ASSERT_EQUAL_HEX32(0x00040400, v);
+
+    /* a parameter the device does not have: not supported, value untouched */
+    v = 0x1234;
+    TEST_ASSERT_FALSE(j2534_device_info(0x54, &v));
+    TEST_ASSERT_EQUAL_HEX32(0x1234, v);
+    TEST_ASSERT_FALSE(j2534_device_info(J2534_DEV_TP2_0_SUPPORTED, NULL));
 }
 
 /* ---- J1850 VPW (legacy, OBD chip) helpers ------------------------------ */
@@ -702,6 +769,9 @@ void app_main(void)
     RUN_TEST(test_iso_single_frame_parse);
     RUN_TEST(test_status_name_exceeded_limit);
     RUN_TEST(test_tp20_time_byte);
+    RUN_TEST(test_tp20_broadcast_key);
+    RUN_TEST(test_tp20_resend_from);
+    RUN_TEST(test_device_info);
     RUN_TEST(test_legacy_split);
     RUN_TEST(test_legacy_header_and_checksum);
     RUN_TEST(test_legacy_build_request);

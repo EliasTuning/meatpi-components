@@ -64,6 +64,7 @@ typedef struct {
     bool                in_use;
     uint32_t            id;
     int                 slot;      /* channel slot */
+    uint32_t            tick;      /* firings so far (0 = the one at START) */
     esp_timer_handle_t  timer;
     j2534_msg_t         msg;
 } periodic_t;
@@ -184,7 +185,7 @@ static void periodic_cb(void *arg)
     /* a periodic message raises no TxDone indication (SAE J2534-1) */
     if (pm->in_use && j2534_channel_active(pm->slot))
     {
-        (void)j2534_channel_write_periodic(pm->slot, &pm->msg);
+        (void)j2534_channel_write_periodic(pm->slot, &pm->msg, ++pm->tick);
     }
 }
 
@@ -381,26 +382,42 @@ static void handle_start_periodic(const j2534_transport_t *t,
     pm->slot = slot;
     pm->msg = s_h_wmsg;
     pm->id = s_next_periodic_id++;
+    pm->tick = 0;
 
     esp_timer_create_args_t ta = { .callback = periodic_cb, .arg = pm,
                                    .name = "j2534_per" };
 
-    if (esp_timer_create(&ta, &pm->timer) != ESP_OK ||
-        esp_timer_start_periodic(pm->timer, (uint64_t)interval * 1000) != ESP_OK)
+    if (esp_timer_create(&ta, &pm->timer) != ESP_OK)
     {
         ACK(J2534_ERR_FAILED, NULL);
         return;
     }
 
-    pm->in_use = true;
-
-    /* TP2_0_BROADCAST_MSG: the five-shot goes out now, then on the timer. */
+    /* TP2_0_BROADCAST_MSG, the re-triggered broadcast (SAE J2534-2
+     * 19.3.2.3): the five telegrams go out now, from this task and before
+     * the timer runs, then one telegram per period on the timer. A message
+     * the channel refuses starts nothing. */
     if ((pm->msg.tx_flags & J2534_TX_TP2_0_BROADCAST) != 0 &&
         j2534_channel_is_tp20(slot))
     {
-        (void)j2534_channel_write_periodic(slot, &pm->msg);
+        uint32_t st = j2534_channel_write_periodic(slot, &pm->msg, 0);
+
+        if (st != J2534_STATUS_NOERROR)
+        {
+            esp_timer_delete(pm->timer);
+            ACK(st, NULL);
+            return;
+        }
     }
 
+    if (esp_timer_start_periodic(pm->timer, (uint64_t)interval * 1000) != ESP_OK)
+    {
+        esp_timer_delete(pm->timer);
+        ACK(J2534_ERR_FAILED, NULL);
+        return;
+    }
+
+    pm->in_use = true;
     ACK(J2534_STATUS_NOERROR, &pm->id);
 }
 
@@ -435,7 +452,12 @@ static void handle_stop_periodic(const j2534_transport_t *t,
  * GET_CONFIG's ack is u32 status, then that same body with values filled.
  * REQUEST_CONNECTION body: u32 11, then the 11 bytes.
  * TEARDOWN_CONNECTION body: u32 4, then the 4-byte big-endian RX id.
- * GET_DEVICE_INFO body: u32 parameter. Its ack is one u32, like READ_VBATT.
+ * GET_DEVICE_INFO body: u32 count (at most J2534_DEV_INFO_MAX), then count
+ *   pairs of u32 parameter, u32 value (the value is an input for the pin
+ *   questions). Its ack is u32 status, u32 count, then count triples of
+ *   u32 parameter, u32 value, u32 supported: the SPARAM list of SAE J2534-2
+ *   section 25. A parameter the device does not have comes back not
+ *   supported with its value as sent, and the request is still NOERROR.
  */
 static void ack_status_body(const j2534_transport_t *t, const j2534_hdr_t *h,
                             uint32_t status, const uint8_t *extra,
@@ -505,8 +527,8 @@ static void handle_ioctl(const j2534_transport_t *t, const j2534_hdr_t *h,
         }
         case J2534_IOCTL_GET_DEVICE_INFO:
         {
-            uint32_t param;
-            uint32_t value;
+            uint8_t out[4 + J2534_DEV_INFO_MAX * 12];
+            uint32_t count;
 
             if (!s_session.device_open)
             {
@@ -514,23 +536,34 @@ static void handle_ioctl(const j2534_transport_t *t, const j2534_hdr_t *h,
                 return;
             }
 
-            if (body == NULL || body_len != 4)
+            if (body == NULL || body_len < 4)
             {
                 ACK(J2534_ERR_INVALID_IOCTL_VALUE, NULL);
                 return;
             }
 
-            param = rd_u32(body);
+            count = rd_u32(body);
 
-            if (param == J2534_DEV_TP2_0_SUPPORTED ||
-                param == J2534_DEV_TP2_0_PS_J1962)
+            if (count > J2534_DEV_INFO_MAX || body_len != 4u + count * 8u)
             {
-                value = 1;
-                ACK(J2534_STATUS_NOERROR, &value);
+                ACK(J2534_ERR_INVALID_IOCTL_VALUE, NULL);
                 return;
             }
 
-            ACK(J2534_ERR_INVALID_IOCTL_VALUE, NULL);
+            wr_u32(out, count);
+
+            for (uint32_t i = 0; i < count; i++)
+            {
+                uint32_t param = rd_u32(body + 4 + i * 8);
+                uint32_t value = rd_u32(body + 8 + i * 8);
+                bool has = j2534_device_info(param, &value);
+
+                wr_u32(out + 4 + i * 12, param);
+                wr_u32(out + 8 + i * 12, value);
+                wr_u32(out + 12 + i * 12, has ? 1u : 0u);
+            }
+
+            ack_status_body(t, h, J2534_STATUS_NOERROR, out, 4u + count * 12u);
             return;
         }
         case J2534_IOCTL_CLEAR_MSG_FILTERS:

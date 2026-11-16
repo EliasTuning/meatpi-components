@@ -437,8 +437,20 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
     return write_common(slot, msg, true);
 }
 
-uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg)
+uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
+                                      uint32_t tick)
 {
+    if (slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use &&
+        s_ch[slot].protocol == J2534_PROT_TP2_0)
+    {
+        uint32_t st;
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        st = j2534_tp20_write_periodic(&s_ch[slot], msg, tick);
+        xSemaphoreGive(s_lock);
+        return st;
+    }
+
     return write_common(slot, msg, false);
 }
 

@@ -44,7 +44,9 @@ void j2534_tp20_detach(struct j2534_channel *c);
 
 /**
  * WRITE_MSGS. A matching TX id is segmented (7-byte telegrams, block ACKs
- * on the device). A broadcast flag sends the five-shot. Anything else that
+ * on the device) and goes out as written: the bytes behind the id are the
+ * message, the device puts nothing in front of them (SAE J2534-2 19.3.1).
+ * A broadcast flag sends the five-shot. Anything else that
  * fits in one CAN frame goes out raw; a longer write to an unknown id is
  * ERR_NO_CONNECTION_ESTABLISHED. @p indicate is unused: a TxDone would look
  * like a KWP payload to the tester.
@@ -53,9 +55,20 @@ uint32_t j2534_tp20_write(struct j2534_channel *c, const j2534_msg_t *msg,
                           bool indicate);
 
 /**
+ * Firing number @p tick of a periodic message (0 = the one sent when the
+ * periodic message is started). With the broadcast flag this is the
+ * re-triggered broadcast (SAE J2534-2 19.3.2.3): the five telegrams at
+ * tick 0, then one telegram per tick, the key bytes alternating over the
+ * whole run. Without the flag it is j2534_tp20_write() with no indication.
+ */
+uint32_t j2534_tp20_write_periodic(struct j2534_channel *c,
+                                   const j2534_msg_t *msg, uint32_t tick);
+
+/**
  * One application message, connection indication, or raw frame that matched
  * a user filter and belongs to no connection. Advances setup retries,
- * the parameter exchange, and the idle connection test.
+ * the parameter exchange, and the connection test (one every T_CTa,
+ * answered by the other side with a connection acknowledge).
  */
 bool j2534_tp20_poll(struct j2534_channel *c, j2534_msg_t *out);
 

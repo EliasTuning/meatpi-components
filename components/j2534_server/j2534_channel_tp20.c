@@ -27,9 +27,13 @@
  * One channel holds four connections. REQUEST_CONNECTION returns as soon
  * as the setup telegram is on the bus; the RX pump finishes the 0xD0 / 0xA1
  * exchange and queues CONNECTION_ESTABLISHED or CONNECTION_LOST. Application
- * messages use the ISO15765 shape (4-byte id, then the KWP bytes). The
- * 2-byte TP length prefix stays on the device. Block ACKs, connection tests,
- * and 0xA8 teardown stay on the device too.
+ * messages use the ISO15765 shape (4-byte id, then the message's bytes) and
+ * go to the bus as written: "Messages passed to PassThruWriteMsgs by the
+ * application will include all message address and data bytes" (SAE
+ * J2534-2 19.3.1). A message ends at the end-of-message telegram (SAE J2819
+ * has no length field), so the two length bytes a VW ECU wants in front of
+ * a message are the application's, on the way out and on the way in. Block
+ * ACKs, connection tests, and 0xA8 teardown stay on the device.
  *
  * Callers hold the channel lock. A write waits here for block ACKs, and
  * reads the bus queue itself while it waits, so the pump does not have to
@@ -56,6 +60,7 @@ static const char *TAG = "j2534_tp20";
 #define TP_IND_N    8
 #define TP_RAW_N    8
 #define TP_CFG_MAX  24
+#define TP_BROADCAST_N 5u   /* telegrams of one broadcast (SAE J2819 5.1.2) */
 
 enum {
     TP_FREE = 0,
@@ -83,10 +88,11 @@ typedef struct {
     bool     in_write;
     bool     have_filter;
     bool     have_rx;
-    bool     asm_on;
+    bool     asm_over;       /* the message under way is longer than TP_PAYLOAD */
     bool     ready_on;
     bool     ct_waiting;
     bool     ack_fresh;
+    bool     break_seen;     /* a break came while a write was under way */
     uint8_t  dest;
     uint8_t  tx_seq;
     uint8_t  rx_last;
@@ -103,12 +109,11 @@ typedef struct {
     uint32_t tx_id;
     uint32_t filter_id;
     uint32_t gap_us;
-    uint32_t asm_need;
     uint32_t asm_got;
     uint32_t ready_len;
     uint32_t ready_id;
     int64_t  last_tx_us;
-    int64_t  last_activity_us;
+    int64_t  last_ct_us;     /* the connection came up, or the last test left */
     int64_t  deadline_us;
     uint8_t  setup[7];
     uint8_t *asm_buf;
@@ -174,9 +179,12 @@ static void put_id_be(uint8_t *p, uint32_t id)
     p[3] = (uint8_t)id;
 }
 
+/* An id in a channel setup or its reply: the low byte, then bits 10 to 8 in
+ * bits 2 to 0 of the next (SAE J2819 5.1.3; bit 3 is reserved, bit 4 says
+ * "not given"). */
 static uint32_t unpack_id(uint8_t lo, uint8_t hi)
 {
-    return (uint32_t)lo | ((uint32_t)(hi & 0x0Fu) << 8);
+    return (uint32_t)lo | ((uint32_t)(hi & 0x07u) << 8);
 }
 
 static void wait_until(int64_t due)
@@ -217,21 +225,6 @@ static bool can_tx(uint32_t id, bool ext, const uint8_t *data, uint8_t n)
     }
 
     return err == ESP_OK;
-}
-
-static uint8_t wire_byte(const uint8_t *kwp, size_t kwp_len, size_t index)
-{
-    if (index == 0)
-    {
-        return (uint8_t)((kwp_len >> 8) & 0x7Fu);
-    }
-
-    if (index == 1)
-    {
-        return (uint8_t)kwp_len;
-    }
-
-    return kwp[index - 2];
 }
 
 /* ---- filters (one implicit pass per connection, plus passive) -------- */
@@ -418,7 +411,9 @@ static tp_conn_t *find_free(j2534_tp20_state_t *s)
     return NULL;
 }
 
-static bool id_busy(const j2534_tp20_state_t *s, uint32_t id)
+/* True when a connection other than @p except receives or sends on @p id. */
+static bool id_busy(const j2534_tp20_state_t *s, uint32_t id,
+                    const tp_conn_t *except)
 {
     if (id == 0)
     {
@@ -428,6 +423,11 @@ static bool id_busy(const j2534_tp20_state_t *s, uint32_t id)
     for (int i = 0; i < TP_CONN_N; i++)
     {
         const tp_conn_t *k = &s->conn[i];
+
+        if (k == except)
+        {
+            continue;
+        }
 
         if (k->phase != TP_FREE && (k->rx_id == id || k->tx_id == id))
         {
@@ -525,7 +525,6 @@ static bool send_paced(tp_conn_t *k, const uint8_t *data, uint8_t n)
     }
 
     k->last_tx_us = esp_timer_get_time();
-    k->last_activity_us = k->last_tx_us;
     return true;
 }
 
@@ -573,7 +572,7 @@ static void note_up(j2534_channel_t *c, tp_conn_t *k)
     k->phase = TP_UP;
     k->ct_waiting = false;
     k->ct_miss = 0;
-    k->last_activity_us = esp_timer_get_time();
+    k->last_ct_us = esp_timer_get_time();
 
     if (k->ecu_bs == 0)
     {
@@ -604,79 +603,63 @@ static void accept_data(tp_conn_t *k, uint8_t op, uint8_t seq,
     bool next = !k->have_rx || seq == (uint8_t)((k->rx_last + 1u) & 0x0Fu);
     bool last = (op == 0x1u || op == 0x3u);
     bool need = (op == 0x0u || op == 0x1u);
-    const uint8_t *p = pay;
-    uint8_t n = pay_len;
 
     if (!replay && !next)
     {
+        /* Out of sequence: a telegram was lost on the way. It is not taken;
+         * the acknowledge the other side asks for names the one that is
+         * missing, and the block comes again from there (SAE J2819 5.2,
+         * table 8). */
+        if (need)
+        {
+            send_ack(k, k->rx_last);
+        }
+
         return;
     }
 
     if (!replay)
     {
-        if (!k->asm_on)
+        /* A message is the data bytes of its telegrams, up to the telegram
+         * that says "end of message" (SAE J2819 5.2). The device does not
+         * look inside: where an ECU puts two length bytes in front, they
+         * reach the application with the rest (SAE J2534-2 19.3.1). One
+         * that is longer than a J2534 message is acknowledged all the way
+         * and not handed over. */
+        if (k->asm_got + pay_len > TP_PAYLOAD)
         {
-            uint32_t len = 0;
-            bool bad = n < 2;
-
-            if (!bad)
-            {
-                len = ((uint32_t)p[0] << 8 | p[1]) & 0x7FFFu;
-                bad = len > TP_PAYLOAD || (last && len > (uint32_t)(n - 2));
-            }
-
-            if (bad)
-            {
-                k->rx_last = seq;
-                k->have_rx = true;
-
-                if (need)
-                {
-                    send_ack(k, seq);
-                }
-
-                return;
-            }
-
-            k->asm_need = len;
-            k->asm_got = 0;
-            k->asm_on = true;
-            p += 2;
-            n = (uint8_t)(n - 2);
+            k->asm_over = true;
+        }
+        else if (pay_len > 0)
+        {
+            memcpy(k->asm_buf + k->asm_got, pay, pay_len);
+            k->asm_got += pay_len;
         }
 
-        if ((uint32_t)k->asm_got + n > TP_PAYLOAD)
-        {
-            k->asm_on = false;
-            return;
-        }
-
-        memcpy(k->asm_buf + k->asm_got, p, n);
-        k->asm_got += n;
         k->rx_last = seq;
         k->have_rx = true;
 
-        if (k->asm_got >= k->asm_need)
+        if (last)
         {
-            if (!k->ready_on)
+            if (k->asm_over)
             {
-                memcpy(k->ready, k->asm_buf, k->asm_need);
-                k->ready_len = k->asm_need;
-                k->ready_id = k->rx_id;
-                k->ready_on = true;
+                ESP_LOGW(TAG, "TP2.0 message dropped: longer than %u bytes",
+                         (unsigned)TP_PAYLOAD);
             }
-            else
+            else if (k->ready_on)
             {
                 ESP_LOGW(TAG, "TP2.0 message dropped: the tester has not read");
             }
+            else
+            {
+                memcpy(k->ready, k->asm_buf, k->asm_got);
+                k->ready_len = k->asm_got;
+                k->ready_id = k->rx_id;
+                k->ready_on = true;
+            }
 
-            k->asm_on = false;
             k->asm_got = 0;
-        }
-        else if (last)
-        {
-            k->asm_on = false;
-            k->asm_got = 0;
+            k->asm_over = false;
         }
     }
 
@@ -684,8 +667,6 @@ static void accept_data(tp_conn_t *k, uint8_t op, uint8_t seq,
     {
         send_ack(k, seq);
     }
-
-    k->last_activity_us = esp_timer_get_time();
 }
 
 static void on_a1(tp_conn_t *k, const uint8_t *d, uint8_t dlc)
@@ -739,7 +720,7 @@ static void on_conn_frame(j2534_channel_t *c, tp_conn_t *k,
                 return;
             }
 
-            if (id_busy(c->tp20, rx) || id_busy(c->tp20, tx))
+            if (id_busy(c->tp20, rx, k) || id_busy(c->tp20, tx, k))
             {
                 k->rx_id = rx;
                 k->tx_id = tx;
@@ -763,24 +744,35 @@ static void on_conn_frame(j2534_channel_t *c, tp_conn_t *k,
 
     if (d[0] == 0xA8)
     {
-        fail_link(c, k, 0, false);
+        /* a disconnect is answered with a disconnect (SAE J2819 6.2.11) */
+        fail_link(c, k, 0, true);
         return;
     }
 
     if (d[0] == 0xA3)
     {
-        /* An 0xA3 while we are waiting is the answer to ours. Answering
-         * that as well makes the two sides trade tests forever. */
-        bool reply_to_us = k->ct_waiting;
-        uint8_t ans = 0xA3;
-
+        /* A connection test is answered with a connection acknowledge,
+         * never with another test (SAE J2819 5.2, 6.2.9). It also shows
+         * the other side alive, so a test of ours counts as answered. */
         k->ct_waiting = false;
         k->ct_miss = 0;
-        k->last_activity_us = esp_timer_get_time();
 
-        if (!reply_to_us)
+        if (k->phase == TP_UP)
         {
-            (void)send_paced(k, &ans, 1);
+            (void)send_a1(c, k);
+        }
+
+        return;
+    }
+
+    if (d[0] == 0xA4)
+    {
+        /* A break (SAE J2819 5.2, 6.2.7): the other side stops the message
+         * this side is sending. The writer ends it; with no write under way
+         * there is nothing to stop. */
+        if (k->in_write)
+        {
+            k->break_seen = true;
         }
 
         return;
@@ -806,6 +798,12 @@ static void on_conn_frame(j2534_channel_t *c, tp_conn_t *k,
         {
             note_up(c, k);
         }
+        else
+        {
+            /* the answer to our connection test (SAE J2819 6.2.9) */
+            k->ct_waiting = false;
+            k->ct_miss = 0;
+        }
 
         return;
     }
@@ -823,7 +821,6 @@ static void on_conn_frame(j2534_channel_t *c, tp_conn_t *k,
         k->ack_op = op;
         k->ack_seq = seq;
         k->ack_fresh = true;
-        k->last_activity_us = esp_timer_get_time();
         return;
     }
 
@@ -896,7 +893,7 @@ static void on_passive(j2534_channel_t *c, const can_core_frame_t *fr)
     their_rx = unpack_id(d[2], d[3]);
 
     if (their_rx >= 0x300u && their_rx <= 0x7FFu && their_rx != our_rx &&
-        !id_busy(s, their_rx))
+        !id_busy(s, their_rx, NULL))
     {
         our_tx = their_rx;
     }
@@ -906,7 +903,8 @@ static void on_passive(j2534_channel_t *c, const can_core_frame_t *fr)
     }
 
     if (our_tx < 0x300u || our_tx > 0x7FFu || our_tx == our_rx ||
-        id_busy(s, our_tx) || id_busy(s, our_rx) || dest_busy(s, dest) ||
+        id_busy(s, our_tx, NULL) || id_busy(s, our_rx, NULL) ||
+        dest_busy(s, dest) ||
         arm_pass(c, our_rx, &fid) != J2534_STATUS_NOERROR)
     {
         reject_passive(resp, d);
@@ -1050,28 +1048,28 @@ static void tp_advance(j2534_channel_t *c)
             continue;
         }
 
-        if (k->phase != TP_UP || k->in_write || s->t_cta == 0)
+        /* The connection test (SAE J2819 5.2, table 7): one every T_CTa,
+         * whatever else the connection carries, answered with a connection
+         * acknowledge. A test still unanswered when the next one is due is
+         * a miss; after MNCT repeats the connection is closed (6.2.10). A
+         * write of ours holds the test back until its last telegram. */
+        if (k->phase != TP_UP || k->in_write || s->t_cta == 0 ||
+            now - k->last_ct_us < (int64_t)s->t_cta * 1000)
         {
             continue;
         }
 
         if (k->ct_waiting)
         {
-            if (now >= k->deadline_us)
+            k->ct_miss++;
+
+            if (k->ct_miss > s->mnct)
             {
-                k->ct_waiting = false;
-                k->ct_miss++;
-
-                if (s->mnct == 0 || k->ct_miss >= s->mnct)
-                {
-                    fail_link(c, k, 1, true);
-                }
+                fail_link(c, k, 1, true);
+                continue;
             }
-
-            continue;
         }
 
-        if (now - k->last_activity_us >= (int64_t)s->t_cta * 1000)
         {
             uint8_t test = 0xA3;
 
@@ -1081,7 +1079,7 @@ static void tp_advance(j2534_channel_t *c)
             }
 
             k->ct_waiting = true;
-            k->deadline_us = esp_timer_get_time() + (int64_t)s->t_e * 1000;
+            k->last_ct_us = esp_timer_get_time();
         }
     }
 }
@@ -1105,18 +1103,49 @@ static uint32_t ack_window_us(const j2534_channel_t *c, const tp_conn_t *k)
     return us;
 }
 
-static uint32_t wait_block_ack(j2534_channel_t *c, tp_conn_t *k,
-                               uint8_t sent_seq, const uint8_t *frame,
-                               uint8_t frame_len)
+/* What the wait behind an acknowledge request found. */
+enum {
+    TP_ACK_OK = 0,   /* the block is taken: go on behind it */
+    TP_ACK_AGAIN,    /* the other side names a telegram: from there again */
+    TP_ACK_BREAK,    /* a break came: end the message */
+    TP_ACK_FAILED,   /* the connection is gone or a send failed */
+};
+
+/* Frames that came while a write is under way: the answer to a connection
+ * test, a break, the other connections' telegrams. Nothing waits here. */
+static void drain_bus(j2534_channel_t *c)
+{
+    can_core_frame_t fr;
+
+    for (int n = 0; n < 8 && c->can_q != NULL &&
+                    xQueueReceive(c->can_q, &fr, 0) == pdTRUE; n++)
+    {
+        on_frame(c, &fr);
+    }
+}
+
+/* Wait for the acknowledge of the telegram @p sent_seq (SAE J2819 5.2,
+ * table 8, 6.2.3 to 6.2.8):
+ *   - an acknowledge with sent_seq + 1: the block is taken;
+ *   - an acknowledge with another sequence number names the telegram to
+ *     send again from (@p again_seq);
+ *   - "receiver not ready" is either of the two after T_WAIT (6.2.4, 6.2.6);
+ *   - none within T1: the telegram goes out again, MNT times (6.2.5), then
+ *     the connection is closed;
+ *   - a break ends the message (6.2.7, 6.2.8).
+ * On TP_ACK_FAILED @p status holds the J2534 status. */
+static int wait_block_ack(j2534_channel_t *c, tp_conn_t *k, uint8_t sent_seq,
+                          const uint8_t *frame, uint8_t frame_len,
+                          uint8_t *again_seq, uint32_t *status)
 {
     uint8_t expected = (uint8_t)((sent_seq + 1u) & 0x0Fu);
     uint32_t extras = 0;
 
+    *status = J2534_ERR_TIMEOUT;
+
     for (;;)
     {
         int64_t limit = esp_timer_get_time() + (int64_t)ack_window_us(c, k);
-        uint32_t notready = 0;
-        bool got = false;
 
         while (esp_timer_get_time() < limit)
         {
@@ -1126,7 +1155,7 @@ static uint32_t wait_block_ack(j2534_channel_t *c, tp_conn_t *k,
 
             if (k->phase == TP_FREE)
             {
-                return J2534_ERR_TIMEOUT;
+                return TP_ACK_FAILED;
             }
 
             tp_advance(c);
@@ -1155,7 +1184,12 @@ static uint32_t wait_block_ack(j2534_channel_t *c, tp_conn_t *k,
 
             if (k->phase == TP_FREE)
             {
-                return J2534_ERR_TIMEOUT;
+                return TP_ACK_FAILED;
+            }
+
+            if (k->break_seen)
+            {
+                return TP_ACK_BREAK;
             }
 
             if (!k->ack_fresh)
@@ -1163,47 +1197,30 @@ static uint32_t wait_block_ack(j2534_channel_t *c, tp_conn_t *k,
                 continue;
             }
 
-            if (k->ack_op == 0xBu && k->ack_seq == expected)
+            if (k->ack_op == 0x9u && c->tp20->t_wait > 0)
             {
-                got = true;
-                break;
+                wait_until(esp_timer_get_time() +
+                           (int64_t)c->tp20->t_wait * 1000);
             }
 
-            if (k->ack_op == 0x9u &&
-                (k->ack_seq == expected || k->ack_seq == sent_seq))
+            if (k->ack_seq == expected)
             {
-                notready++;
-
-                if (notready > c->tp20->mntb)
-                {
-                    fail_link(c, k, 1, true);
-                    return J2534_ERR_TIMEOUT;
-                }
-
-                if (c->tp20->t_wait > 0)
-                {
-                    wait_until(esp_timer_get_time() +
-                               (int64_t)c->tp20->t_wait * 1000);
-                }
-
-                limit = esp_timer_get_time() + (int64_t)ack_window_us(c, k);
+                return TP_ACK_OK;
             }
-        }
 
-        if (got)
-        {
-            return J2534_STATUS_NOERROR;
+            *again_seq = k->ack_seq;
+            return TP_ACK_AGAIN;
         }
 
         if (k->phase == TP_FREE)
         {
-            return J2534_ERR_TIMEOUT;
+            return TP_ACK_FAILED;
         }
 
         if (extras >= c->tp20->mnt)
         {
             fail_link(c, k, 1, true);
-            return J2534_ERR_TIMEOUT;
+            return TP_ACK_FAILED;
         }
 
         extras++;
@@ -1211,12 +1228,45 @@ static uint32_t wait_block_ack(j2534_channel_t *c, tp_conn_t *k,
 
         if (!send_paced(k, frame, frame_len))
         {
-            return J2534_ERR_FAILED;
+            *status = J2534_ERR_FAILED;
+            return TP_ACK_FAILED;
         }
     }
 }
 
-static uint32_t send_broadcast(j2534_channel_t *c, const j2534_msg_t *msg)
+/* A break stops the message (SAE J2819 5.2, 6.2.7): one data telegram with
+ * the end-of-message bit and an acknowledge request and nothing behind it.
+ * The connection stays; the write has failed. */
+static uint32_t end_after_break(j2534_channel_t *c, tp_conn_t *k, uint8_t seq)
+{
+    uint8_t eom = (uint8_t)(0x10u | (seq & 0x0Fu));
+    uint8_t again_seq = 0;
+    uint32_t st = J2534_ERR_FAILED;
+
+    k->break_seen = false;
+    ESP_LOGW(TAG, "the write to 0x%03lx was ended by a break",
+             (unsigned long)k->tx_id);
+
+    if (send_paced(k, &eom, 1))
+    {
+        (void)wait_block_ack(c, k, seq, &eom, 1, &again_seq, &st);
+    }
+
+    if (k->phase == TP_UP)
+    {
+        k->tx_seq = (uint8_t)((seq + 1u) & 0x0Fu);
+        k->break_seen = false;
+    }
+
+    k->in_write = false;
+    return J2534_ERR_FAILED;
+}
+
+/* Telegrams @p first to @p first + @p count - 1 of one broadcast request,
+ * T_BR_INT apart. The two key bytes behind the request are equal and change
+ * with every telegram: 0x5555, 0xAAAA, 0x5555 .. (SAE J2819 5.1.2). */
+static uint32_t send_broadcast(j2534_channel_t *c, const j2534_msg_t *msg,
+                               uint32_t first, uint32_t count)
 {
     uint8_t dlc;
     uint8_t frame[8];
@@ -1246,11 +1296,13 @@ static uint32_t send_broadcast(j2534_channel_t *c, const j2534_msg_t *msg)
 
     when = esp_timer_get_time();
 
-    for (int i = 0; i < 5; i++)
+    for (uint32_t i = 0; i < count; i++)
     {
+        uint8_t key = j2534_tp20_broadcast_key(first + i);
+
         wait_until(when);
-        frame[dlc - 2] = (i & 1) ? 0xAA : 0x55;
-        frame[dlc - 1] = (i & 1) ? 0x55 : 0xAA;
+        frame[dlc - 2] = key;
+        frame[dlc - 1] = key;
 
         if (!can_tx(id, ext, frame, dlc))
         {
@@ -1265,30 +1317,47 @@ static uint32_t send_broadcast(j2534_channel_t *c, const j2534_msg_t *msg)
 
 static uint32_t segment(j2534_channel_t *c, tp_conn_t *k, const j2534_msg_t *msg)
 {
-    const uint8_t *kwp = msg->data + 4;
-    size_t kwp_len = msg->data_size - 4;
-    size_t total = kwp_len + 2;
+    /* The message goes to the bus as written, nothing put in front of it
+     * (SAE J2534-2 19.3.1); the id alone is one empty end-of-message
+     * telegram. */
+    const uint8_t *data = msg->data + 4;
+    size_t total = msg->data_size - 4;
     size_t offset = 0;
-    unsigned block = 0;
-    uint8_t seq = k->tx_seq;
+    size_t block_off = 0;           /* where the block under way began */
+    uint8_t block_seq = k->tx_seq;  /* the sequence number of its first telegram */
+    uint32_t trouble = 0;           /* times this block was asked for again */
     uint8_t bs = (k->ecu_bs >= 1 && k->ecu_bs <= 15) ? k->ecu_bs : 15;
 
-    if (kwp_len > 0)
+    /* Counted on the status, never refused. A VW ECU's message begins with
+     * its two length bytes, so the service id is the third byte. */
+    if (total > 2)
     {
-        j2534_ch_note_reflash(kwp[0]);
+        j2534_ch_note_reflash(data[2]);
     }
 
     k->in_write = true;
     k->ack_fresh = false;
+    k->break_seen = false;
 
-    while (offset < total)
+    /* Every telegram carries seven bytes but the message's last, so telegram
+     * number j of a block starts at block_off + 7 j and has the sequence
+     * number block_seq + j. That is what a "send again from" needs. The
+     * last telegram always asks for an acknowledge, and the loop ends when
+     * it has come. */
+    for (;;)
     {
-        uint8_t n;
+        unsigned in_block = (unsigned)((offset - block_off) / 7u);
+        uint8_t seq = (uint8_t)((block_seq + in_block) & 0x0Fu);
+        uint8_t n = (uint8_t)((total - offset) > 7 ? 7 : (total - offset));
+        bool last = (offset + n) >= total;
+        bool need = (in_block + 1u >= bs) || last;
+        uint8_t op = need ? (last ? 0x1u : 0x0u) : (last ? 0x3u : 0x2u);
         uint8_t frame[8];
-        bool last;
-        bool need;
-        uint8_t op;
-        uint32_t st;
+        uint8_t again_seq = 0;
+        uint32_t st = J2534_ERR_TIMEOUT;
+        int found;
+
+        drain_bus(c);
 
         if (k->phase != TP_UP)
         {
@@ -1296,16 +1365,16 @@ static uint32_t segment(j2534_channel_t *c, tp_conn_t *k, const j2534_msg_t *msg
             return J2534_ERR_TIMEOUT;
         }
 
-        n = (uint8_t)((total - offset) > 7 ? 7 : (total - offset));
-        last = (offset + n) >= total;
-        block++;
-        need = block >= bs || last;
-        op = need ? (last ? 0x1u : 0x0u) : (last ? 0x3u : 0x2u);
-        frame[0] = (uint8_t)((op << 4) | (seq & 0x0Fu));
-
-        for (uint8_t i = 0; i < n; i++)
+        if (k->break_seen)
         {
-            frame[1 + i] = wire_byte(kwp, kwp_len, offset + i);
+            return end_after_break(c, k, seq);
+        }
+
+        frame[0] = (uint8_t)((op << 4) | seq);
+
+        if (n > 0)
+        {
+            memcpy(frame + 1, data + offset, n);
         }
 
         k->ack_fresh = false;
@@ -1316,26 +1385,57 @@ static uint32_t segment(j2534_channel_t *c, tp_conn_t *k, const j2534_msg_t *msg
             return J2534_ERR_FAILED;
         }
 
-        if (need)
+        if (!need)
         {
-            st = wait_block_ack(c, k, seq, frame, (uint8_t)(1u + n));
-
-            if (st != J2534_STATUS_NOERROR)
-            {
-                k->in_write = false;
-                return st;
-            }
-
-            block = 0;
+            offset += n;
+            continue;
         }
 
-        offset += n;
-        seq = (uint8_t)((seq + 1u) & 0x0Fu);
-        k->tx_seq = seq;
+        found = wait_block_ack(c, k, seq, frame, (uint8_t)(1u + n),
+                               &again_seq, &st);
+
+        if (found == TP_ACK_OK)
+        {
+            offset += n;
+            block_off = offset;
+            block_seq = (uint8_t)((seq + 1u) & 0x0Fu);
+            k->tx_seq = block_seq;
+            trouble = 0;
+
+            if (last)
+            {
+                break;
+            }
+        }
+        else if (found == TP_ACK_AGAIN)
+        {
+            /* The telegram named has to be one of this block, and a block
+             * is asked for again MNTB times at most (SAE J2819 table 8). */
+            int from = j2534_tp20_resend_from(seq, in_block, again_seq);
+
+            trouble++;
+
+            if (from < 0 || trouble > c->tp20->mntb)
+            {
+                fail_link(c, k, 1, true);
+                k->in_write = false;
+                return J2534_ERR_TIMEOUT;
+            }
+
+            offset = block_off + (size_t)from * 7u;
+        }
+        else if (found == TP_ACK_BREAK)
+        {
+            return end_after_break(c, k, (uint8_t)((seq + 1u) & 0x0Fu));
+        }
+        else
+        {
+            k->in_write = false;
+            return st;
+        }
     }
 
     k->in_write = false;
-    k->last_activity_us = esp_timer_get_time();
     return J2534_STATUS_NOERROR;
 }
 
@@ -1361,7 +1461,7 @@ uint32_t j2534_tp20_write(struct j2534_channel *c, const j2534_msg_t *msg,
 
     if ((msg->tx_flags & J2534_TX_TP2_0_BROADCAST) != 0)
     {
-        return send_broadcast(c, msg);
+        return send_broadcast(c, msg, 0, TP_BROADCAST_N);
     }
 
     ext = (msg->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
@@ -1394,6 +1494,30 @@ uint32_t j2534_tp20_write(struct j2534_channel *c, const j2534_msg_t *msg,
     return can_tx(id, ext, msg->data + 4, (uint8_t)plen)
                ? J2534_STATUS_NOERROR
                : J2534_ERR_FAILED;
+}
+
+uint32_t j2534_tp20_write_periodic(struct j2534_channel *c,
+                                   const j2534_msg_t *msg, uint32_t tick)
+{
+    if (c->tp20 == NULL || msg == NULL)
+    {
+        return J2534_ERR_INVALID_MSG;
+    }
+
+    if ((msg->tx_flags & J2534_TX_TP2_0_BROADCAST) == 0)
+    {
+        return j2534_tp20_write(c, msg, false);
+    }
+
+    /* The re-triggered broadcast (SAE J2534-2 19.3.2.3, SAE J2819 5.1.2):
+     * the five at once, then ONE telegram per period, the key going on
+     * where the five left it. */
+    if (tick == 0)
+    {
+        return send_broadcast(c, msg, 0, TP_BROADCAST_N);
+    }
+
+    return send_broadcast(c, msg, TP_BROADCAST_N - 1u + tick, 1);
 }
 
 /* ---- ioctl ------------------------------------------------------------ */
@@ -1578,8 +1702,8 @@ static uint32_t ioctl_request(j2534_channel_t *c, const uint8_t *body,
 {
     const uint8_t *b;
     uint32_t setup_id;
-    uint32_t rx;
-    uint32_t tx;
+    uint32_t tx_a;
+    uint32_t rx_a;
     uint32_t fid = 0;
     uint32_t st;
     uint8_t dest;
@@ -1605,12 +1729,13 @@ static uint32_t ioctl_request(j2534_channel_t *c, const uint8_t *body,
     }
 
     dest = b[4];
-    rx = unpack_id(b[6], b[7]);
-    tx = unpack_id(b[8], b[9]);
+    /* BytePtr[6..7] is TX-ID-A, BytePtr[8..9] is RX-ID-A (SAE J2534-2 table
+     * 78); bit 4 of the high byte says the id is not given. */
+    tx_a = ((b[7] & 0x10) == 0) ? unpack_id(b[6], b[7]) : 0;
+    rx_a = ((b[9] & 0x10) == 0) ? unpack_id(b[8], b[9]) : 0;
 
-    if (dest_busy(c->tp20, dest) ||
-        (((b[7] & 0x10) == 0) && rx != 0 && id_busy(c->tp20, rx)) ||
-        (((b[9] & 0x10) == 0) && tx != 0 && id_busy(c->tp20, tx)))
+    if (dest_busy(c->tp20, dest) || id_busy(c->tp20, tx_a, NULL) ||
+        id_busy(c->tp20, rx_a, NULL))
     {
         return J2534_ERR_NOT_UNIQUE;
     }
@@ -1636,6 +1761,9 @@ static uint32_t ioctl_request(j2534_channel_t *c, const uint8_t *body,
     k->dest = dest;
     k->setup_id = setup_id;
     k->resp_id = 0x200u + dest;
+    /* The RX id asked for: a request that fails is reported with it (SAE
+     * J2534-2 19.3.3.2). The channel acknowledge's own word replaces it. */
+    k->rx_id = rx_a;
     k->ecu_bs = 15;
     k->have_filter = true;
     k->filter_id = fid;
@@ -1649,8 +1777,7 @@ static uint32_t ioctl_request(j2534_channel_t *c, const uint8_t *body,
     }
 
     k->tries = 1;
-    k->last_activity_us = esp_timer_get_time();
-    k->deadline_us = k->last_activity_us + (int64_t)c->tp20->t_e * 1000;
+    k->deadline_us = esp_timer_get_time() + (int64_t)c->tp20->t_e * 1000;
     return J2534_STATUS_NOERROR;
 }
 

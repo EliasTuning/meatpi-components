@@ -76,9 +76,10 @@ enum {
     J2534_ERR_NO_FLOW_CONTROL         = 0x16,
     J2534_ERR_NOT_UNIQUE              = 0x17,
     J2534_ERR_INVALID_BAUDRATE        = 0x18,
-    J2534_ERR_NO_CONNECTION_ESTABLISHED = 0x1D,
     J2534_ERR_INVALID_DEVICE_ID       = 0x19,
     J2534_ERR_DEVICE_IN_USE           = 0x1A, /* WiCAN: second tester */
+    /* SAE J2534-2 table 123: its own return values start at 0x10000. */
+    J2534_ERR_NO_CONNECTION_ESTABLISHED = 0x00010001,
 };
 
 /* ---- filter types ----------------------------------------------------- */
@@ -144,11 +145,21 @@ enum {
     J2534_CFG_TP2_0_IDENTIFIER = 0x804E,
     J2534_CFG_TP2_0_RXIDPASSIVE = 0x804F,
 };
-/* GET_DEVICE_INFO parameters. TP2_0_PS_J1962 is 1: pins 6 and 14 only. */
+/* GET_DEVICE_INFO parameters (SAE J2534-2 table 121), the ones answered. */
 enum {
-    J2534_DEV_TP2_0_SUPPORTED = 0x13,
-    J2534_DEV_TP2_0_PS_J1962  = 0x28,
+    J2534_DEV_J1850VPW_SUPPORTED    = 0x03,
+    J2534_DEV_CAN_SUPPORTED         = 0x06,
+    J2534_DEV_ISO15765_SUPPORTED    = 0x07,
+    J2534_DEV_TP2_0_SUPPORTED       = 0x13,
+    J2534_DEV_TP2_0_PS_J1962        = 0x28,
+    J2534_DEV_J1850VPW_SIMULTANEOUS = 0x36,
+    J2534_DEV_CAN_SIMULTANEOUS      = 0x39,
+    J2534_DEV_ISO15765_SIMULTANEOUS = 0x3A,
+    J2534_DEV_TP2_0_SIMULTANEOUS    = 0x46,
 };
+
+/** Most parameters one GET_DEVICE_INFO request carries (the ACK's size). */
+#define J2534_DEV_INFO_MAX 16
 
 /* ---- wire framing ----------------------------------------------------- */
 #define J2534_MAGIC        0x4A35u   /* "J5" */
@@ -430,6 +441,38 @@ uint32_t j2534_tp20_decode_us(uint8_t wire);
  * 0 stays 0. 500 stays 500.
  */
 uint32_t j2534_tp20_round_gap_us(uint32_t us);
+
+/**
+ * The key byte of telegram number @p n (from 0) of one broadcast request.
+ * Both key bytes of a telegram carry it: 0x55 0x55 first, then 0xAA 0xAA,
+ * changing with every telegram sent (SAE J2819 5.1.2).
+ */
+uint8_t j2534_tp20_broadcast_key(uint32_t n);
+
+/**
+ * Where a block is sent again from (SAE J2819 5.2: an acknowledge whose
+ * sequence number is not the last telegram's plus one names the telegram
+ * to go back to). The telegram that asked for the acknowledge had the
+ * sequence number @p sent_seq and was telegram number @p in_block (from 0)
+ * of its block; the acknowledge carries @p ack_seq.
+ * @return the number of the telegram in the block to send again from
+ * (0 .. in_block), or -1 when the acknowledge names no telegram of this
+ * block (also for sent_seq + 1, which is the plain acknowledge).
+ */
+int j2534_tp20_resend_from(uint8_t sent_seq, unsigned in_block, uint8_t ack_seq);
+
+/**
+ * One GET_DEVICE_INFO parameter (SAE J2534-2 section 25, table 111).
+ * @p value is the caller's Value: an output for the *_SUPPORTED and
+ * *_SIMULTANEOUS parameters (0xPPQQRRSS), an input for TP2_0_PS_J1962
+ * (the pin bitmap asked about: CAN-H in the high word, CAN-L in the low
+ * word, bit 0 = pin 1) and left alone there.
+ * @return what goes into Supported: true when the device has the
+ * parameter, or for TP2_0_PS_J1962 when it has those pins. A parameter
+ * the device does not know returns false with @p value untouched; the
+ * request as a whole is still STATUS_NOERROR.
+ */
+bool j2534_device_info(uint32_t param, uint32_t *value);
 
 #ifdef __cplusplus
 }

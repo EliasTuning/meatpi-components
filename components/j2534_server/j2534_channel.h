@@ -96,8 +96,14 @@ bool j2534_channel_active(int slot);
  */
 uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg);
 
-/** The same for a periodic message: no TxDone indication (SAE J2534-1). */
-uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg);
+/**
+ * The same for a periodic message: no TxDone indication (SAE J2534-1).
+ * @p tick counts the firings of that periodic message, 0 for the one sent
+ * as it is started. Only a TP2.0 broadcast reads it (the re-triggered
+ * broadcast sends five telegrams at tick 0 and one per tick after).
+ */
+uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
+                                      uint32_t tick);
 
 /**
  * Add a filter. PASS/BLOCK (both protocols): matched in the RX pump over
