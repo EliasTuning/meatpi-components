@@ -66,10 +66,10 @@
 
 static const char *TAG = "data_destinations";
 
-/* 8192 words = 32 KB PSRAM (the ha_webhooks poster's figure): TLS
- * handshakes run on the caller's stack (>= 8 KB, http_client_manager
- * contract) under an already-deep cJSON build. */
-#define DD_STACK_WORDS 8192
+/* The poster's stack in BYTES (StackType_t is one byte on xtensa), PSRAM:
+ * TLS handshakes run on the caller's stack under an already-deep cJSON
+ * build. 8 KB until 2026-11-16, written down as 32 (the README, Memory). */
+#define DD_STACK_BYTES (32 * 1024)
 #define DD_TEST_WAIT_MS 20000
 
 static dd_config_t s_cfg EXT_RAM_BSS_ATTR;
@@ -81,7 +81,7 @@ static StaticSemaphore_t s_lock_buf;
 
 static TaskHandle_t  s_task;
 static StaticTask_t  s_tcb;
-static StackType_t   s_stack[DD_STACK_WORDS] EXT_RAM_BSS_ATTR;
+static StackType_t   s_stack[DD_STACK_BYTES] EXT_RAM_BSS_ATTR;
 static volatile bool s_run;
 
 /* one-shot test job: index in, result out, signalled by the poster */
@@ -702,7 +702,7 @@ esp_err_t data_destinations_start(void)
              (unsigned)n, (unsigned)on);
 
     s_run = true;
-    s_task = xTaskCreateStatic(poster_task, "data_dest", DD_STACK_WORDS,
+    s_task = xTaskCreateStatic(poster_task, "data_dest", DD_STACK_BYTES,
                                NULL, 4, s_stack, &s_tcb);
     return s_task != NULL ? ESP_OK : ESP_ERR_NO_MEM;
 }

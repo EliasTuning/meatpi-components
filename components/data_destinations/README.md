@@ -196,6 +196,14 @@ array rows by `name` (rows may be reordered or deleted), then by index.
 PSRAM `.bss`: the applied table (8 × ~1.3 KB ≈ 10.6 KB) + the settings
 parse scratch (another ~10.6 KB) + the 32 KB poster stack + ~1 KB of
 state; internal RAM: the TCB, two static semaphores, ~100 B of flags.
+The poster's stack is 32 KB since 2026-11-16 (`DD_STACK_BYTES`). Until
+then it was 8 KB: the define read `8192` under a comment that counted
+words, and `StackType_t` is one byte on xtensa (the slip `ha_webhooks`
+had). **Measured 2026-11-16** with live https posts to ABRP
+(`.\test.ps1 abrp`, the stack's high-water mark): 2,916 B left on the
+8 KB stack, 27,492 B left on the 32 KB one, so 5,276 B in use both times
+(780 B of them at an idle boot). The static audit reads `32768 PSRAM
+data_dest`.
 Heap (PSRAM, transient per delivery): the snapshot JSON (≤ ~6 KB for a
 192-parameter profile), the first HTTP push's `config` copy (the PID
 tables, up to ~100 KB for the widest profiles), ABRP form body ≤ 3 ×
