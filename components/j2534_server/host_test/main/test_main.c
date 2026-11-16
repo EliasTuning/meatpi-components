@@ -511,6 +511,23 @@ static void test_status_name_exceeded_limit(void)
                              j2534_status_name(J2534_ERR_EXCEEDED_LIMIT));
 }
 
+/* TP2.0 timing byte: 40 ms is the 0x68 MED9 puts on the wire today. */
+static void test_tp20_time_byte(void)
+{
+    TEST_ASSERT_EQUAL_HEX8(0x68, j2534_tp20_encode_ms(40));
+    TEST_ASSERT_EQUAL_HEX8(0x00, j2534_tp20_encode_ms(0));
+    TEST_ASSERT_EQUAL_HEX8(0x0A, j2534_tp20_encode_ms(1));
+    TEST_ASSERT_EQUAL_UINT32(40000, j2534_tp20_decode_us(0x68));
+    TEST_ASSERT_EQUAL_UINT32(0, j2534_tp20_round_gap_us(0));
+    TEST_ASSERT_EQUAL_UINT32(500, j2534_tp20_round_gap_us(100));
+    TEST_ASSERT_EQUAL_UINT32(500, j2534_tp20_round_gap_us(500));
+    TEST_ASSERT_EQUAL_UINT32(1000, j2534_tp20_round_gap_us(501));
+    TEST_ASSERT_EQUAL_STRING("ERR_INVALID_IOCTL_VALUE",
+                             j2534_status_name(J2534_ERR_INVALID_IOCTL_VALUE));
+    TEST_ASSERT_EQUAL_STRING("ERR_NO_CONNECTION_ESTABLISHED",
+                             j2534_status_name(J2534_ERR_NO_CONNECTION_ESTABLISHED));
+}
+
 /* ---- J1850 VPW (legacy, OBD chip) helpers ------------------------------ */
 
 static void test_legacy_split(void)
@@ -684,6 +701,7 @@ void app_main(void)
     RUN_TEST(test_iso_single_frame_build);
     RUN_TEST(test_iso_single_frame_parse);
     RUN_TEST(test_status_name_exceeded_limit);
+    RUN_TEST(test_tp20_time_byte);
     RUN_TEST(test_legacy_split);
     RUN_TEST(test_legacy_header_and_checksum);
     RUN_TEST(test_legacy_build_request);

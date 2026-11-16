@@ -51,7 +51,7 @@
 
 #include "j2534_proto.h"
 
-#define J2534_CH_MAX_FILTERS  8
+#define J2534_CH_MAX_FILTERS  10  /* SAE minimum; a TP2.0 link takes one */
 #define J2534_CH_MAX_SESSIONS 4   /* ISO-TP sessions (ECUs) per channel */
 
 void j2534_channel_init(void);          /* one-time: mutex, the bus queues */
@@ -124,3 +124,16 @@ void j2534_channel_clear_filters(int slot);
  * across all active channels and pushes RX_MSG frames.
  */
 bool j2534_channel_poll_rx(int slot, j2534_msg_t *out);
+
+/** True when @p slot is an open TP2.0 channel (protocol 0x800E). */
+bool j2534_channel_is_tp20(int slot);
+
+/**
+ * Channel ioctl. SET/GET_CONFIG on a CAN or ISO15765 channel stay a
+ * best-effort success (the bus rate comes from can_manager). TP2.0
+ * applies the body. GET_CONFIG's filled pairs land in @p out.
+ */
+uint32_t j2534_channel_ioctl(int slot, uint32_t ioctl_id,
+                             const uint8_t *body, uint32_t body_len,
+                             uint8_t *out, uint32_t out_cap,
+                             uint32_t *out_len);
